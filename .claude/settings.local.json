@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(/c/Python313/python.exe -m streamlit:*)",
+      "Bash(/c/Python313/python.exe -m pytest:*)",
+      "Bash(/c/Python313/python.exe:*)",
+      "Bash(python:*)"
+    ]
+  }
+}
