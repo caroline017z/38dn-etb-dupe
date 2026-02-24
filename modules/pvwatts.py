@@ -2,11 +2,12 @@
 PVWatts v8 API integration for solar production 8760 generation.
 """
 
+import os
 import requests
 import pandas as pd
 import numpy as np
-from geopy.geocoders import Nominatim
 from dataclasses import dataclass
+from functools import lru_cache
 
 
 @dataclass
@@ -18,18 +19,56 @@ class PVSystemConfig:
     module_type: int = 0  # 0 = standard, 1 = premium, 2 = thin film
 
 
-def geocode_address(address: str) -> tuple[float, float]:
-    """Convert address string to (lat, lon). Appends ', CA' if not present."""
-    if "CA" not in address.upper() and "CALIFORNIA" not in address.upper():
-        address = f"{address}, CA"
+def _geocode_google(address: str, api_key: str) -> tuple[float, float]:
+    """Geocode via Google Maps Geocoding API."""
+    resp = requests.get(
+        "https://maps.googleapis.com/maps/api/geocode/json",
+        params={"address": address, "key": api_key},
+        timeout=10,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    if data["status"] != "OK" or not data.get("results"):
+        raise ValueError(
+            f"Google geocoding failed (status={data['status']}): {address}"
+        )
+    loc = data["results"][0]["geometry"]["location"]
+    return loc["lat"], loc["lng"]
+
+
+def _geocode_nominatim(address: str) -> tuple[float, float]:
+    """Geocode via Nominatim (free OSM fallback)."""
+    from geopy.geocoders import Nominatim
+    from geopy.exc import GeocoderServiceError, GeocoderTimedOut
 
     geolocator = Nominatim(user_agent="pv-rate-sim", timeout=10)
-    location = geolocator.geocode(address)
+    try:
+        location = geolocator.geocode(address)
+    except GeocoderTimedOut:
+        raise ValueError("Geocoding timed out. Please try again.")
+    except GeocoderServiceError as e:
+        raise ValueError(f"Geocoding service unavailable: {e}")
 
     if location is None:
         raise ValueError(f"Could not geocode address: {address}")
 
     return location.latitude, location.longitude  # type: ignore[union-attr]
+
+
+@lru_cache(maxsize=128)
+def geocode_address(address: str) -> tuple[float, float]:
+    """Convert address string to (lat, lon).
+
+    Uses Google Maps Geocoding API if GOOGLE_MAPS_API_KEY is set in the
+    environment, otherwise falls back to Nominatim (OSM).
+    """
+    if "CA" not in address.upper() and "CALIFORNIA" not in address.upper():
+        address = f"{address}, CA"
+
+    google_key = os.environ.get("GOOGLE_MAPS_API_KEY")
+    if google_key:
+        return _geocode_google(address, google_key)
+    return _geocode_nominatim(address)
 
 
 def fetch_production_8760(

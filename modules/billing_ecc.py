@@ -156,7 +156,7 @@ def run_ecc_billing_simulation(
     Export credits are calculated separately (ECC does not handle exports).
     """
     load = load_8760.values
-    solar = production_8760.values
+    solar = np.asarray(production_8760)
     export_rates = export_rates_8760.values
     n_hours = len(load)
     assert n_hours == 8760, f"Expected 8760 hours, got {n_hours}"

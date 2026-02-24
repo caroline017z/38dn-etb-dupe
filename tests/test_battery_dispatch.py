@@ -247,7 +247,9 @@ class TestExportFraction:
         )
         assert r.solver_status in (cp.OPTIMAL, cp.OPTIMAL_INACCURATE)
 
-        total_disch = r.batt_discharge_to_load_kwh + r.batt_discharge_to_grid_kwh
+        total_disch = (r.batt_discharge_to_load_kwh
+                       + r.batt_discharge_to_grid_kwh
+                       + r.batt_curtailed_kwh)
         active = total_disch > TOL
         if active.any():
             ratio = r.batt_discharge_to_grid_kwh[active] / total_disch[active]
@@ -273,7 +275,9 @@ class TestExportFraction:
         )
         assert r.solver_status in (cp.OPTIMAL, cp.OPTIMAL_INACCURATE)
 
-        total_disch = r.batt_discharge_to_load_kwh + r.batt_discharge_to_grid_kwh
+        total_disch = (r.batt_discharge_to_load_kwh
+                       + r.batt_discharge_to_grid_kwh
+                       + r.batt_curtailed_kwh)
         active = total_disch > TOL
         if active.any():
             ratio = r.batt_discharge_to_grid_kwh[active] / total_disch[active]
@@ -580,3 +584,85 @@ class TestMonthlyDecomposition:
         assert np.all(r.soc_kwh <= max_s + TOL), (
             f"SOC max violation: {r.soc_kwh.max():.4f} > {max_s}"
         )
+
+
+# ---------------------------------------------------------------------------
+# 10. Zero-load export with curtailment
+# ---------------------------------------------------------------------------
+class TestZeroLoadExport:
+    """Battery must be able to export with zero on-site load, curtailing
+    the non-exportable fraction."""
+
+    def test_export_with_zero_load(self):
+        """With zero load, battery charges from PV and exports during
+        discharge window.  With 80% discharge_limit_pct the LP should
+        curtail 20% of discharge and export the remaining 80%.
+
+        Uses a price differential (low export during PV hours, high
+        during evening) to give the battery an economic incentive to
+        shift energy from daytime to evening export.
+        """
+        N = 48
+        pv = np.zeros(N)
+        pv[8:16] = 10.0   # 80 kWh of PV across 8 hours
+        load = np.zeros(N)  # no on-site load at all
+
+        # Export price: low during PV hours, higher during discharge window
+        # (but still below import_price to prevent unbounded grid arbitrage)
+        exp_price = np.full(N, 0.03)
+        hours = np.arange(N) % 24
+        exp_price[(hours >= 16) & (hours <= 23)] = 0.20
+
+        cap = 40.0
+        cfg = _cfg(
+            discharge_limit_pct=80.0,
+            charge_start=8, charge_end=15,
+            discharge_start=16, discharge_end=23,
+        )
+
+        r = dispatch_battery(
+            pv_kwh=pv, load_kwh=load,
+            import_price=np.full(N, 0.25),
+            export_price=exp_price,
+            demand_window_masks={}, demand_prices={},
+            battery_config=cfg, capacity_kwh=cap,
+        )
+        assert r.solver_status in (cp.OPTIMAL, cp.OPTIMAL_INACCURATE)
+
+        total_export = float(r.batt_discharge_to_grid_kwh.sum())
+        total_curtailed = float(r.batt_curtailed_kwh.sum())
+        total_to_load = float(r.batt_discharge_to_load_kwh.sum())
+
+        # With zero load, batt_to_load must be zero
+        assert total_to_load < TOL, (
+            f"batt_to_load should be ~0 with zero load, got {total_to_load:.4f}"
+        )
+
+        # Battery should actually export (the whole point of this fix)
+        assert total_export > 1.0, (
+            f"Battery should export energy with zero load, got {total_export:.4f}"
+        )
+
+        # Curtailment should be non-zero (20% of what's discharged)
+        assert total_curtailed > TOL, (
+            f"Expected non-zero curtailment, got {total_curtailed:.4f}"
+        )
+
+        # Export fraction: grid_export / (grid_export + curtailed) should be ~0.80
+        total_disch = total_export + total_curtailed
+        if total_disch > TOL:
+            export_ratio = total_export / total_disch
+            assert abs(export_ratio - 0.80) < 0.02, (
+                f"Export ratio should be ~0.80, got {export_ratio:.4f}"
+            )
+
+        # Energy balance: curtailed energy is NOT in grid balance
+        net_load = load - pv
+        balance = (
+            r.grid_import_kwh - r.grid_export_kwh
+            - net_load
+            - r.batt_charge_kwh
+            + r.batt_discharge_to_load_kwh
+            + r.batt_discharge_to_grid_kwh
+        )
+        np.testing.assert_allclose(balance, 0.0, atol=TOL)

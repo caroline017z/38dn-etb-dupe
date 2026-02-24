@@ -185,6 +185,11 @@ def build_monthly_summary_display(
         "net_bill": "Net Bill ($)",
     })
 
+    # Negate export_credit so it displays as a negative value in the table,
+    # making the equation visible: Energy + Demand + Fixed + Export Credit = Net Bill
+    if "export_credit" in df.columns:
+        df["export_credit"] = -df["export_credit"]
+
     # Only include columns that exist
     display_cols = [c for c in display_cols if c in df.columns]
     df = df[display_cols].rename(columns=rename_map)
@@ -466,6 +471,7 @@ def build_annual_projection(
             yr_nbc = 0.0
 
         yr_bill_solar = yr_energy + yr_demand + yr_fixed + yr_nbc - yr_export
+        yr_export_display = -yr_export  # negative for display
 
         # Baseline (no solar): load grows and rates increase
         yr_baseline_energy = year1_baseline_energy * load_factor * rate_factor
@@ -501,7 +507,7 @@ def build_annual_projection(
         if _any_nem2 or year1_nbc > 0:
             row["NBC ($)"] = round(yr_nbc)
         row.update({
-            "Export Credit ($)": round(yr_export),
+            "Export Credit ($)": round(yr_export_display),
             "Bill w/ Solar ($)": round(yr_bill_solar),
             "Annual Savings ($)": round(yr_savings),
             "Cumulative Savings ($)": round(cumulative_savings),
@@ -542,6 +548,11 @@ def generate_hourly_csv(result: BillingResult, cod_date=None) -> str:
     df = result.hourly_detail.copy()
     if cod_date is not None:
         df = df[df.index >= pd.Timestamp(cod_date)]
+    if "export_kwh" in df.columns and "export_credit" in df.columns:
+        exp = df["export_kwh"]
+        df["value_of_energy_dollar_per_kwh"] = np.where(
+            exp > 0, df["export_credit"] / exp, 0.0,
+        )
     df.index.name = "datetime"
     buf = StringIO()
     df.to_csv(buf)
@@ -729,12 +740,12 @@ def _build_multiyear_monthly_df(
                 r["NBC ($)"] = _m_nbc
 
             if month_export_credit_override is not None:
-                r["Export Credit ($)"] = round(month_export_credit_override[m] * _prorate, 2)
+                r["Export Credit ($)"] = -round(month_export_credit_override[m] * _prorate, 2)
             else:
-                r["Export Credit ($)"] = round(mrow["export_credit"] * rate_factor * volume_ratio * _prorate, 2)
+                r["Export Credit ($)"] = -round(mrow["export_credit"] * rate_factor * volume_ratio * _prorate, 2)
 
             r["Net Bill ($)"] = round(
-                r["Energy ($)"] + r["Demand ($)"] + r["Fixed ($)"] + _m_nbc - r["Export Credit ($)"], 2
+                r["Energy ($)"] + r["Demand ($)"] + r["Fixed ($)"] + _m_nbc + r["Export Credit ($)"], 2
             )
 
             # Baseline bill (no-solar) per month — for Indexed Tariff PPA rate calc
@@ -971,9 +982,9 @@ def build_grid_exchange_summary(
             "Import Cost Total ($)": round(cost_total, 0),
             "Import Cost Peak ($)": round(cost_peak, 0),
             "Import Cost Off-Peak ($)": round(cost_offpeak, 0),
-            "Export Credit Total ($)": round(credit_total, 0),
-            "Export Credit Peak ($)": round(credit_peak, 0),
-            "Export Credit Off-Peak ($)": round(credit_offpeak, 0),
+            "Export Credit Total ($)": -round(credit_total, 0),
+            "Export Credit Peak ($)": -round(credit_peak, 0),
+            "Export Credit Off-Peak ($)": -round(credit_offpeak, 0),
         })
 
     raw_df = pd.DataFrame(rows)
@@ -1020,7 +1031,8 @@ def build_battery_kpi_summary(
     total_charge = float(hd["batt_charge_kwh"].sum()) if "batt_charge_kwh" in hd.columns else 0.0
     total_discharge_to_load = float(hd["batt_to_load_kwh"].sum()) if "batt_to_load_kwh" in hd.columns else 0.0
     total_discharge_to_grid = float(hd["batt_to_grid_kwh"].sum()) if "batt_to_grid_kwh" in hd.columns else 0.0
-    total_discharge = total_discharge_to_load + total_discharge_to_grid
+    total_curtailed = float(hd["batt_curtailed_kwh"].sum()) if "batt_curtailed_kwh" in hd.columns else 0.0
+    total_discharge = total_discharge_to_load + total_discharge_to_grid + total_curtailed
 
     # --- Cycles estimate: throughput / (2 * capacity) ---
     throughput = total_charge + total_discharge
@@ -1076,6 +1088,7 @@ def build_battery_kpi_summary(
         "peak_reduction_kw": round(peak_reduction_kw, 2),
         "peak_reduction_pct": round(peak_reduction_pct, 1),
         "import_change_kwh": round(import_change_kwh, 1),
+        "curtailed_kwh": round(total_curtailed, 1),
     }
 
 
@@ -1183,6 +1196,12 @@ def generate_simulation_excel(
             export_rates_8760.values
             if hasattr(export_rates_8760, "values") else export_rates_8760
         )
+    # Value of Energy: |export_credit| / export_kwh (0 when no export)
+    exp_kwh = hd["export_kwh"].values
+    exp_credit = np.abs(hd["export_credit"].values)
+    export_hourly_data["Value of Energy ($/kWh)"] = np.where(
+        exp_kwh > 0, exp_credit / exp_kwh, 0.0,
+    )
     export_hourly_df = pd.DataFrame(export_hourly_data)
 
     # ------------------------------------------------------------------
@@ -1214,6 +1233,13 @@ def generate_simulation_excel(
     export_monthly_cols = ["Year", "Calendar Year", "Month", "Export (kWh)", "Export Credit ($)"]
     retail_monthly_cols = ["Year", "Calendar Year", "Month", "Import (kWh)", "Wtd Avg Rate ($/kWh)", "Energy ($)"]
     export_monthly_df = monthly_df[[c for c in export_monthly_cols if c in monthly_df.columns]].copy()
+    # Weighted average Value of Energy: |Export Credit| / Export kWh per month
+    if "Export (kWh)" in export_monthly_df.columns and "Export Credit ($)" in export_monthly_df.columns:
+        m_exp = export_monthly_df["Export (kWh)"]
+        m_credit = export_monthly_df["Export Credit ($)"].abs()
+        export_monthly_df["Value of Energy ($/kWh)"] = np.where(
+            m_exp > 0, m_credit / m_exp, 0.0,
+        )
     retail_monthly_df = monthly_df[[c for c in retail_monthly_cols if c in monthly_df.columns]].copy()
 
     # ------------------------------------------------------------------

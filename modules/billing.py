@@ -145,7 +145,7 @@ def run_billing_simulation(
     """
     # Ensure aligned indices
     load = np.asarray(load_8760.values)
-    solar = np.asarray(production_8760.values)
+    solar = np.asarray(production_8760)
     export_rates = np.asarray(export_rates_8760.values)
     dt_index = cast(pd.DatetimeIndex, load_8760.index)
 
@@ -242,6 +242,7 @@ def run_billing_simulation(
             "batt_charge_kwh": batt_dispatch.batt_charge_kwh,
             "batt_to_load_kwh": batt_dispatch.batt_discharge_to_load_kwh,
             "batt_to_grid_kwh": batt_dispatch.batt_discharge_to_grid_kwh,
+            "batt_curtailed_kwh": batt_dispatch.batt_curtailed_kwh,
             "soc_kwh": batt_dispatch.soc_kwh,
         })
 
@@ -418,7 +419,13 @@ def _build_monthly_nem12(
         month_import = import_kwh[month_mask]
         month_export = export_kwh[month_mask]
         month_periods = energy_period[month_mask]
+        month_rates = energy_rate[month_mask]
 
+        # Gross import energy cost and gross export credit (for display)
+        m_energy_cost = float((month_import * month_rates).sum())
+        m_export_credit = float((month_export * month_rates).sum())
+
+        # TOU-netted energy charge (for net bill calculation)
         monthly_energy_charge = 0.0
         for pidx, rate in period_rates.items():
             period_mask = month_periods == pidx
@@ -427,14 +434,6 @@ def _build_monthly_nem12(
             net_kwh_p = float(month_import[period_mask].sum() - month_export[period_mask].sum())
             energy_charge_p = net_kwh_p * rate
             monthly_energy_charge += energy_charge_p
-
-        # Decompose into energy_cost / export_credit for reporting
-        if monthly_energy_charge >= 0:
-            m_energy_cost = monthly_energy_charge
-            m_export_credit = 0.0
-        else:
-            m_energy_cost = 0.0
-            m_export_credit = abs(monthly_energy_charge)
 
         # Export energy split by TOU period (peak vs off-peak) — for reporting
         peak_mask_ep = month_periods == peak_period_idx
@@ -451,7 +450,8 @@ def _build_monthly_nem12(
             m_nbc_charge = float(nbc_kwh * nbc_rate)
 
         # --- Net bill (pre-true-up) ---
-        m_net_bill = m_energy_cost + m_demand_cost + m_fixed + m_nbc_charge - m_export_credit
+        # Use TOU-netted energy charge (not gross) for the actual bill
+        m_net_bill = monthly_energy_charge + m_demand_cost + m_fixed + m_nbc_charge
 
         # --- Billing option logic ---
         if billing_option == "MBO":
@@ -467,11 +467,11 @@ def _build_monthly_nem12(
             # Annual Billing Option: only demand + fixed + NBC paid monthly,
             # energy charges deferred to month 12
             if month_num < 12:
-                deferred_energy += (m_energy_cost - m_export_credit)
+                deferred_energy += monthly_energy_charge
                 m_net_bill = m_demand_cost + m_fixed + m_nbc_charge
             else:
                 # True-up month: pay deferred energy + this month's energy
-                m_net_bill = (m_energy_cost - m_export_credit) + deferred_energy + m_demand_cost + m_fixed + m_nbc_charge
+                m_net_bill = monthly_energy_charge + deferred_energy + m_demand_cost + m_fixed + m_nbc_charge
 
         m_net_bill = max(m_net_bill, tariff.min_monthly_charge)
 
