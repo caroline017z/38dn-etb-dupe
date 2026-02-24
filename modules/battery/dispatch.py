@@ -35,6 +35,7 @@ class DispatchResult:
     batt_charge_kwh: np.ndarray           # energy into battery (from PV)
     batt_discharge_to_load_kwh: np.ndarray  # battery -> load
     batt_discharge_to_grid_kwh: np.ndarray  # battery -> grid
+    batt_curtailed_kwh: np.ndarray        # curtailed (lost) discharge energy
     solver_status: str
     objective_value: float
 
@@ -81,6 +82,9 @@ def _concatenate_results(results: list[DispatchResult]) -> DispatchResult:
         ),
         batt_discharge_to_grid_kwh=np.concatenate(
             [r.batt_discharge_to_grid_kwh for r in results]
+        ),
+        batt_curtailed_kwh=np.concatenate(
+            [r.batt_curtailed_kwh for r in results]
         ),
         solver_status=_aggregate_status(results),
         objective_value=sum(r.objective_value for r in results),
@@ -140,6 +144,7 @@ def _solve_single_lp(
     batt_charge   = cp.Variable(N, nonneg=True, name="charge")
     batt_to_load  = cp.Variable(N, nonneg=True, name="to_load")
     batt_to_grid  = cp.Variable(N, nonneg=True, name="to_grid")
+    batt_curtailed = cp.Variable(N, nonneg=True, name="curtailed")
     soc           = cp.Variable(N, nonneg=True, name="soc")
     grid_import   = cp.Variable(N, nonneg=True, name="g_imp")
     grid_export   = cp.Variable(N, nonneg=True, name="g_exp")
@@ -150,14 +155,14 @@ def _solve_single_lp(
         if demand_prices[pname] > 0 and pname in demand_window_masks:
             peak_kw[pname] = cp.Variable(12, nonneg=True, name=f"pk_{pname}")
 
-    discharge_total = batt_to_load + batt_to_grid
+    discharge_total = batt_to_load + batt_to_grid + batt_curtailed
 
     # ================================================================
     # Constraints
     # ================================================================
     constraints: list[cp.Constraint] = []
 
-    # 1. nodal energy balance
+    # 1. nodal energy balance (curtailed energy is lost, not in grid balance)
     constraints.append(
         grid_import - grid_export
         == net_load + batt_charge - batt_to_load - batt_to_grid
@@ -192,8 +197,8 @@ def _solve_single_lp(
     constraints.append(soc <= max_soc)
 
     # 7. export-fraction limit:
-    #    batt_to_grid <= alpha * batt_to_load
-    constraints.append(batt_to_grid <= alpha * batt_to_load)
+    #    batt_to_grid <= alpha * (batt_to_load + batt_curtailed)
+    constraints.append(batt_to_grid <= alpha * (batt_to_load + batt_curtailed))
 
     # 8. demand-charge peak constraints
     for pname, pk_var in peak_kw.items():
@@ -215,7 +220,7 @@ def _solve_single_lp(
         demand_prices[pname] * cp.sum(pk_var)
         for pname, pk_var in peak_kw.items()
     ) if peak_kw else 0
-    throughput    = EPSILON * cp.sum(batt_charge + batt_to_load + batt_to_grid)
+    throughput    = EPSILON * cp.sum(batt_charge + discharge_total)
 
     objective = cp.Minimize(energy_cost - export_rev + demand_cost + throughput)
 
@@ -272,6 +277,7 @@ def _solve_single_lp(
             batt_charge_kwh=np.zeros(N),
             batt_discharge_to_load_kwh=np.zeros(N),
             batt_discharge_to_grid_kwh=np.zeros(N),
+            batt_curtailed_kwh=np.zeros(N),
             solver_status=prob.status or "failed",
             objective_value=float("inf"),
         )
@@ -281,6 +287,7 @@ def _solve_single_lp(
     b_chg = _val(batt_charge)
     b_tl  = _val(batt_to_load)
     b_tg  = _val(batt_to_grid)
+    b_cu  = _val(batt_curtailed)
     s     = _val(soc)
 
     # ---- Post-solve cleanup: numerical robustness ----
@@ -290,13 +297,14 @@ def _solve_single_lp(
     b_chg = np.maximum(0.0, b_chg)
     b_tl  = np.maximum(0.0, b_tl)
     b_tg  = np.maximum(0.0, b_tg)
+    b_cu  = np.maximum(0.0, b_cu)
     s     = np.clip(s, min_soc, max_soc)
 
     # 2. Enforce mutual exclusivity: battery cannot charge and discharge
     #    in the same hour.  The LP cost structure (round-trip losses +
     #    throughput penalty) already prevents this, but solver noise can
     #    leave tiny residuals.  Zero out the smaller side.
-    discharge = b_tl + b_tg
+    discharge = b_tl + b_tg + b_cu
     both_mask = (b_chg > 1e-6) & (discharge > 1e-6)
     if both_mask.any():
         for i in np.where(both_mask)[0]:
@@ -304,14 +312,19 @@ def _solve_single_lp(
                 b_chg[i] -= discharge[i]
                 b_tl[i] = 0.0
                 b_tg[i] = 0.0
+                b_cu[i] = 0.0
             else:
-                ratio = b_tl[i] / discharge[i] if discharge[i] > 0 else 1.0
-                b_tl[i] -= b_chg[i] * ratio
-                b_tg[i] -= b_chg[i] * (1.0 - ratio)
+                ratio_tl = b_tl[i] / discharge[i] if discharge[i] > 0 else 0.0
+                ratio_tg = b_tg[i] / discharge[i] if discharge[i] > 0 else 0.0
+                ratio_cu = b_cu[i] / discharge[i] if discharge[i] > 0 else 0.0
+                b_tl[i] -= b_chg[i] * ratio_tl
+                b_tg[i] -= b_chg[i] * ratio_tg
+                b_cu[i] -= b_chg[i] * ratio_cu
                 b_chg[i] = 0.0
         b_chg = np.maximum(0.0, b_chg)
         b_tl  = np.maximum(0.0, b_tl)
         b_tg  = np.maximum(0.0, b_tg)
+        b_cu  = np.maximum(0.0, b_cu)
 
     # 3. Enforce no grid charging: battery only charges from surplus PV
     #    (LP constraint: batt_charge <= surplus_pv; clip any residual)
@@ -329,6 +342,7 @@ def _solve_single_lp(
         batt_charge_kwh=b_chg,
         batt_discharge_to_load_kwh=b_tl,
         batt_discharge_to_grid_kwh=b_tg,
+        batt_curtailed_kwh=b_cu,
         solver_status=prob.status or "unknown",
         objective_value=float(prob.value) if prob.value is not None else float("inf"),
     )

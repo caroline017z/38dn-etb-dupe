@@ -80,8 +80,9 @@ SIMULATIONS_DIR = os.path.join(DATA_DIR, "simulations")
 LOAD_PROFILES_DIR = os.path.join(DATA_DIR, "load_profiles")
 EXPORT_PROFILES_DIR = os.path.join(DATA_DIR, "export_profiles")
 ECC_TARIFFS_DIR = os.path.join(DATA_DIR, "ecc_tariffs")
+SYSTEM_PROFILES_DIR = os.path.join(DATA_DIR, "system_profiles")
 
-for d in [SIMULATIONS_DIR, LOAD_PROFILES_DIR, EXPORT_PROFILES_DIR, ECC_TARIFFS_DIR]:
+for d in [SIMULATIONS_DIR, LOAD_PROFILES_DIR, EXPORT_PROFILES_DIR, ECC_TARIFFS_DIR, SYSTEM_PROFILES_DIR]:
     os.makedirs(d, exist_ok=True)
 
 
@@ -164,6 +165,39 @@ def _load_profile_csv(directory, name) -> pd.DataFrame:
     return pd.read_csv(os.path.join(directory, f"{name}.csv"))
 
 
+def _save_system_profile(name: str) -> None:
+    """Save current sidebar PV system settings + production data to a JSON file."""
+    profile = {
+        "location": st.session_state.get("sb_location", ""),
+        "lat": st.session_state.get("_sp_lat"),
+        "lon": st.session_state.get("_sp_lon"),
+        "system_life": st.session_state.get("sb_system_life", 20),
+        "system_size_kw": st.session_state.get("sb_system_size", 500.0),
+        "dc_ac_ratio": st.session_state.get("sb_dc_ac_ratio", 1.2),
+        "system_type": st.session_state.get("sb_system_type", "Fixed Tilt (Ground Mount)"),
+        "module_type": st.session_state.get("sb_module_type", "Standard"),
+        "system_losses": st.session_state.get("sb_system_losses", 14.08),
+        "degradation": st.session_state.get("sb_degradation", 0.50),
+        "cod_date": str(st.session_state.get("sb_cod_date", date(2026, 1, 1))),
+    }
+    prod = st.session_state.get("production_8760")
+    if prod is not None:
+        profile["production_8760"] = [float(v) for v in prod]
+    summary = st.session_state.get("production_summary")
+    if summary is not None:
+        profile["production_summary"] = summary
+    fp = os.path.join(SYSTEM_PROFILES_DIR, f"{name}.json")
+    with open(fp, "w") as f:
+        json.dump(profile, f)
+
+
+def _load_system_profile(name: str) -> dict:
+    """Load a system profile JSON and return the dict."""
+    fp = os.path.join(SYSTEM_PROFILES_DIR, f"{name}.json")
+    with open(fp, "r") as f:
+        return json.load(f)
+
+
 def _parse_8760_csv(df: pd.DataFrame) -> np.ndarray:
     """Extract the first numeric column from a DataFrame, validate 8760 rows."""
     numeric_cols = df.select_dtypes(include=[np.number]).columns
@@ -210,19 +244,16 @@ if os.path.exists(LOGO_PATH):
         f"""
         <style>
         .top-right-logo {{
-            position: fixed;
-            top: 14px;
+            position: absolute;
+            top: -60px;
             right: 20px;
             z-index: 999999;
             pointer-events: none;
         }}
         .top-right-logo img {{
-            height: 100px;
-            width: 100px;
+            height: 72px;
+            width: 72px;
             object-fit: contain;
-        }}
-        header[data-testid="stHeader"] {{
-            z-index: 999998;
         }}
         </style>
         <div class="top-right-logo">
@@ -267,6 +298,7 @@ for key, default in {
     "nsc_rate": NSC_DEFAULT_RATE,
     "billing_option": "ABO",
     "pending_sim_load": None,
+    "pending_system_profile": None,
     "show_all_sims": False,
 }.items():
     if key not in st.session_state:
@@ -279,6 +311,32 @@ if st.session_state.get("pending_sim_load"):
     _sim_data = _load_simulation(_pending_name)
     touch_simulation_mtime(_pending_name)
     populate_session_from_simulation(st.session_state, _sim_data)
+    st.rerun()
+
+# --- Handle pending system profile load ---
+if st.session_state.get("pending_system_profile"):
+    _sp_name = st.session_state["pending_system_profile"]
+    st.session_state["pending_system_profile"] = None
+    _sp_data = _load_system_profile(_sp_name)
+    _sp_loc = _sp_data.get("location", "")
+    st.session_state["sb_location"] = _sp_loc
+    st.session_state["_sp_lat"] = _sp_data.get("lat")
+    st.session_state["_sp_lon"] = _sp_data.get("lon")
+    st.session_state["_sp_cached_location"] = _sp_loc
+    st.session_state["sb_system_life"] = _sp_data.get("system_life", 20)
+    st.session_state["sb_system_size"] = _sp_data.get("system_size_kw", 500.0)
+    st.session_state["sb_dc_ac_ratio"] = _sp_data.get("dc_ac_ratio", 1.2)
+    st.session_state["sb_system_type"] = _sp_data.get("system_type", "Fixed Tilt (Ground Mount)")
+    st.session_state["sb_module_type"] = _sp_data.get("module_type", "Standard")
+    st.session_state["sb_system_losses"] = _sp_data.get("system_losses", 14.08)
+    st.session_state["sb_degradation"] = _sp_data.get("degradation", 0.50)
+    cod_str = _sp_data.get("cod_date")
+    if cod_str:
+        st.session_state["sb_cod_date"] = date.fromisoformat(cod_str)
+    if _sp_data.get("production_8760"):
+        st.session_state["production_8760"] = np.array(_sp_data["production_8760"])
+    if _sp_data.get("production_summary"):
+        st.session_state["production_summary"] = _sp_data["production_summary"]
     st.rerun()
 
 # --- All Simulations view (inline) ---
@@ -388,7 +446,24 @@ div[data-testid="stHorizontalBlock"] > div[data-testid="column"] .mgmt-btn butto
 </style>
 """, unsafe_allow_html=True)
 
-_mgmt_btn_cols = st.columns([1.2, 0.05, 1, 0.05, 1, 0.05, 1])
+st.markdown("""
+<style>
+/* Teal styling for the top management button row */
+div[data-testid="stHorizontalBlock"]:first-of-type button[kind="secondary"],
+div[data-testid="stHorizontalBlock"]:first-of-type button[data-testid="stPopoverButton"] {
+    border-color: #2A7B7B !important;
+    color: #2A7B7B !important;
+}
+div[data-testid="stHorizontalBlock"]:first-of-type button[kind="secondary"]:hover,
+div[data-testid="stHorizontalBlock"]:first-of-type button[data-testid="stPopoverButton"]:hover {
+    border-color: #1E5C5C !important;
+    color: #1E5C5C !important;
+    background-color: rgba(42, 123, 123, 0.08) !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
+_mgmt_btn_cols = st.columns([1.2, 0.05, 0.8, 0.05, 1, 0.05, 1, 0.05, 1.2])
 
 # --- Simulations popover ---
 with _mgmt_btn_cols[0]:
@@ -424,21 +499,18 @@ with _mgmt_btn_cols[0]:
             st.session_state["show_all_sims"] = True
             st.rerun()
 
-# --- Save popover ---
-save_btn = False
-sim_name = ""
+# --- System Profiles toggle ---
 with _mgmt_btn_cols[2]:
-    with st.popover("Save", use_container_width=True):
-        sim_name = st.text_input(
-            "Simulation Name",
-            placeholder="e.g., Ranch-500kW-AG1-SAT",
-            key="sim_name_input",
+    if st.button(
+        "System Profiles",
+        key="mgmt_btn_system",
+        use_container_width=True,
+        type="primary" if st.session_state.active_mgmt_tab == "System Profiles" else "secondary",
+    ):
+        st.session_state.active_mgmt_tab = (
+            None if st.session_state.active_mgmt_tab == "System Profiles" else "System Profiles"
         )
-        save_btn = st.button(
-            "Save Current Simulation",
-            disabled=(not sim_name),
-            use_container_width=True,
-        )
+        st.rerun()
 
 # --- Load Profiles toggle ---
 with _mgmt_btn_cols[4]:
@@ -465,6 +537,22 @@ with _mgmt_btn_cols[6]:
             None if st.session_state.active_mgmt_tab == "Export Profiles" else "Export Profiles"
         )
         st.rerun()
+
+# --- Save popover ---
+save_btn = False
+sim_name = ""
+with _mgmt_btn_cols[8]:
+    with st.popover("Save", use_container_width=True):
+        sim_name = st.text_input(
+            "Simulation Name",
+            placeholder="e.g., Ranch-500kW-AG1-SAT",
+            key="sim_name_input",
+        )
+        save_btn = st.button(
+            "Save Current Simulation",
+            disabled=(not sim_name),
+            use_container_width=True,
+        )
 
 
 # ---- LOAD PROFILES SECTION ----
@@ -620,8 +708,131 @@ if st.session_state.active_mgmt_tab == "Export Profiles":
             st.rerun()
 
 
+# ---- SYSTEM PROFILES SECTION ----
+if st.session_state.active_mgmt_tab == "System Profiles":
+    saved_sp = _list_saved(SYSTEM_PROFILES_DIR, ".json")
+    sp_col1, sp_col2 = st.columns([2, 1])
+
+    _sp_editing_name = st.session_state.get("sp_editing")
+
+    with sp_col1:
+        if _sp_editing_name:
+            st.markdown(f"**Editing: {_sp_editing_name}**")
+            st.caption("Modify the sidebar values, then click Update to overwrite this profile.")
+            _sp_edit_bcols = st.columns(2)
+            with _sp_edit_bcols[0]:
+                if st.button("Update Profile", key="sp_update_btn", type="primary", use_container_width=True):
+                    try:
+                        _save_system_profile(_sp_editing_name)
+                        st.session_state.pop("sp_editing", None)
+                        st.success(f"Profile '{_sp_editing_name}' updated!")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(str(e))
+            with _sp_edit_bcols[1]:
+                if st.button("Cancel Edit", key="sp_cancel_edit", use_container_width=True):
+                    st.session_state.pop("sp_editing", None)
+                    st.rerun()
+        else:
+            st.markdown("**Save Current System Profile**")
+            sp_name = st.text_input(
+                "Profile Name",
+                placeholder="e.g., Ranch-500kW-SAT",
+                key="sp_name",
+            )
+            sp_save_btn = st.button("Save System Profile", disabled=(not sp_name))
+
+            if sp_save_btn and sp_name:
+                try:
+                    _save_system_profile(sp_name)
+                    st.success(f"System profile '{sp_name}' saved!")
+                    st.rerun()
+                except Exception as e:
+                    st.error(str(e))
+
+    with sp_col2:
+        if saved_sp:
+            st.markdown("**Saved System Profiles**")
+            sel_sp = st.selectbox("Select profile", saved_sp, key="sp_sel")
+            _sp_action_cols = st.columns(4)
+            with _sp_action_cols[0]:
+                sp_view_btn = st.button("View", key="sp_view", use_container_width=True)
+            with _sp_action_cols[1]:
+                sp_edit_btn = st.button("Edit", key="sp_edit", use_container_width=True)
+            with _sp_action_cols[2]:
+                sp_dup_btn = st.button("Duplicate", key="sp_dup", use_container_width=True)
+            with _sp_action_cols[3]:
+                sp_del_btn = st.button("Delete", key="sp_del", use_container_width=True)
+
+            if sp_del_btn and sel_sp:
+                _delete_file(SYSTEM_PROFILES_DIR, sel_sp, ".json")
+                st.success(f"Deleted '{sel_sp}'.")
+                st.rerun()
+
+            if sp_edit_btn and sel_sp:
+                st.session_state["sp_editing"] = sel_sp
+                st.session_state["pending_system_profile"] = sel_sp
+                st.session_state.pop("sp_viewing", None)
+                st.rerun()
+
+            if sp_dup_btn and sel_sp:
+                _dup_base = f"{sel_sp} - Copy"
+                _dup_name = _dup_base
+                _dup_i = 2
+                while os.path.exists(os.path.join(SYSTEM_PROFILES_DIR, f"{_dup_name}.json")):
+                    _dup_name = f"{_dup_base} {_dup_i}"
+                    _dup_i += 1
+                _dup_data = _load_system_profile(sel_sp)
+                with open(os.path.join(SYSTEM_PROFILES_DIR, f"{_dup_name}.json"), "w") as _df:
+                    json.dump(_dup_data, _df)
+                st.success(f"Duplicated as '{_dup_name}'.")
+                st.rerun()
+        else:
+            st.caption("No saved system profiles yet.")
+            sel_sp = None
+            sp_view_btn = False
+
+    # View section
+    if saved_sp and sp_view_btn and sel_sp:
+        st.session_state["sp_viewing"] = sel_sp
+    if st.session_state.get("sp_viewing"):
+        view_name = st.session_state["sp_viewing"]
+        st.subheader(f"Profile: {view_name}")
+        try:
+            _sp_view_data = _load_system_profile(view_name)
+            _vinfo = [
+                f"**Location:** {_sp_view_data.get('location', 'N/A')}",
+                f"**Lat/Lon:** {_sp_view_data.get('lat', 'N/A')}, {_sp_view_data.get('lon', 'N/A')}",
+                f"**System Size:** {_sp_view_data.get('system_size_kw', 0):,.1f} kW-DC",
+                f"**DC/AC Ratio:** {_sp_view_data.get('dc_ac_ratio', 0):.2f}",
+                f"**System Type:** {_sp_view_data.get('system_type', 'N/A')}",
+                f"**Module Type:** {_sp_view_data.get('module_type', 'N/A')}",
+                f"**System Losses:** {_sp_view_data.get('system_losses', 0):.2f}%",
+                f"**Degradation:** {_sp_view_data.get('degradation', 0):.2f}%/yr",
+                f"**System Life:** {_sp_view_data.get('system_life', 0)} years",
+                f"**COD:** {_sp_view_data.get('cod_date', 'N/A')}",
+            ]
+            if _sp_view_data.get("production_summary"):
+                _ps = _sp_view_data["production_summary"]
+                _vinfo.append(f"**Annual Production:** {_ps.get('ac_annual_kwh', 0):,.0f} kWh")
+                _vinfo.append(f"**Capacity Factor:** {_ps.get('capacity_factor', 0):.1f}%")
+            else:
+                _vinfo.append("**Production:** Not saved (will need to re-run PVWatts)")
+            st.markdown("  \n".join(_vinfo))
+        except Exception as e:
+            st.error(str(e))
+
+        if st.button("Close", key="sp_close_view"):
+            del st.session_state["sp_viewing"]
+            st.rerun()
+
+
 st.title("PV Solar Rate Simulator")
-st.caption("California Net Value Billing Tariff (NVBT) — Hourly Import/Export Analysis")
+st.markdown(
+    '<p style="font-size: 12px; color: rgba(150,150,150,0.9); margin-top: -10px;">'
+    'California Net Value Billing Tariff (NVBT) — Hourly Import/Export Analysis</p>',
+    unsafe_allow_html=True,
+)
 
 # --- Getting Started guidance (only shown when no simulation has run yet) ---
 if st.session_state.billing_result is None and st.session_state.saved_view is None:
@@ -641,6 +852,22 @@ with st.sidebar:
     st.header("System & Site Configuration")
     st.caption("Complete each section below, then click **Run Simulation** in the main panel.")
 
+    # --- Load a System Profile ---
+    _sp_names = _list_saved(SYSTEM_PROFILES_DIR, ".json")
+    if _sp_names:
+        _sp_options = ["(none)"] + _sp_names
+        _sp_selected = st.selectbox(
+            "Load a System Profile",
+            _sp_options,
+            key="sp_sidebar_sel",
+            help="Select a saved system profile to auto-fill Location and PV System settings.",
+        )
+        if _sp_selected != "(none)":
+            if st.button("Apply Profile", key="sp_apply_btn", type="primary", use_container_width=True):
+                st.session_state["pending_system_profile"] = _sp_selected
+                st.rerun()
+        st.divider()
+
     # --- 1. Location ---
     st.subheader("1. Location")
     location_input = st.text_input(
@@ -651,12 +878,27 @@ with st.sidebar:
     )
 
     lat, lon = None, None
+    # Invalidate cached lat/lon when the user changes location text
+    if location_input != st.session_state.get("_sp_cached_location", ""):
+        st.session_state["_sp_lat"] = None
+        st.session_state["_sp_lon"] = None
+        st.session_state["_sp_cached_location"] = location_input
     if location_input:
-        try:
-            lat, lon = geocode_address(location_input)
+        # Use cached lat/lon from a loaded system profile if available
+        _cached_lat = st.session_state.get("_sp_lat")
+        _cached_lon = st.session_state.get("_sp_lon")
+        if _cached_lat is not None and _cached_lon is not None:
+            lat, lon = _cached_lat, _cached_lon
             st.success(f"Lat: {lat:.4f}, Lon: {lon:.4f}")
-        except ValueError as e:
-            st.error(str(e))
+        else:
+            try:
+                lat, lon = geocode_address(location_input)
+                st.session_state["_sp_lat"] = lat
+                st.session_state["_sp_lon"] = lon
+                st.session_state["_sp_cached_location"] = location_input
+                st.success(f"Lat: {lat:.4f}, Lon: {lon:.4f}")
+            except ValueError as e:
+                st.error(str(e))
 
     # --- 2. System Configuration ---
     st.subheader("2. PV System")
@@ -1675,7 +1917,7 @@ if run_sim:
         if billing_engine == "ECC":
             # ============ ECC billing engine ============
             _overlay.markdown(
-                _progress_overlay_html(20, "Running ECC billing simulation..."),
+                _progress_overlay_html(25, "Running ECC billing simulation..."),
                 unsafe_allow_html=True,
             )
             result_pv_only = run_ecc_billing_simulation(
@@ -1691,7 +1933,15 @@ if run_sim:
             st.session_state.sizing_result = None
 
             _overlay.markdown(
-                _progress_overlay_html(95, "Finalizing results..."),
+                _progress_overlay_html(50, "ECC simulation complete."),
+                unsafe_allow_html=True,
+            )
+            _overlay.markdown(
+                _progress_overlay_html(75, "Building results..."),
+                unsafe_allow_html=True,
+            )
+            _overlay.markdown(
+                _progress_overlay_html(100, "Done!"),
                 unsafe_allow_html=True,
             )
             st.success("Simulation complete (ECC engine)!")
@@ -1714,7 +1964,7 @@ if run_sim:
 
             # --- Step 1: PV-only billing ---
             _overlay.markdown(
-                _progress_overlay_html(10, "Running PV-only billing simulation..."),
+                _progress_overlay_html(5, "Running PV-only billing simulation..."),
                 unsafe_allow_html=True,
             )
             result_pv_only = run_billing_simulation(
@@ -1731,7 +1981,7 @@ if run_sim:
             st.session_state.sizing_result = None
 
             _overlay.markdown(
-                _progress_overlay_html(35, "PV-only simulation complete."),
+                _progress_overlay_html(25, "PV-only simulation complete."),
                 unsafe_allow_html=True,
             )
 
@@ -1748,7 +1998,7 @@ if run_sim:
                         candidates = _np.arange(opt_min, opt_max + opt_step / 2, opt_step).tolist()
 
                         _overlay.markdown(
-                            _progress_overlay_html(40, f"Running sizing sweep ({len(candidates)} candidates)..."),
+                            _progress_overlay_html(30, f"Running sizing sweep ({len(candidates)} candidates)..."),
                             unsafe_allow_html=True,
                         )
 
@@ -1759,7 +2009,7 @@ if run_sim:
 
                         sizing_res = optimize_capacity_kwh(
                             candidate_sizes_kwh=candidates,
-                            pv_kwh=np.asarray(st.session_state.production_8760.values),
+                            pv_kwh=np.asarray(st.session_state.production_8760),
                             load_kwh=np.asarray(st.session_state.load_8760.values),
                             import_price=_energy_rates,
                             export_price=np.asarray(st.session_state.export_rates.values),
@@ -1771,7 +2021,7 @@ if run_sim:
                         st.session_state.sizing_result = sizing_res
 
                         _overlay.markdown(
-                            _progress_overlay_html(75, "Running final billing with optimal size..."),
+                            _progress_overlay_html(50, "Sizing complete. Running final billing..."),
                             unsafe_allow_html=True,
                         )
 
@@ -1794,7 +2044,12 @@ if run_sim:
                         st.session_state.battery_capacity_kwh = sizing_res.best_size_kwh
 
                         _overlay.markdown(
-                            _progress_overlay_html(95, "Finalizing results..."),
+                            _progress_overlay_html(75, "Building results..."),
+                            unsafe_allow_html=True,
+                        )
+
+                        _overlay.markdown(
+                            _progress_overlay_html(100, "Done!"),
                             unsafe_allow_html=True,
                         )
                         st.success(
@@ -1810,7 +2065,7 @@ if run_sim:
                     batt_cap = st.session_state.get("battery_capacity_kwh", 0)
                     if batt_cap > 0:
                         _overlay.markdown(
-                            _progress_overlay_html(45, "Running PV + Battery dispatch..."),
+                            _progress_overlay_html(30, "Running PV + Battery dispatch..."),
                             unsafe_allow_html=True,
                         )
                         result_batt = run_billing_simulation(
@@ -1830,17 +2085,34 @@ if run_sim:
                         st.session_state.billing_result_batt = result_batt
 
                         _overlay.markdown(
-                            _progress_overlay_html(95, "Finalizing results..."),
+                            _progress_overlay_html(75, "Building results..."),
+                            unsafe_allow_html=True,
+                        )
+
+                        _overlay.markdown(
+                            _progress_overlay_html(100, "Done!"),
                             unsafe_allow_html=True,
                         )
                         st.success("Simulation complete (PV + Battery)!")
                     else:
                         st.session_state.billing_result = result_pv_only
                         st.session_state.billing_result_batt = None
+                        _overlay.markdown(
+                            _progress_overlay_html(100, "Done!"),
+                            unsafe_allow_html=True,
+                        )
                         st.success("Simulation complete (PV only).")
             else:
                 st.session_state.billing_result = result_pv_only
                 st.session_state.billing_result_batt = None
+                _overlay.markdown(
+                    _progress_overlay_html(50, "Building results..."),
+                    unsafe_allow_html=True,
+                )
+                _overlay.markdown(
+                    _progress_overlay_html(100, "Done!"),
+                    unsafe_allow_html=True,
+                )
                 st.success("Simulation complete!")
 
         # Clear overlay and editing flag when done
