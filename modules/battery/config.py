@@ -12,8 +12,8 @@ class BatteryConfig:
     # Sizing — power is derived from capacity_kwh / battery_hours
     battery_hours: float  # hours of storage at rated power (e.g. 4.0)
 
-    # Depth-of-discharge / export-fraction limit
-    discharge_limit_pct: float = 80.0  # max fraction of discharge that may be exported
+    # Export power cap: max % of rated power that can be exported to grid
+    discharge_limit_pct: float = 80.0  # e.g. 80 = export up to 80% of power_kw
 
     # Round-trip efficiency (one-way)
     charge_eff: float = 0.95   # charging efficiency (AC -> DC stored)
@@ -28,3 +28,8 @@ class BatteryConfig:
     charge_window_end: int = 16
     discharge_window_start: int = 16
     discharge_window_end: int = 21
+
+    # When True, override discharge windows with the most valuable
+    # consecutive block per day (length = battery_hours).
+    # Charge window becomes all non-discharge hours.
+    optimized_discharge: bool = False

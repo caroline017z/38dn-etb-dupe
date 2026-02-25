@@ -580,7 +580,7 @@ def _build_multiyear_monthly_df(
     """
     _cod_month = cod_date.month if cod_date else 1
     _cod_day = cod_date.day if cod_date else 1
-    _cod_year = cod_date.year if cod_date else None
+    _cod_year = cod_date.year if cod_date else 2023
 
     ms = result.monthly_summary
     rate_mult = rate_escalator_pct / 100.0
@@ -942,6 +942,7 @@ def build_grid_exchange_summary(
     """
     hd = result.hourly_detail
     hd_month = hd.index.month
+    _has_bess = "batt_to_grid_kwh" in hd.columns
 
     ep = hd["energy_period"].values
     if isinstance(peak_period_idx, (set, frozenset)):
@@ -971,12 +972,19 @@ def build_grid_exchange_summary(
         credit_offpeak = float(hd.loc[offpeak_m, "export_credit"].sum())
         credit_total = credit_peak + credit_offpeak
 
-        rows.append({
+        row = {
             "Month": MONTH_NAMES[m - 1],
             "Import Total (kWh)": round(imp_total, 0),
             "Import Peak (kWh)": round(imp_peak, 0),
             "Import Off-Peak (kWh)": round(imp_offpeak, 0),
             "Export Total (kWh)": round(exp_total, 0),
+        }
+        if _has_bess:
+            bess_exp = float(hd.loc[mm, "batt_to_grid_kwh"].sum())
+            pv_exp = max(0.0, exp_total - bess_exp)
+            row["Export PV (kWh)"] = round(pv_exp, 0)
+            row["Export BESS (kWh)"] = round(bess_exp, 0)
+        row.update({
             "Export Peak (kWh)": round(exp_peak, 0),
             "Export Off-Peak (kWh)": round(exp_offpeak, 0),
             "Import Cost Total ($)": round(cost_total, 0),
@@ -986,6 +994,7 @@ def build_grid_exchange_summary(
             "Export Credit Peak ($)": -round(credit_peak, 0),
             "Export Credit Off-Peak ($)": -round(credit_offpeak, 0),
         })
+        rows.append(row)
 
     raw_df = pd.DataFrame(rows)
 
@@ -1031,8 +1040,7 @@ def build_battery_kpi_summary(
     total_charge = float(hd["batt_charge_kwh"].sum()) if "batt_charge_kwh" in hd.columns else 0.0
     total_discharge_to_load = float(hd["batt_to_load_kwh"].sum()) if "batt_to_load_kwh" in hd.columns else 0.0
     total_discharge_to_grid = float(hd["batt_to_grid_kwh"].sum()) if "batt_to_grid_kwh" in hd.columns else 0.0
-    total_curtailed = float(hd["batt_curtailed_kwh"].sum()) if "batt_curtailed_kwh" in hd.columns else 0.0
-    total_discharge = total_discharge_to_load + total_discharge_to_grid + total_curtailed
+    total_discharge = total_discharge_to_load + total_discharge_to_grid
 
     # --- Cycles estimate: throughput / (2 * capacity) ---
     throughput = total_charge + total_discharge
@@ -1088,7 +1096,6 @@ def build_battery_kpi_summary(
         "peak_reduction_kw": round(peak_reduction_kw, 2),
         "peak_reduction_pct": round(peak_reduction_pct, 1),
         "import_change_kwh": round(import_change_kwh, 1),
-        "curtailed_kwh": round(total_curtailed, 1),
     }
 
 
@@ -1184,10 +1191,21 @@ def generate_simulation_excel(
     # 2. Export Rates (Hourly) — 8760 rows
     # ------------------------------------------------------------------
     hd = result.hourly_detail
-    export_hourly_data = {
-        "Datetime": hd.index,
-        "Export (kWh)": hd["export_kwh"].values,
-    }
+    exp_kwh = hd["export_kwh"].values
+    exp_credit = np.abs(hd["export_credit"].values)
+    _has_bess = battery_capacity_kwh > 0 and "batt_to_grid_kwh" in hd.columns
+
+    # Build columns in desired order: Generation, Export, [PV, BESS], Rate, VoE, [VoE PV, VoE BESS]
+    export_hourly_data = {"Datetime": hd.index}
+    export_hourly_data["Generation (kWh)"] = hd["solar_kwh"].values
+    export_hourly_data["Export (kWh)"] = exp_kwh
+
+    if _has_bess:
+        bess_exp = hd["batt_to_grid_kwh"].values
+        pv_exp = np.maximum(0.0, exp_kwh - bess_exp)
+        export_hourly_data["Export PV (kWh)"] = pv_exp
+        export_hourly_data["Export BESS (kWh)"] = bess_exp
+
     # Rate column: NEM-1/2 → retail TOU rate; NEM-3/NVBT → ACC export rate
     if nem_regime_1 in ("NEM-1", "NEM-2") or export_rates_8760 is None:
         export_hourly_data["Export Rate ($/kWh)"] = hd["energy_rate"].values
@@ -1196,12 +1214,25 @@ def generate_simulation_excel(
             export_rates_8760.values
             if hasattr(export_rates_8760, "values") else export_rates_8760
         )
+
     # Value of Energy: |export_credit| / export_kwh (0 when no export)
-    exp_kwh = hd["export_kwh"].values
-    exp_credit = np.abs(hd["export_credit"].values)
+    _safe_exp = np.where(exp_kwh > 0, exp_kwh, 1.0)
     export_hourly_data["Value of Energy ($/kWh)"] = np.where(
-        exp_kwh > 0, exp_credit / exp_kwh, 0.0,
+        exp_kwh > 0, exp_credit / _safe_exp, 0.0,
     )
+
+    if _has_bess:
+        hourly_rate = np.where(exp_kwh > 0, exp_credit / _safe_exp, 0.0)
+        pv_credit = pv_exp * hourly_rate
+        bess_credit = bess_exp * hourly_rate
+        _safe_pv = np.where(pv_exp > 0, pv_exp, 1.0)
+        _safe_bess = np.where(bess_exp > 0, bess_exp, 1.0)
+        export_hourly_data["Value of Energy PV ($/kWh)"] = np.where(
+            pv_exp > 0, pv_credit / _safe_pv, 0.0,
+        )
+        export_hourly_data["Value of Energy BESS ($/kWh)"] = np.where(
+            bess_exp > 0, bess_credit / _safe_bess, 0.0,
+        )
     export_hourly_df = pd.DataFrame(export_hourly_data)
 
     # ------------------------------------------------------------------
@@ -1230,17 +1261,134 @@ def generate_simulation_excel(
         cod_date=cod_date,
         degradation_pct=degradation_pct,
     )
-    export_monthly_cols = ["Year", "Calendar Year", "Month", "Export (kWh)", "Export Credit ($)"]
+    export_monthly_cols = ["Year", "Calendar Year", "Month", "Solar (kWh)", "Export (kWh)", "Export Credit ($)"]
     retail_monthly_cols = ["Year", "Calendar Year", "Month", "Import (kWh)", "Wtd Avg Rate ($/kWh)", "Energy ($)"]
     export_monthly_df = monthly_df[[c for c in export_monthly_cols if c in monthly_df.columns]].copy()
+    if "Solar (kWh)" in export_monthly_df.columns:
+        export_monthly_df.rename(columns={"Solar (kWh)": "Generation (kWh)"}, inplace=True)
     # Weighted average Value of Energy: |Export Credit| / Export kWh per month
     if "Export (kWh)" in export_monthly_df.columns and "Export Credit ($)" in export_monthly_df.columns:
         m_exp = export_monthly_df["Export (kWh)"]
         m_credit = export_monthly_df["Export Credit ($)"].abs()
+        _safe_m_exp = np.where(m_exp > 0, m_exp, 1.0)
         export_monthly_df["Value of Energy ($/kWh)"] = np.where(
-            m_exp > 0, m_credit / m_exp, 0.0,
+            m_exp > 0, m_credit / _safe_m_exp, 0.0,
         )
+    # PV vs BESS monthly export breakdown (PV+BESS projects only)
+    if _has_bess:
+        # Aggregate PV/BESS exports and credits per month from hourly data
+        hourly_rate = np.where(exp_kwh > 0, exp_credit / _safe_exp, 0.0)
+        bess_exp_h = hd["batt_to_grid_kwh"].values
+        pv_exp_h = np.maximum(0.0, exp_kwh - bess_exp_h)
+        pv_credit_h = pv_exp_h * hourly_rate
+        bess_credit_h = bess_exp_h * hourly_rate
+        month_idx = hd.index.month
+        _pv_exp_mo, _bess_exp_mo = {}, {}
+        _pv_cred_mo, _bess_cred_mo = {}, {}
+        for m in range(1, 13):
+            mm = month_idx == m
+            _pv_exp_mo[m] = float(pv_exp_h[mm].sum())
+            _bess_exp_mo[m] = float(bess_exp_h[mm].sum())
+            _pv_cred_mo[m] = float(pv_credit_h[mm].sum())
+            _bess_cred_mo[m] = float(bess_credit_h[mm].sum())
+        # Map Year-1 monthly values into multi-year rows (scale by volume ratio)
+        if "Month" in export_monthly_df.columns:
+            _mo_map = {name: idx + 1 for idx, name in enumerate(MONTH_NAMES)}
+            row_months = export_monthly_df["Month"].map(
+                lambda x: _mo_map.get(x.split(" ")[0] if isinstance(x, str) else x, 0)
+            )
+            yr1_total_exp = sum(_pv_exp_mo[m] + _bess_exp_mo[m] for m in range(1, 13))
+            row_total = export_monthly_df["Export (kWh)"].values
+            pv_exp_col, bess_exp_col = [], []
+            pv_voe_col, bess_voe_col = [], []
+            for i, m in enumerate(row_months):
+                if m == 0 or yr1_total_exp == 0:
+                    pv_exp_col.append(0.0)
+                    bess_exp_col.append(0.0)
+                    pv_voe_col.append(0.0)
+                    bess_voe_col.append(0.0)
+                    continue
+                yr1_mo_total = _pv_exp_mo[m] + _bess_exp_mo[m]
+                if yr1_mo_total > 0:
+                    pv_frac = _pv_exp_mo[m] / yr1_mo_total
+                    bess_frac = _bess_exp_mo[m] / yr1_mo_total
+                else:
+                    pv_frac, bess_frac = 0.0, 0.0
+                mo_total = row_total[i]
+                pv_e = mo_total * pv_frac
+                bess_e = mo_total * bess_frac
+                pv_exp_col.append(round(pv_e, 1))
+                bess_exp_col.append(round(bess_e, 1))
+                # VoE: use year-1 per-month credit/kWh ratio (rate-scaled via Export Credit)
+                mo_credit = abs(export_monthly_df["Export Credit ($)"].iloc[i])
+                pv_c = mo_credit * pv_frac if (pv_frac + bess_frac) > 0 else 0.0
+                bess_c = mo_credit * bess_frac if (pv_frac + bess_frac) > 0 else 0.0
+                # But VoE should reflect the actual rate each component earns,
+                # not just the average. Use year-1 credit ratios.
+                if _pv_exp_mo[m] > 0 and _bess_exp_mo[m] > 0:
+                    pv_rate_yr1 = _pv_cred_mo[m] / _pv_exp_mo[m]
+                    bess_rate_yr1 = _bess_cred_mo[m] / _bess_exp_mo[m]
+                elif _pv_exp_mo[m] > 0:
+                    pv_rate_yr1 = _pv_cred_mo[m] / _pv_exp_mo[m]
+                    bess_rate_yr1 = 0.0
+                elif _bess_exp_mo[m] > 0:
+                    pv_rate_yr1 = 0.0
+                    bess_rate_yr1 = _bess_cred_mo[m] / _bess_exp_mo[m]
+                else:
+                    pv_rate_yr1 = 0.0
+                    bess_rate_yr1 = 0.0
+                # Scale rates by the same factor as overall VoE
+                mo_voe = export_monthly_df["Value of Energy ($/kWh)"].iloc[i] if mo_total > 0 else 0.0
+                yr1_voe = (_pv_cred_mo[m] + _bess_cred_mo[m]) / yr1_mo_total if yr1_mo_total > 0 else 0.0
+                rate_scale = mo_voe / yr1_voe if yr1_voe > 0 else 1.0
+                pv_voe_col.append(round(pv_rate_yr1 * rate_scale, 5))
+                bess_voe_col.append(round(bess_rate_yr1 * rate_scale, 5))
+            export_monthly_df["Export PV (kWh)"] = pv_exp_col
+            export_monthly_df["Export BESS (kWh)"] = bess_exp_col
+            export_monthly_df["Value of Energy PV ($/kWh)"] = pv_voe_col
+            export_monthly_df["Value of Energy BESS ($/kWh)"] = bess_voe_col
+            # Reorder so Export PV/BESS columns follow Export (kWh)
+            _ordered = [c for c in export_monthly_df.columns if c not in ("Export PV (kWh)", "Export BESS (kWh)")]
+            _insert_idx = _ordered.index("Export (kWh)") + 1
+            _ordered = _ordered[:_insert_idx] + ["Export PV (kWh)", "Export BESS (kWh)"] + _ordered[_insert_idx:]
+            export_monthly_df = export_monthly_df[_ordered]
     retail_monthly_df = monthly_df[[c for c in retail_monthly_cols if c in monthly_df.columns]].copy()
+
+    # ------------------------------------------------------------------
+    # 4b. Export Rates (Annual) — aggregate monthly into per-year rows
+    # ------------------------------------------------------------------
+    _ann_rows = []
+    if "Year" in export_monthly_df.columns:
+        for yr_val in export_monthly_df["Year"].unique():
+            yr_slice = export_monthly_df[export_monthly_df["Year"] == yr_val]
+            row: dict = {"Year": int(yr_val)}
+            if "Calendar Year" in yr_slice.columns:
+                row["Calendar Year"] = int(yr_slice["Calendar Year"].iloc[0])
+            # Sum kWh and $ columns
+            for col in ["Generation (kWh)", "Export (kWh)", "Export PV (kWh)",
+                         "Export BESS (kWh)", "Export Credit ($)"]:
+                if col in yr_slice.columns:
+                    row[col] = round(float(yr_slice[col].sum()), 1)
+            # Weighted average Value of Energy = |credit| / export_kwh
+            yr_exp = row.get("Export (kWh)", 0.0)
+            yr_cred = abs(row.get("Export Credit ($)", 0.0))
+            row["Value of Energy ($/kWh)"] = round(yr_cred / yr_exp, 5) if yr_exp > 0 else 0.0
+            # BESS VoE columns
+            if "Export PV (kWh)" in row and "Export BESS (kWh)" in row:
+                for comp, exp_key in [("PV", "Export PV (kWh)"), ("BESS", "Export BESS (kWh)")]:
+                    voe_col = f"Value of Energy {comp} ($/kWh)"
+                    if voe_col in yr_slice.columns:
+                        c_exp = row.get(exp_key, 0.0)
+                        # Weighted avg VoE for component = sum(kWh_i * VoE_i) / sum(kWh_i)
+                        comp_exp_col = yr_slice[exp_key]
+                        comp_voe_col = yr_slice[voe_col]
+                        weighted_sum = float((comp_exp_col * comp_voe_col).sum())
+                        row[voe_col] = round(weighted_sum / c_exp, 5) if c_exp > 0 else 0.0
+            _ann_rows.append(row)
+    export_annual_df = pd.DataFrame(_ann_rows)
+    # Match column order to monthly sheet (minus Month)
+    _ann_col_order = [c for c in export_monthly_df.columns if c != "Month" and c in export_annual_df.columns]
+    export_annual_df = export_annual_df[[c for c in _ann_col_order if c in export_annual_df.columns]]
 
     # ------------------------------------------------------------------
     # 5. Assemble workbook
@@ -1252,6 +1400,7 @@ def generate_simulation_excel(
         annual_display_df.to_excel(writer, sheet_name="Annual Savings", index=False)
         export_hourly_df.to_excel(writer, sheet_name="Export Rates (Hourly)", index=False)
         export_monthly_df.to_excel(writer, sheet_name="Export Rates (Monthly)", index=False)
+        export_annual_df.to_excel(writer, sheet_name="Export Rates (Annual)", index=False)
         retail_hourly_df.to_excel(writer, sheet_name="Retail Rates (Hourly)", index=False)
         retail_monthly_df.to_excel(writer, sheet_name="Retail Rates (Monthly)", index=False)
 
@@ -1285,6 +1434,7 @@ def generate_simulation_excel(
         for sheet_name, df, dollar_fmt in [
             ("Export Rates (Hourly)", export_hourly_df, _fmt_dollar),
             ("Export Rates (Monthly)", export_monthly_df, _fmt_dollar),
+            ("Export Rates (Annual)", export_annual_df, _fmt_dollar),
             ("Retail Rates (Hourly)", retail_hourly_df, _fmt_dollar),
             ("Retail Rates (Monthly)", retail_monthly_df, _fmt_dollar),
             ("Annual Savings", annual_display_df, _fmt_dollar_acct),

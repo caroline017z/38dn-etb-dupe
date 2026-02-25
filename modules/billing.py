@@ -146,7 +146,11 @@ def run_billing_simulation(
     # Ensure aligned indices
     load = np.asarray(load_8760.values)
     solar = np.asarray(production_8760)
-    export_rates = np.asarray(export_rates_8760.values)
+    export_rates = (
+        np.asarray(export_rates_8760.values)
+        if export_rates_8760 is not None
+        else np.zeros(len(load))
+    )
     dt_index = cast(pd.DatetimeIndex, load_8760.index)
 
     n_hours = len(load)
@@ -214,6 +218,7 @@ def run_billing_simulation(
         # Replace grid-exchange arrays with post-battery values
         import_kwh = batt_dispatch.grid_import_kwh
         export_kwh = batt_dispatch.grid_export_kwh
+        net_kwh = import_kwh - export_kwh
 
         # Recompute energy cost and export credit on new arrays
         energy_cost = import_kwh * energy_rate
@@ -242,7 +247,6 @@ def run_billing_simulation(
             "batt_charge_kwh": batt_dispatch.batt_charge_kwh,
             "batt_to_load_kwh": batt_dispatch.batt_discharge_to_load_kwh,
             "batt_to_grid_kwh": batt_dispatch.batt_discharge_to_grid_kwh,
-            "batt_curtailed_kwh": batt_dispatch.batt_curtailed_kwh,
             "soc_kwh": batt_dispatch.soc_kwh,
         })
 
@@ -444,9 +448,12 @@ def _build_monthly_nem12(
         # --- NEM-2 NBC: interval-level non-bypassable charges ---
         m_nbc_charge = 0.0
         if nem_regime == "NEM-2" and nbc_rate > 0:
-            # NBC applies to each hour where net consumption > 0
+            # NBC applies to net consumption per hour (hours where import > export).
+            # Post-battery dispatch, mutual exclusivity cleanup ensures import and
+            # export are never simultaneously positive, so this is equivalent to
+            # summing import_kwh for import-only hours.
             month_net = month_import - month_export
-            nbc_kwh = np.maximum(month_net, 0).sum()
+            nbc_kwh = float(np.maximum(month_net, 0).sum())
             m_nbc_charge = float(nbc_kwh * nbc_rate)
 
         # --- Net bill (pre-true-up) ---
@@ -496,7 +503,10 @@ def _build_monthly_nem12(
         })
 
     # --- NSC true-up ---
-    _apply_nsc_true_up(monthly_rows, import_kwh, export_kwh, energy_rate, nsc_rate)
+    _apply_nsc_true_up(
+        monthly_rows, import_kwh, export_kwh, energy_rate, energy_period,
+        period_rates, nsc_rate,
+    )
 
     return monthly_rows
 
@@ -506,9 +516,14 @@ def _apply_nsc_true_up(
     import_kwh: np.ndarray,
     export_kwh: np.ndarray,
     energy_rate: np.ndarray,
+    energy_period: np.ndarray,
+    period_rates: dict,
     nsc_rate: float,
 ) -> None:
     """Apply Net Surplus Compensation true-up to month 12 if annual net surplus.
+
+    Uses per-TOU-period annual netting to compute the value of the surplus,
+    matching the same netting logic used in _build_monthly_nem12.
 
     Modifies monthly_rows in place.
     """
@@ -519,18 +534,18 @@ def _apply_nsc_true_up(
 
     surplus_kwh = abs(annual_net_energy)
 
-    # Compute the weighted average retail rate for exported energy
-    total_export = float(export_kwh.sum())
-    if total_export <= 0:
-        return
+    # Compute what TOU netting valued the surplus at using per-period netting
+    # (same math as _build_monthly_nem12: net each TOU period, sum negative nets)
+    tou_credit_for_surplus = 0.0
+    for pidx, rate in period_rates.items():
+        period_mask = energy_period == pidx
+        if not period_mask.any():
+            continue
+        net_p = float(import_kwh[period_mask].sum() - export_kwh[period_mask].sum())
+        if net_p < 0:
+            # This period has net surplus; TOU netting credits it at this rate
+            tou_credit_for_surplus += abs(net_p) * rate
 
-    # What TOU netting valued the surplus at (weighted avg retail rate)
-    export_mask = export_kwh > 0
-    if not export_mask.any():
-        return
-    weighted_avg_retail = float(np.sum(export_kwh[export_mask] * energy_rate[export_mask])) / total_export
-
-    tou_credit_for_surplus = surplus_kwh * weighted_avg_retail
     nsc_credit = surplus_kwh * nsc_rate
     nsc_adjustment = tou_credit_for_surplus - nsc_credit  # positive = credit reduction
 
