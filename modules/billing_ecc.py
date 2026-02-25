@@ -9,6 +9,10 @@ code (projections, charts, downloads) works unchanged.
 import pandas as pd
 import numpy as np
 
+import sys, os
+# Use vendored copy to avoid dependency conflicts on Streamlit Cloud
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "vendor"))
+
 from electricitycostcalculator.openei_tariff.openei_tariff_analyzer import (
     OpenEI_tariff,
     tariff_struct_from_openei_data,
