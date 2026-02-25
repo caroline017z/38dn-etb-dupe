@@ -5,6 +5,17 @@ Simulates annual electricity bills for California agricultural and commercial
 customers with solar PV systems under Net Value Billing Tariff (NVBT).
 """
 
+# Install electricitycostcalculator without deps at startup
+# (its PyPI metadata pins pandas<0.25 which conflicts with modern pandas)
+import subprocess, sys
+try:
+    import electricitycostcalculator  # noqa: F401
+except ImportError:
+    subprocess.check_call(
+        [sys.executable, "-m", "pip", "install", "--no-deps",
+         "electricitycostcalculator>=0.2.0", "-q"],
+    )
+
 import streamlit as st
 import pandas as pd
 import numpy as np

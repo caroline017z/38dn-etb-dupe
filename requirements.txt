@@ -7,4 +7,7 @@ python-dotenv>=1.0.0
 geopy>=2.4.0
 cvxpy>=1.4.0
 openpyxl>=3.1.0
-electricitycostcalculator>=0.2.0
+# ECC runtime deps (installed explicitly since ECC has stale metadata pins)
+lxml>=5.0
+holidays
+matplotlib>=3.5.0
