@@ -398,7 +398,7 @@ if st.session_state.get("show_all_sims"):
         _scols[4].write(_sdisp_date)
 
         with _scols[5]:
-            if st.button("Load", key=f"load_{_sname}", use_container_width=True):
+            if st.button("Load", key=f"load_{_sname}", width="stretch"):
                 touch_simulation_mtime(_sname)
                 populate_session_from_simulation(
                     st.session_state, _load_simulation(_sname)
@@ -407,7 +407,7 @@ if st.session_state.get("show_all_sims"):
                 st.rerun()
 
         with _scols[6]:
-            if st.button("Del", key=f"del_{_sname}", use_container_width=True):
+            if st.button("Del", key=f"del_{_sname}", width="stretch"):
                 st.session_state[f"confirm_del_{_sname}"] = True
 
         if st.session_state.get(f"confirm_del_{_sname}"):
@@ -467,7 +467,7 @@ _mgmt_btn_cols = st.columns([1.2, 0.05, 0.8, 0.05, 1, 0.05, 1, 0.05, 1.2])
 
 # --- Simulations popover ---
 with _mgmt_btn_cols[0]:
-    with st.popover("Simulations", use_container_width=True):
+    with st.popover("Simulations", width="stretch"):
         _all_sims = list_saved_simulations()
         _recent_3 = _all_sims[:3]
 
@@ -483,7 +483,7 @@ with _mgmt_btn_cols[0]:
                 if st.button(
                     _rsim,
                     key=f"popover_sim_{_rsim}",
-                    use_container_width=True,
+                    width="stretch",
                     help=f"{_rsize:,.0f} kW | {_rutil}{_rbatt_lbl} | {_rdate}",
                 ):
                     touch_simulation_mtime(_rsim)
@@ -495,7 +495,7 @@ with _mgmt_btn_cols[0]:
         else:
             st.caption("No saved simulations yet.")
 
-        if st.button("View All Simulations", use_container_width=True, type="primary"):
+        if st.button("View All Simulations", width="stretch", type="primary"):
             st.session_state["show_all_sims"] = True
             st.rerun()
 
@@ -504,7 +504,7 @@ with _mgmt_btn_cols[2]:
     if st.button(
         "System Profiles",
         key="mgmt_btn_system",
-        use_container_width=True,
+        width="stretch",
         type="primary" if st.session_state.active_mgmt_tab == "System Profiles" else "secondary",
     ):
         st.session_state.active_mgmt_tab = (
@@ -517,7 +517,7 @@ with _mgmt_btn_cols[4]:
     if st.button(
         "Load Profiles",
         key="mgmt_btn_load",
-        use_container_width=True,
+        width="stretch",
         type="primary" if st.session_state.active_mgmt_tab == "Load Profiles" else "secondary",
     ):
         st.session_state.active_mgmt_tab = (
@@ -530,7 +530,7 @@ with _mgmt_btn_cols[6]:
     if st.button(
         "Export Profiles",
         key="mgmt_btn_export",
-        use_container_width=True,
+        width="stretch",
         type="primary" if st.session_state.active_mgmt_tab == "Export Profiles" else "secondary",
     ):
         st.session_state.active_mgmt_tab = (
@@ -542,7 +542,7 @@ with _mgmt_btn_cols[6]:
 save_btn = False
 sim_name = ""
 with _mgmt_btn_cols[8]:
-    with st.popover("Save", use_container_width=True):
+    with st.popover("Save", width="stretch"):
         sim_name = st.text_input(
             "Simulation Name",
             placeholder="e.g., Ranch-500kW-AG1-SAT",
@@ -551,7 +551,7 @@ with _mgmt_btn_cols[8]:
         save_btn = st.button(
             "Save Current Simulation",
             disabled=(not sim_name),
-            use_container_width=True,
+            width="stretch",
         )
 
 
@@ -610,12 +610,12 @@ if st.session_state.active_mgmt_tab == "Load Profiles":
             import plotly.graph_objects as go
             fig = go.Figure(go.Bar(x=MONTH_NAMES, y=monthly_kwh.values, marker_color="#636EFA"))
             fig.update_layout(title="Monthly Load (kWh)", yaxis_title="kWh", height=300, template="plotly_white")
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
         except Exception as e:
             st.warning(str(e))
 
         st.caption("Edit the data below and click Save to update.")
-        edited_df = st.data_editor(edit_df, num_rows="fixed", use_container_width=True, height=400, key="lp_editor")
+        edited_df = st.data_editor(edit_df, num_rows="fixed", width="stretch", height=400, key="lp_editor")
 
         lp_save_edit = st.button("Save Changes", key="lp_save_edit")
         if lp_save_edit:
@@ -686,12 +686,12 @@ if st.session_state.active_mgmt_tab == "Export Profiles":
             import plotly.graph_objects as go
             fig = go.Figure(go.Bar(x=MONTH_NAMES, y=monthly_avg.values, marker_color="#00CC96"))
             fig.update_layout(title="Monthly Avg Export Rate ($/kWh)", yaxis_title="$/kWh", height=300, template="plotly_white")
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
         except Exception as e:
             st.warning(str(e))
 
         st.caption("Edit the data below and click Save to update.")
-        edited_df = st.data_editor(edit_df, num_rows="fixed", use_container_width=True, height=400, key="ep_editor")
+        edited_df = st.data_editor(edit_df, num_rows="fixed", width="stretch", height=400, key="ep_editor")
 
         ep_save_edit = st.button("Save Changes", key="ep_save_edit")
         if ep_save_edit:
@@ -721,7 +721,7 @@ if st.session_state.active_mgmt_tab == "System Profiles":
             st.caption("Modify the sidebar values, then click Update to overwrite this profile.")
             _sp_edit_bcols = st.columns(2)
             with _sp_edit_bcols[0]:
-                if st.button("Update Profile", key="sp_update_btn", type="primary", use_container_width=True):
+                if st.button("Update Profile", key="sp_update_btn", type="primary", width="stretch"):
                     try:
                         _save_system_profile(_sp_editing_name)
                         st.session_state.pop("sp_editing", None)
@@ -730,7 +730,7 @@ if st.session_state.active_mgmt_tab == "System Profiles":
                     except Exception as e:
                         st.error(str(e))
             with _sp_edit_bcols[1]:
-                if st.button("Cancel Edit", key="sp_cancel_edit", use_container_width=True):
+                if st.button("Cancel Edit", key="sp_cancel_edit", width="stretch"):
                     st.session_state.pop("sp_editing", None)
                     st.rerun()
         else:
@@ -756,13 +756,13 @@ if st.session_state.active_mgmt_tab == "System Profiles":
             sel_sp = st.selectbox("Select profile", saved_sp, key="sp_sel")
             _sp_action_cols = st.columns(4)
             with _sp_action_cols[0]:
-                sp_view_btn = st.button("View", key="sp_view", use_container_width=True)
+                sp_view_btn = st.button("View", key="sp_view", width="stretch")
             with _sp_action_cols[1]:
-                sp_edit_btn = st.button("Edit", key="sp_edit", use_container_width=True)
+                sp_edit_btn = st.button("Edit", key="sp_edit", width="stretch")
             with _sp_action_cols[2]:
-                sp_dup_btn = st.button("Duplicate", key="sp_dup", use_container_width=True)
+                sp_dup_btn = st.button("Duplicate", key="sp_dup", width="stretch")
             with _sp_action_cols[3]:
-                sp_del_btn = st.button("Delete", key="sp_del", use_container_width=True)
+                sp_del_btn = st.button("Delete", key="sp_del", width="stretch")
 
             if sp_del_btn and sel_sp:
                 _delete_file(SYSTEM_PROFILES_DIR, sel_sp, ".json")
@@ -863,7 +863,7 @@ with st.sidebar:
             help="Select a saved system profile to auto-fill Location and PV System settings.",
         )
         if _sp_selected != "(none)":
-            if st.button("Apply Profile", key="sp_apply_btn", type="primary", use_container_width=True):
+            if st.button("Apply Profile", key="sp_apply_btn", type="primary", width="stretch"):
                 st.session_state["pending_system_profile"] = _sp_selected
                 st.rerun()
         st.divider()
@@ -1286,6 +1286,7 @@ with st.sidebar:
 
     # --- Charge / Discharge window presets ---
     WINDOW_PRESETS = {
+        "Optimized (Best Export Hours)": "optimized",
         "Charge 9-15 / Discharge 16-21": (9, 15, 16, 21),
         "Charge 10-16 / Discharge 16-21": (10, 16, 16, 21),
         "Charge 8-14 / Discharge 17-22": (8, 14, 17, 22),
@@ -1299,7 +1300,15 @@ with st.sidebar:
         key="bess_window_preset",
     )
     preset_vals = WINDOW_PRESETS[window_preset]
-    if preset_vals is not None:
+    optimized_discharge = (preset_vals == "optimized")
+    if optimized_discharge:
+        charge_window_start, charge_window_end = 0, 23
+        discharge_window_start, discharge_window_end = 0, 23
+        if battery_enabled:
+            st.caption(
+                f"Auto-selects best {int(battery_hours)}hr export block per day"
+            )
+    elif preset_vals is not None:
         charge_window_start, charge_window_end = preset_vals[0], preset_vals[1]
         discharge_window_start, discharge_window_end = preset_vals[2], preset_vals[3]
         if battery_enabled:
@@ -1383,6 +1392,7 @@ with st.sidebar:
             charge_window_end=charge_window_end,
             discharge_window_start=discharge_window_start,
             discharge_window_end=discharge_window_end,
+            optimized_discharge=optimized_discharge,
         )
     else:
         st.session_state.battery_config = None
@@ -1892,13 +1902,13 @@ if not all_ready:
 
 _run_col, _edit_col = st.columns([1, 1])
 with _run_col:
-    run_sim = st.button("Run Simulation", type="primary", disabled=not all_ready, use_container_width=True)
+    run_sim = st.button("Run Simulation", type="primary", disabled=not all_ready, width="stretch")
 with _edit_col:
     _has_saved_view = st.session_state.saved_view is not None
     edit_sim = st.button(
         "Edit Simulation",
         disabled=not _has_saved_view,
-        use_container_width=True,
+        width="stretch",
         help="Populate sidebar with the saved simulation's inputs so you can tweak and re-run",
     )
 
@@ -2007,12 +2017,17 @@ if run_sim:
                         d_masks, d_prices = _build_demand_lp_inputs(_tariff, _dt_idx)
                         _energy_rates = _build_hourly_energy_rates(_tariff, _dt_idx)
 
+                        _export_for_sizing = (
+                            _export_rates_for_sim
+                            if st.session_state.export_rates is None
+                            else st.session_state.export_rates
+                        )
                         sizing_res = optimize_capacity_kwh(
                             candidate_sizes_kwh=candidates,
                             pv_kwh=np.asarray(st.session_state.production_8760),
                             load_kwh=np.asarray(st.session_state.load_8760.values),
                             import_price=_energy_rates,
-                            export_price=np.asarray(st.session_state.export_rates.values),
+                            export_price=np.asarray(_export_for_sizing.values),
                             demand_window_masks=d_masks,
                             demand_prices=d_prices,
                             battery_config=batt_cfg,
@@ -2310,16 +2325,16 @@ if st.session_state.billing_result is not None:
             xaxis_title="Year", yaxis_title="$",
             template="plotly_white", height=350,
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
     # --- Tab 3: Charts ---
     with tab3:
         st.subheader("Production vs. Load")
         fig_prod = create_production_vs_load_chart(result)
-        st.plotly_chart(fig_prod, use_container_width=True)
+        st.plotly_chart(fig_prod, width="stretch")
         st.subheader("Monthly Bill Breakdown")
         fig_bill = create_monthly_bill_chart(result)
-        st.plotly_chart(fig_bill, use_container_width=True)
+        st.plotly_chart(fig_bill, width="stretch")
 
     # --- Tab 4: Savings & Payback ---
     with tab4:
@@ -2491,7 +2506,7 @@ if st.session_state.billing_result is not None:
                     yaxis_title="Net Annual Bill ($)",
                     template="plotly_white", height=400,
                 )
-                st.plotly_chart(fig_sz, use_container_width=True)
+                st.plotly_chart(fig_sz, width="stretch")
 
                 # Show sizing table
                 st.subheader("Sizing Detail")

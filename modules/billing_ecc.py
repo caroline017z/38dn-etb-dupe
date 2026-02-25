@@ -255,6 +255,8 @@ def run_ecc_billing_simulation(
             "total_demand_charge": round(m_demand_cost, 2),
             "fixed_charge": round(m_fixed_cost, 2),
             "export_credit": round(m_export_credit, 2),
+            "nbc_charge": 0.0,
+            "nsc_adjustment": 0.0,
             "net_bill": round(m_net_bill, 2),
         })
 

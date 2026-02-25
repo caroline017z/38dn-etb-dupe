@@ -36,6 +36,7 @@ def _cfg(
     charge_end: int = 23,
     discharge_start: int = 0,
     discharge_end: int = 23,
+    optimized_discharge: bool = False,
 ) -> BatteryConfig:
     return BatteryConfig(
         battery_hours=hours,
@@ -48,6 +49,7 @@ def _cfg(
         charge_window_end=charge_end,
         discharge_window_start=discharge_start,
         discharge_window_end=discharge_end,
+        optimized_discharge=optimized_discharge,
     )
 
 
@@ -226,64 +228,63 @@ class TestWindowEnforcement:
 # ---------------------------------------------------------------------------
 # 5. Export fraction constraint
 # ---------------------------------------------------------------------------
-class TestExportFraction:
+class TestExportPowerCap:
 
-    def test_export_fraction_80pct(self):
-        """With discharge_limit_pct=80, batt_to_grid/(total_discharge) <= 0.80
-        wherever discharge > 0."""
+    def test_export_power_cap_80pct(self):
+        """With discharge_limit_pct=80, batt_to_grid <= 0.80 * power_kw
+        every hour."""
         N = 72
         pv = np.zeros(N)
         pv[8:16] = 12.0   # lots of PV mid-day
         load = np.full(N, 3.0)
+        cap = 40.0
+        hrs = 4.0
         frac = 0.80
+        power_kw = cap / hrs  # 10 kW
+        max_export_kw = frac * power_kw  # 8 kW
 
         r = dispatch_battery(
             pv_kwh=pv, load_kwh=load,
             import_price=np.full(N, 0.30),
             export_price=np.full(N, 0.10),
             demand_window_masks={}, demand_prices={},
-            battery_config=_cfg(discharge_limit_pct=80.0),
-            capacity_kwh=40.0,
+            battery_config=_cfg(discharge_limit_pct=80.0, hours=hrs),
+            capacity_kwh=cap,
         )
         assert r.solver_status in (cp.OPTIMAL, cp.OPTIMAL_INACCURATE)
 
-        total_disch = (r.batt_discharge_to_load_kwh
-                       + r.batt_discharge_to_grid_kwh
-                       + r.batt_curtailed_kwh)
-        active = total_disch > TOL
-        if active.any():
-            ratio = r.batt_discharge_to_grid_kwh[active] / total_disch[active]
-            assert np.all(ratio <= frac + TOL), (
-                f"max export ratio {ratio.max():.4f} exceeds {frac}"
-            )
+        # Export power should never exceed frac * power_kw
+        assert np.all(r.batt_discharge_to_grid_kwh <= max_export_kw + TOL), (
+            f"max export {r.batt_discharge_to_grid_kwh.max():.4f} exceeds "
+            f"{max_export_kw}"
+        )
 
-    def test_export_fraction_50pct(self):
-        """Tighter limit: 50% export fraction."""
+    def test_export_power_cap_50pct(self):
+        """Tighter limit: 50% export power cap."""
         N = 48
         pv = np.zeros(N)
         pv[10:15] = 15.0
         load = np.full(N, 2.0)
+        cap = 30.0
+        hrs = 4.0
         frac = 0.50
+        power_kw = cap / hrs  # 7.5 kW
+        max_export_kw = frac * power_kw  # 3.75 kW
 
         r = dispatch_battery(
             pv_kwh=pv, load_kwh=load,
             import_price=np.full(N, 0.30),
             export_price=np.full(N, 0.15),
             demand_window_masks={}, demand_prices={},
-            battery_config=_cfg(discharge_limit_pct=50.0),
-            capacity_kwh=30.0,
+            battery_config=_cfg(discharge_limit_pct=50.0, hours=hrs),
+            capacity_kwh=cap,
         )
         assert r.solver_status in (cp.OPTIMAL, cp.OPTIMAL_INACCURATE)
 
-        total_disch = (r.batt_discharge_to_load_kwh
-                       + r.batt_discharge_to_grid_kwh
-                       + r.batt_curtailed_kwh)
-        active = total_disch > TOL
-        if active.any():
-            ratio = r.batt_discharge_to_grid_kwh[active] / total_disch[active]
-            assert np.all(ratio <= frac + TOL), (
-                f"max export ratio {ratio.max():.4f} exceeds {frac}"
-            )
+        assert np.all(r.batt_discharge_to_grid_kwh <= max_export_kw + TOL), (
+            f"max export {r.batt_discharge_to_grid_kwh.max():.4f} exceeds "
+            f"{max_export_kw}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -379,16 +380,16 @@ class TestDemandShaving:
 
 
 # ---------------------------------------------------------------------------
-# 7. PV-only charging — battery never charges more than surplus PV
+# 7. PV charging — battery never charges more than available PV
 # ---------------------------------------------------------------------------
-class TestPVOnlyCharging:
+class TestPVCharging:
 
-    def test_no_grid_charging(self):
+    def test_no_pure_grid_charging(self):
+        """Battery cannot charge in hours with zero PV (no pure grid charging)."""
         N = 48
         pv = np.zeros(N)
         pv[10:14] = 6.0   # only 4 h of PV
         load = np.full(N, 4.0)
-        surplus = np.maximum(0.0, pv - load)
 
         r = dispatch_battery(
             pv_kwh=pv, load_kwh=load,
@@ -398,7 +399,13 @@ class TestPVOnlyCharging:
             battery_config=_cfg(), capacity_kwh=20.0,
         )
         assert r.solver_status in (cp.OPTIMAL, cp.OPTIMAL_INACCURATE)
-        assert np.all(r.batt_charge_kwh <= surplus + TOL)
+        # Battery must not charge when there's no PV at all
+        no_pv = pv <= 0
+        np.testing.assert_allclose(
+            r.batt_charge_kwh[no_pv], 0.0, atol=TOL,
+        )
+        # Battery charge never exceeds PV production
+        assert np.all(r.batt_charge_kwh <= pv + TOL)
 
 
 # ---------------------------------------------------------------------------
@@ -587,20 +594,16 @@ class TestMonthlyDecomposition:
 
 
 # ---------------------------------------------------------------------------
-# 10. Zero-load export with curtailment
+# 10. Zero-load export with power cap
 # ---------------------------------------------------------------------------
 class TestZeroLoadExport:
-    """Battery must be able to export with zero on-site load, curtailing
-    the non-exportable fraction."""
+    """Battery must be able to export with zero on-site load.
+    Export is capped at frac * power_kw per hour — no energy is wasted."""
 
     def test_export_with_zero_load(self):
         """With zero load, battery charges from PV and exports during
-        discharge window.  With 80% discharge_limit_pct the LP should
-        curtail 20% of discharge and export the remaining 80%.
-
-        Uses a price differential (low export during PV hours, high
-        during evening) to give the battery an economic incentive to
-        shift energy from daytime to evening export.
+        discharge window at up to frac * power_kw per hour.
+        No energy is curtailed or lost.
         """
         N = 48
         pv = np.zeros(N)
@@ -608,14 +611,19 @@ class TestZeroLoadExport:
         load = np.zeros(N)  # no on-site load at all
 
         # Export price: low during PV hours, higher during discharge window
-        # (but still below import_price to prevent unbounded grid arbitrage)
         exp_price = np.full(N, 0.03)
         hours = np.arange(N) % 24
         exp_price[(hours >= 16) & (hours <= 23)] = 0.20
 
         cap = 40.0
+        hrs = 4.0
+        frac = 0.80
+        power_kw = cap / hrs  # 10 kW
+        max_export_kw = frac * power_kw  # 8 kW
+
         cfg = _cfg(
             discharge_limit_pct=80.0,
+            hours=hrs,
             charge_start=8, charge_end=15,
             discharge_start=16, discharge_end=23,
         )
@@ -630,7 +638,6 @@ class TestZeroLoadExport:
         assert r.solver_status in (cp.OPTIMAL, cp.OPTIMAL_INACCURATE)
 
         total_export = float(r.batt_discharge_to_grid_kwh.sum())
-        total_curtailed = float(r.batt_curtailed_kwh.sum())
         total_to_load = float(r.batt_discharge_to_load_kwh.sum())
 
         # With zero load, batt_to_load must be zero
@@ -638,25 +645,18 @@ class TestZeroLoadExport:
             f"batt_to_load should be ~0 with zero load, got {total_to_load:.4f}"
         )
 
-        # Battery should actually export (the whole point of this fix)
+        # Battery should actually export
         assert total_export > 1.0, (
             f"Battery should export energy with zero load, got {total_export:.4f}"
         )
 
-        # Curtailment should be non-zero (20% of what's discharged)
-        assert total_curtailed > TOL, (
-            f"Expected non-zero curtailment, got {total_curtailed:.4f}"
+        # Export power capped per hour
+        assert np.all(r.batt_discharge_to_grid_kwh <= max_export_kw + TOL), (
+            f"max export {r.batt_discharge_to_grid_kwh.max():.4f} exceeds "
+            f"{max_export_kw}"
         )
 
-        # Export fraction: grid_export / (grid_export + curtailed) should be ~0.80
-        total_disch = total_export + total_curtailed
-        if total_disch > TOL:
-            export_ratio = total_export / total_disch
-            assert abs(export_ratio - 0.80) < 0.02, (
-                f"Export ratio should be ~0.80, got {export_ratio:.4f}"
-            )
-
-        # Energy balance: curtailed energy is NOT in grid balance
+        # Energy balance: no energy is lost
         net_load = load - pv
         balance = (
             r.grid_import_kwh - r.grid_export_kwh
@@ -666,3 +666,125 @@ class TestZeroLoadExport:
             + r.batt_discharge_to_grid_kwh
         )
         np.testing.assert_allclose(balance, 0.0, atol=TOL)
+
+
+# ---------------------------------------------------------------------------
+# 11. Optimized discharge window selection
+# ---------------------------------------------------------------------------
+class TestOptimizedDischarge:
+    """Optimized mode picks the highest-value consecutive block per day."""
+
+    def test_optimized_picks_expensive_hours(self):
+        """With two price peaks (hours 10-13 @$0.30, 18-21 @$0.50),
+        the optimizer should discharge during hours 18-21."""
+        N = 48
+        pv = np.zeros(N)
+        pv[6:14] = 12.0  # plenty of PV for charging
+        load = np.zeros(N)
+
+        exp_price = np.full(N, 0.05)
+        hours = np.arange(N) % 24
+        exp_price[(hours >= 10) & (hours <= 13)] = 0.30  # lesser peak
+        exp_price[(hours >= 18) & (hours <= 21)] = 0.50  # best peak
+
+        cap = 40.0
+        cfg = _cfg(hours=4.0, optimized_discharge=True)
+
+        r = dispatch_battery(
+            pv_kwh=pv, load_kwh=load,
+            import_price=np.full(N, 0.25),
+            export_price=exp_price,
+            demand_window_masks={}, demand_prices={},
+            battery_config=cfg, capacity_kwh=cap,
+        )
+        assert r.solver_status in (cp.OPTIMAL, cp.OPTIMAL_INACCURATE)
+
+        # Battery should export during hrs 18-21 (the expensive window)
+        for day_offset in [0, 24]:
+            day_export = r.batt_discharge_to_grid_kwh[day_offset:day_offset + 24]
+            expensive_export = day_export[18:22].sum()
+            cheap_export = day_export[10:14].sum()
+            assert expensive_export > cheap_export + TOL, (
+                f"Optimized should prefer hrs 18-21 ({expensive_export:.2f}) "
+                f"over 10-13 ({cheap_export:.2f})"
+            )
+
+
+# ---------------------------------------------------------------------------
+# 12. Monthly LP with demand charges
+# ---------------------------------------------------------------------------
+class TestMonthlyDemandCharges:
+    """Verify demand charges work correctly in monthly decomposition mode."""
+
+    def test_monthly_demand_produces_finite_objective(self):
+        """Monthly LP with non-trivial demand prices should produce
+        a finite, non-negative objective value (no unbounded peak vars)."""
+        N = 8760
+        pv = np.zeros(N)
+        hours = np.arange(N) % 24
+        pv[(hours >= 8) & (hours <= 16)] = 5.0
+        load = np.full(N, 3.0)
+
+        # Simple demand mask: all hours
+        demand_masks = {"flat": np.ones(N, dtype=bool)}
+        demand_prices = {"flat": 10.0}  # $10/kW demand charge
+
+        cfg = _cfg(charge_start=8, charge_end=15,
+                    discharge_start=16, discharge_end=23)
+        r = dispatch_battery(
+            pv_kwh=pv, load_kwh=load,
+            import_price=np.full(N, 0.15),
+            export_price=np.full(N, 0.05),
+            demand_window_masks=demand_masks,
+            demand_prices=demand_prices,
+            battery_config=cfg, capacity_kwh=20.0,
+            monthly=True,
+        )
+        assert r.solver_status in (cp.OPTIMAL, cp.OPTIMAL_INACCURATE, "mixed"), (
+            f"Monthly demand LP failed: {r.solver_status}"
+        )
+        assert np.isfinite(r.objective_value), (
+            f"Objective should be finite, got {r.objective_value}"
+        )
+        assert r.objective_value >= -1e6, (
+            f"Objective should not be extremely negative, got {r.objective_value}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 13. Solver fallback path
+# ---------------------------------------------------------------------------
+class TestSolverFallback:
+    """Verify the failed-solver fallback returns PV-only flows."""
+
+    def test_infeasible_config_falls_back(self):
+        """An impossible SOC config (min_soc==max_soc==100% with discharge
+        required) should trigger fallback to PV-only flows."""
+        N = 48
+        pv = np.zeros(N)
+        load = np.full(N, 5.0)  # constant load, no PV
+
+        cfg = _cfg(
+            min_soc_pct=100.0,
+            max_soc_pct=100.0,
+            charge_eff=0.95,
+            discharge_eff=0.95,
+        )
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            r = dispatch_battery(
+                pv_kwh=pv, load_kwh=load,
+                import_price=np.full(N, 0.20),
+                export_price=np.full(N, 0.05),
+                demand_window_masks={}, demand_prices={},
+                battery_config=cfg, capacity_kwh=20.0,
+            )
+
+        # Fallback should produce PV-only flows
+        # With zero PV and constant load, import should equal load
+        np.testing.assert_allclose(r.grid_import_kwh, load, atol=TOL)
+        np.testing.assert_allclose(r.grid_export_kwh, 0.0, atol=TOL)
+        np.testing.assert_allclose(r.batt_charge_kwh, 0.0, atol=TOL)
+        np.testing.assert_allclose(r.batt_discharge_to_load_kwh, 0.0, atol=TOL)
+        np.testing.assert_allclose(r.batt_discharge_to_grid_kwh, 0.0, atol=TOL)

@@ -35,7 +35,6 @@ class DispatchResult:
     batt_charge_kwh: np.ndarray           # energy into battery (from PV)
     batt_discharge_to_load_kwh: np.ndarray  # battery -> load
     batt_discharge_to_grid_kwh: np.ndarray  # battery -> grid
-    batt_curtailed_kwh: np.ndarray        # curtailed (lost) discharge energy
     solver_status: str
     objective_value: float
 
@@ -56,6 +55,43 @@ def _build_window_mask(
         return (hours >= start_hour) & (hours <= end_hour)
     # wraps midnight
     return (hours >= start_hour) | (hours <= end_hour)
+
+
+def _build_optimized_discharge_mask(
+    export_price: np.ndarray,
+    dt_index: pd.DatetimeIndex,
+    window_hours: int,
+) -> np.ndarray:
+    """Find the highest-value consecutive block per day for discharge.
+
+    For each day, evaluate all possible starting positions for a
+    ``window_hours``-length consecutive block and pick the one with the
+    highest total export price.  Returns a float mask (0/1).
+    """
+    N = len(export_price)
+    mask = np.zeros(N, dtype=float)
+    dates = dt_index.date
+    unique_dates = np.unique(dates)
+
+    for d in unique_dates:
+        day_idx = np.where(dates == d)[0]
+        day_prices = export_price[day_idx]
+        n_hours = len(day_prices)
+        if n_hours < window_hours:
+            continue
+
+        best_start = 0
+        best_sum = -np.inf
+        for s in range(n_hours - window_hours + 1):
+            w_sum = day_prices[s : s + window_hours].sum()
+            if w_sum > best_sum:
+                best_sum = w_sum
+                best_start = s
+
+        for i in range(best_start, best_start + window_hours):
+            mask[day_idx[i]] = 1.0
+
+    return mask
 
 
 def _aggregate_status(results: list[DispatchResult]) -> str:
@@ -82,9 +118,6 @@ def _concatenate_results(results: list[DispatchResult]) -> DispatchResult:
         ),
         batt_discharge_to_grid_kwh=np.concatenate(
             [r.batt_discharge_to_grid_kwh for r in results]
-        ),
-        batt_curtailed_kwh=np.concatenate(
-            [r.batt_curtailed_kwh for r in results]
         ),
         solver_status=_aggregate_status(results),
         objective_value=sum(r.objective_value for r in results),
@@ -119,8 +152,7 @@ def _solve_single_lp(
     min_soc = cfg.min_soc_pct / 100.0 * capacity_kwh
     max_soc = cfg.max_soc_pct / 100.0 * capacity_kwh
 
-    frac = min(cfg.discharge_limit_pct / 100.0, 0.9999)
-    alpha = frac / (1.0 - frac)
+    frac = cfg.discharge_limit_pct / 100.0  # export power cap fraction
 
     # pre-computed constants
     net_load = load_kwh - pv_kwh               # positive  = deficit
@@ -131,12 +163,21 @@ def _solve_single_lp(
     hours = dt_index.hour.values
     month_arr = dt_index.month.values           # 1-12
 
-    charge_mask = _build_window_mask(
-        cfg.charge_window_start, cfg.charge_window_end, hours,
-    ).astype(float)
-    discharge_mask = _build_window_mask(
-        cfg.discharge_window_start, cfg.discharge_window_end, hours,
-    ).astype(float)
+    if cfg.optimized_discharge:
+        # Optimized: best consecutive block per day for discharge;
+        # charge allowed in all non-discharge hours.
+        window_hrs = max(1, int(cfg.battery_hours))
+        discharge_mask = _build_optimized_discharge_mask(
+            export_price, dt_index, window_hrs,
+        )
+        charge_mask = (1.0 - discharge_mask)  # charge when not discharging
+    else:
+        charge_mask = _build_window_mask(
+            cfg.charge_window_start, cfg.charge_window_end, hours,
+        ).astype(float)
+        discharge_mask = _build_window_mask(
+            cfg.discharge_window_start, cfg.discharge_window_end, hours,
+        ).astype(float)
 
     # ================================================================
     # CVXPY variables
@@ -144,31 +185,34 @@ def _solve_single_lp(
     batt_charge   = cp.Variable(N, nonneg=True, name="charge")
     batt_to_load  = cp.Variable(N, nonneg=True, name="to_load")
     batt_to_grid  = cp.Variable(N, nonneg=True, name="to_grid")
-    batt_curtailed = cp.Variable(N, nonneg=True, name="curtailed")
     soc           = cp.Variable(N, nonneg=True, name="soc")
     grid_import   = cp.Variable(N, nonneg=True, name="g_imp")
     grid_export   = cp.Variable(N, nonneg=True, name="g_exp")
 
-    # monthly peak demand vars — one per (period, month)
+    # monthly peak demand vars — only for months present in this chunk
+    present_months = np.unique(month_arr)  # 1-indexed month numbers
+    n_present = len(present_months)
+    month_to_idx = {int(m): i for i, m in enumerate(present_months)}
+
     peak_kw: dict[str, cp.Variable] = {}
     for pname in demand_prices:
         if demand_prices[pname] > 0 and pname in demand_window_masks:
-            peak_kw[pname] = cp.Variable(12, nonneg=True, name=f"pk_{pname}")
+            peak_kw[pname] = cp.Variable(n_present, nonneg=True, name=f"pk_{pname}")
 
-    discharge_total = batt_to_load + batt_to_grid + batt_curtailed
+    discharge_total = batt_to_load + batt_to_grid
 
     # ================================================================
     # Constraints
     # ================================================================
     constraints: list[cp.Constraint] = []
 
-    # 1. nodal energy balance (curtailed energy is lost, not in grid balance)
+    # 1. nodal energy balance
     constraints.append(
         grid_import - grid_export
         == net_load + batt_charge - batt_to_load - batt_to_grid
     )
 
-    # 2. PV-only charging (battery may only absorb surplus PV)
+    # 2. PV-only charging (battery absorbs surplus PV; remainder exports)
     constraints.append(batt_charge <= surplus_pv)
 
     # 3. battery-to-load cannot exceed unmet load
@@ -196,18 +240,19 @@ def _solve_single_lp(
     constraints.append(soc >= min_soc)
     constraints.append(soc <= max_soc)
 
-    # 7. export-fraction limit:
-    #    batt_to_grid <= alpha * (batt_to_load + batt_curtailed)
-    constraints.append(batt_to_grid <= alpha * (batt_to_load + batt_curtailed))
+    # 7. export power cap: battery can export up to frac * rated power
+    constraints.append(batt_to_grid <= frac * power_kw * discharge_mask)
 
-    # 8. demand-charge peak constraints
+    # 8. anti-arbitrage: export limited to on-site generation + battery
+    constraints.append(grid_export <= np.maximum(0.0, pv_kwh) + batt_to_grid)
+
+    # 9. demand-charge peak constraints (only months in this chunk)
     for pname, pk_var in peak_kw.items():
         mask = demand_window_masks[pname]
-        for m_idx in range(12):
-            month_num = m_idx + 1
+        for month_num, var_idx in month_to_idx.items():
             sel = np.where((month_arr == month_num) & mask)[0]
             if sel.size > 0:
-                constraints.append(grid_import[sel] <= pk_var[m_idx])
+                constraints.append(grid_import[sel] <= pk_var[var_idx])
 
     # ================================================================
     # Objective
@@ -222,7 +267,17 @@ def _solve_single_lp(
     ) if peak_kw else 0
     throughput    = EPSILON * cp.sum(batt_charge + discharge_total)
 
-    objective = cp.Minimize(energy_cost - export_rev + demand_cost + throughput)
+    # Battery utilization incentive: ensure the optimizer always prefers
+    # to charge the battery and export during the discharge window,
+    # even when the price differential barely covers round-trip losses.
+    # The 15% bonus overcomes the ~10% round-trip loss so that battery
+    # export is always preferred over direct PV export.
+    BATT_BONUS = 0.15
+    batt_incentive = BATT_BONUS * cp.sum(cp.multiply(export_price, batt_to_grid))
+
+    objective = cp.Minimize(
+        energy_cost - export_rev - batt_incentive + demand_cost + throughput
+    )
 
     # ================================================================
     # Solve
@@ -277,7 +332,6 @@ def _solve_single_lp(
             batt_charge_kwh=np.zeros(N),
             batt_discharge_to_load_kwh=np.zeros(N),
             batt_discharge_to_grid_kwh=np.zeros(N),
-            batt_curtailed_kwh=np.zeros(N),
             solver_status=prob.status or "failed",
             objective_value=float("inf"),
         )
@@ -287,7 +341,6 @@ def _solve_single_lp(
     b_chg = _val(batt_charge)
     b_tl  = _val(batt_to_load)
     b_tg  = _val(batt_to_grid)
-    b_cu  = _val(batt_curtailed)
     s     = _val(soc)
 
     # ---- Post-solve cleanup: numerical robustness ----
@@ -297,14 +350,13 @@ def _solve_single_lp(
     b_chg = np.maximum(0.0, b_chg)
     b_tl  = np.maximum(0.0, b_tl)
     b_tg  = np.maximum(0.0, b_tg)
-    b_cu  = np.maximum(0.0, b_cu)
     s     = np.clip(s, min_soc, max_soc)
 
     # 2. Enforce mutual exclusivity: battery cannot charge and discharge
     #    in the same hour.  The LP cost structure (round-trip losses +
     #    throughput penalty) already prevents this, but solver noise can
     #    leave tiny residuals.  Zero out the smaller side.
-    discharge = b_tl + b_tg + b_cu
+    discharge = b_tl + b_tg
     both_mask = (b_chg > 1e-6) & (discharge > 1e-6)
     if both_mask.any():
         for i in np.where(both_mask)[0]:
@@ -312,19 +364,15 @@ def _solve_single_lp(
                 b_chg[i] -= discharge[i]
                 b_tl[i] = 0.0
                 b_tg[i] = 0.0
-                b_cu[i] = 0.0
             else:
                 ratio_tl = b_tl[i] / discharge[i] if discharge[i] > 0 else 0.0
                 ratio_tg = b_tg[i] / discharge[i] if discharge[i] > 0 else 0.0
-                ratio_cu = b_cu[i] / discharge[i] if discharge[i] > 0 else 0.0
                 b_tl[i] -= b_chg[i] * ratio_tl
                 b_tg[i] -= b_chg[i] * ratio_tg
-                b_cu[i] -= b_chg[i] * ratio_cu
                 b_chg[i] = 0.0
         b_chg = np.maximum(0.0, b_chg)
         b_tl  = np.maximum(0.0, b_tl)
         b_tg  = np.maximum(0.0, b_tg)
-        b_cu  = np.maximum(0.0, b_cu)
 
     # 3. Enforce no grid charging: battery only charges from surplus PV
     #    (LP constraint: batt_charge <= surplus_pv; clip any residual)
@@ -342,7 +390,6 @@ def _solve_single_lp(
         batt_charge_kwh=b_chg,
         batt_discharge_to_load_kwh=b_tl,
         batt_discharge_to_grid_kwh=b_tg,
-        batt_curtailed_kwh=b_cu,
         solver_status=prob.status or "unknown",
         objective_value=float(prob.value) if prob.value is not None else float("inf"),
     )
