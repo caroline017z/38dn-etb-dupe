@@ -41,6 +41,7 @@ def optimize_capacity_kwh(
     demand_prices: dict[str, float],
     battery_config: BatteryConfig,
     monthly: bool = False,
+    dt_index: "pd.DatetimeIndex | None" = None,
 ) -> SizingResult:
     """Run dispatch for each candidate battery size and return the best.
 
@@ -63,7 +64,8 @@ def optimize_capacity_kwh(
         ``table`` (DataFrame) with one row per candidate.
     """
     N = len(pv_kwh)
-    dt_index = pd.date_range("2023-01-01", periods=N, freq="h")
+    if dt_index is None:
+        dt_index = pd.date_range("2023-01-01", periods=N, freq="h")
     month_arr = dt_index.month.values
 
     rows: list[dict] = []

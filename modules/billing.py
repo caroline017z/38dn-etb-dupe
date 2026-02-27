@@ -213,6 +213,7 @@ def run_billing_simulation(
             battery_config=battery_config,
             capacity_kwh=capacity_kwh,
             monthly=monthly_dispatch,
+            dt_index=dt_index,
         )
 
         # Replace grid-exchange arrays with post-battery values
@@ -482,6 +483,15 @@ def _build_monthly_nem12(
 
         m_net_bill = max(m_net_bill, tariff.min_monthly_charge)
 
+        # For ABO, adjust displayed energy_cost to match net_bill accounting
+        if billing_option == "ABO":
+            if month_num < 12:
+                _display_energy = 0.0
+            else:
+                _display_energy = monthly_energy_charge + deferred_energy
+        else:
+            _display_energy = m_energy_cost
+
         monthly_rows.append({
             "month": month_num,
             "load_kwh": round(m_load, 1),
@@ -491,7 +501,7 @@ def _build_monthly_nem12(
             "peak_demand_kw": round(m_peak_kw, 2),
             "export_peak_kwh": round(m_export_peak, 1),
             "export_offpeak_kwh": round(m_export_offpeak, 1),
-            "energy_cost": round(m_energy_cost, 2),
+            "energy_cost": round(_display_energy, 2),
             "flat_demand_charge": round(m_flat_demand, 2),
             "tou_demand_charge": round(m_tou_demand, 2),
             "total_demand_charge": round(m_demand_cost, 2),
