@@ -3,6 +3,7 @@ Output generation module — charts, CSV builders, and summary formatters.
 """
 
 import calendar
+from html import escape as _esc
 
 import numpy as np
 import pandas as pd
@@ -86,7 +87,7 @@ def render_styled_table(
         weight = "font-weight:700;" if col in bold_set else ""
         html.append(
             f'<th style="text-align:right; padding:6px 10px; border-bottom:2px solid #ccc;'
-            f' background:#f8f8f8; white-space:nowrap; {weight}">{col}</th>'
+            f' background:#f8f8f8; white-space:nowrap; {weight}">{_esc(str(col))}</th>'
         )
     html.append("</tr></thead><tbody>")
 
@@ -103,7 +104,7 @@ def render_styled_table(
                 cell_style = f"text-align:left; padding:5px 10px; white-space:nowrap; {col_bold}"
             if "(" in s:
                 cell_style += " color:#cc0000; background-color:#ffe0e0;"
-            html.append(f"<td style='{cell_style}'>{s}</td>")
+            html.append(f"<td style='{cell_style}'>{_esc(s)}</td>")
         html.append("</tr>")
 
     html.append("</tbody></table></div>")
@@ -348,11 +349,15 @@ def build_annual_projection(
 
     year1_bill_no_solar = result.annual_bill_without_solar
 
-    # Baseline breakdown (no solar)
-    year1_baseline_demand = year1_bill_no_solar - (year1_bill_no_solar - year1_demand - year1_fixed) - year1_fixed
-    # Simplify: baseline_demand ≈ year1_demand scaled by (baseline peak / solar peak)
-    # For projection, use the no-solar bill components directly
-    year1_baseline_energy = year1_bill_no_solar - year1_baseline_demand - year1_fixed
+    # Baseline breakdown (no solar) — use actual no-solar components
+    if result.monthly_baseline_details:
+        year1_baseline_demand = sum(d.get("demand", 0) for d in result.monthly_baseline_details)
+        year1_baseline_energy = sum(d.get("energy", 0) for d in result.monthly_baseline_details)
+        year1_fixed = sum(d.get("fixed", 0) for d in result.monthly_baseline_details)
+    else:
+        # Fallback: approximate from total no-solar bill
+        year1_baseline_demand = year1_demand
+        year1_baseline_energy = year1_bill_no_solar - year1_baseline_demand - year1_fixed
 
     rate_mult = rate_escalator_pct / 100.0
     load_mult = load_escalator_pct / 100.0

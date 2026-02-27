@@ -38,6 +38,7 @@ from modules.export_value import (
     parse_multiyear_export_rates,
 )
 from modules.billing import run_billing_simulation, BillingResult
+from modules.proposal import generate_proposal_pptx
 from modules.billing_ecc import (
     fetch_and_populate_ecc_tariff,
     load_ecc_tariff_from_json,
@@ -97,6 +98,7 @@ from sim_helpers import (
     touch_simulation_mtime,
     get_simulation_metadata,
     populate_session_from_simulation,
+    sanitize_filename,
 )
 
 
@@ -158,6 +160,7 @@ def _progress_overlay_html(pct: int, step_text: str) -> str:
 # HELPER FUNCTIONS — Profiles (Load & Export)
 # =============================================================================
 def _save_profile_csv(directory, name, df):
+    name = sanitize_filename(name)
     df.to_csv(os.path.join(directory, f"{name}.csv"), index=False)
 
 
@@ -1213,7 +1216,10 @@ with st.sidebar:
         )
         if nem_regime_2 in ("NEM-1", "NEM-2"):
             # Section 2 NEM-1/NEM-2 widgets (separate keys)
-            st.caption("Exports valued at retail TOU energy rate (per NEM tariff)")
+            nsc_rate_2, nbc_rate_2, billing_option_2 = _render_nem12_widgets("_2", nem_regime_2)
+            st.session_state["nsc_rate_2"] = nsc_rate_2
+            st.session_state["nbc_rate_2"] = nbc_rate_2
+            st.session_state["billing_option_2"] = billing_option_2
             export_method_2 = None
             selected_export_profile_2 = None
             flat_rate_2 = None
@@ -1628,7 +1634,7 @@ if generate_prod and lat is not None and lon is not None:
 # =============================================================================
 # LOAD PROFILE PARSING
 # =============================================================================
-if load_source == "Upload new CSV" and load_file is not None and st.session_state.load_8760 is None:
+if load_source == "Upload new CSV" and load_file is not None:
     try:
         df_load = pd.read_csv(load_file)
         load_values = _parse_8760_csv(df_load)
@@ -1758,33 +1764,34 @@ if ecc_load_json_btn:
         _ecc_uploaded = st.session_state.get("ecc_json_upload")
         if _ecc_uploaded is not None:
             import tempfile as _tmpmod
+            import shutil as _shutil
             try:
-                _tmp_dir = _tmpmod.mkdtemp()
-                _tmp_path = os.path.join(_tmp_dir, _ecc_uploaded.name)
-                with open(_tmp_path, "wb") as _f:
-                    _f.write(_ecc_uploaded.getvalue())
-                calc, tdata = load_ecc_tariff_from_json(_tmp_path)
-                st.session_state.ecc_cost_calculator = calc
-                st.session_state.ecc_tariff_data = tdata
-                _tnames = []
-                if isinstance(tdata, list):
-                    for td in tdata[:10]:
-                        if isinstance(td, dict):
-                            _tnames.append(td.get("name", td.get("label", "Unknown")))
-                st.session_state.ecc_tariff_metadata = {
-                    "source": f"JSON upload: {_ecc_uploaded.name}",
-                    "utility_id": "N/A",
-                    "utility": utility_name,
-                    "sector": "N/A",
-                    "rate_filter": "N/A",
-                    "num_tariffs": len(tdata) if isinstance(tdata, list) else 0,
-                    "tariff_names": _tnames,
-                }
-                # Save a copy to ECC_TARIFFS_DIR for future "Use Saved Tariff"
-                _save_name = os.path.splitext(_ecc_uploaded.name)[0]
-                _save_dest = os.path.join(ECC_TARIFFS_DIR, f"{_save_name}.json")
-                import shutil
-                shutil.copy2(_tmp_path, _save_dest)
+                with _tmpmod.TemporaryDirectory() as _tmp_dir:
+                    _safe_ecc_name = sanitize_filename(_ecc_uploaded.name)
+                    _tmp_path = os.path.join(_tmp_dir, _safe_ecc_name)
+                    with open(_tmp_path, "wb") as _f:
+                        _f.write(_ecc_uploaded.getvalue())
+                    calc, tdata = load_ecc_tariff_from_json(_tmp_path)
+                    st.session_state.ecc_cost_calculator = calc
+                    st.session_state.ecc_tariff_data = tdata
+                    _tnames = []
+                    if isinstance(tdata, list):
+                        for td in tdata[:10]:
+                            if isinstance(td, dict):
+                                _tnames.append(td.get("name", td.get("label", "Unknown")))
+                    st.session_state.ecc_tariff_metadata = {
+                        "source": f"JSON upload: {_ecc_uploaded.name}",
+                        "utility_id": "N/A",
+                        "utility": utility_name,
+                        "sector": "N/A",
+                        "rate_filter": "N/A",
+                        "num_tariffs": len(tdata) if isinstance(tdata, list) else 0,
+                        "tariff_names": _tnames,
+                    }
+                    # Save a copy to ECC_TARIFFS_DIR for future "Use Saved Tariff"
+                    _save_name = os.path.splitext(_safe_ecc_name)[0]
+                    _save_dest = os.path.join(ECC_TARIFFS_DIR, f"{_save_name}.json")
+                    _shutil.copy2(_tmp_path, _save_dest)
                 st.sidebar.success(f"ECC tariff loaded from JSON ({len(tdata)} block(s)).")
             except Exception as e:
                 st.error(f"ECC JSON load error: {e}")
@@ -1930,11 +1937,15 @@ if run_sim:
                 _progress_overlay_html(25, "Running ECC billing simulation..."),
                 unsafe_allow_html=True,
             )
+            _ecc_export = st.session_state.export_rates
+            if _ecc_export is None:
+                _ecc_dt = pd.date_range(start=f"{cod_year}-01-01 00:00", periods=8760, freq="h")
+                _ecc_export = pd.Series(np.zeros(8760), index=_ecc_dt, name="export_rate_per_kwh")
             result_pv_only = run_ecc_billing_simulation(
                 load_8760=st.session_state.load_8760,
                 production_8760=st.session_state.production_8760,
                 cost_calculator=st.session_state.ecc_cost_calculator,
-                export_rates_8760=st.session_state.export_rates,
+                export_rates_8760=_ecc_export,
                 tariff_data=st.session_state.get("ecc_tariff_data"),
             )
             st.session_state.billing_result_pv_only = result_pv_only
@@ -2032,6 +2043,7 @@ if run_sim:
                             demand_prices=d_prices,
                             battery_config=batt_cfg,
                             monthly=_use_monthly,
+                            dt_index=_dt_idx,
                         )
                         st.session_state.sizing_result = sizing_res
 
@@ -2211,6 +2223,26 @@ if st.session_state.billing_result is not None:
     # Determine PV-only result for demand column display (BESS mode only)
     pv_only_for_display = st.session_state.billing_result_pv_only if (has_battery and scenario == "PV + Battery") else None
 
+    # Pre-compute the main annual projection (reused across tabs)
+    _common_nem_kw = {
+        "nem_regime_1": nem_regime_1,
+        "nem_regime_2": nem_regime_2 if nem_switch else None,
+        "num_years_1": num_years_1 if nem_switch else None,
+        "export_rates_multiyear_2": st.session_state.get("export_rates_multiyear_2") if nem_switch else None,
+        "cod_year": cod_year,
+        "degradation_pct": annual_degradation_pct,
+    }
+    _main_projection = build_annual_projection(
+        result=result,
+        system_cost=system_cost,
+        rate_escalator_pct=rate_escalator,
+        load_escalator_pct=load_escalator,
+        years=system_life_years,
+        export_rates_multiyear=st.session_state.get("export_rates_multiyear"),
+        result_pv_only=pv_only_for_display,
+        **_common_nem_kw,
+    )
+
     # --- Tab 1: Monthly Bills ---
     with tab1:
         st.subheader("Monthly Bill Summary")
@@ -2266,21 +2298,7 @@ if st.session_state.billing_result is not None:
     # --- Tab 2: Annual Summary ---
     with tab2:
         st.subheader(f"Annual Summary ({system_life_years}-Year)")
-        projection_df = build_annual_projection(
-            result=result,
-            system_cost=system_cost,
-            rate_escalator_pct=rate_escalator,
-            load_escalator_pct=load_escalator,
-            years=system_life_years,
-            export_rates_multiyear=st.session_state.get("export_rates_multiyear"),
-            result_pv_only=pv_only_for_display,
-            nem_regime_1=nem_regime_1,
-            nem_regime_2=nem_regime_2 if nem_switch else None,
-            num_years_1=num_years_1 if nem_switch else None,
-            export_rates_multiyear_2=st.session_state.get("export_rates_multiyear_2") if nem_switch else None,
-            cod_year=cod_year,
-            degradation_pct=annual_degradation_pct,
-        )
+        projection_df = _main_projection
 
         # Format for display — negate cost outflow columns so they show as (red)
         display_proj = projection_df.copy()
@@ -2533,6 +2551,29 @@ if st.session_state.billing_result is not None:
                 key="it_savings_pct",
             )
 
+        # PPA Rate Escalator
+        if nem_switch:
+            esc_c1, esc_c2 = st.columns(2)
+            with esc_c1:
+                it_ppa_esc_1 = st.number_input(
+                    f"PPA Escalator — {nem_regime_1} (%/yr)",
+                    min_value=0.0, max_value=10.0, value=2.9, step=0.1,
+                    format="%.1f", key="it_ppa_esc_1",
+                )
+            with esc_c2:
+                it_ppa_esc_2 = st.number_input(
+                    f"PPA Escalator — {nem_regime_2} (%/yr)",
+                    min_value=0.0, max_value=10.0, value=2.9, step=0.1,
+                    format="%.1f", key="it_ppa_esc_2",
+                )
+        else:
+            it_ppa_esc_1 = st.number_input(
+                "PPA Rate Escalator (%/yr)",
+                min_value=0.0, max_value=10.0, value=2.9, step=0.1,
+                format="%.1f", key="it_ppa_esc_1",
+            )
+            it_ppa_esc_2 = it_ppa_esc_1
+
         # Advanced Options expander
         it_savings_esc = 0.0
         it_regime_1_savings = None
@@ -2559,21 +2600,7 @@ if st.session_state.billing_result is not None:
 
         # Build projection & render table
         if it_view == "Annual":
-            it_proj = build_annual_projection(
-                result=result,
-                system_cost=system_cost,
-                rate_escalator_pct=rate_escalator,
-                load_escalator_pct=load_escalator,
-                years=system_life_years,
-                export_rates_multiyear=st.session_state.get("export_rates_multiyear"),
-                result_pv_only=pv_only_for_display,
-                nem_regime_1=nem_regime_1,
-                nem_regime_2=nem_regime_2 if nem_switch else None,
-                num_years_1=num_years_1 if nem_switch else None,
-                export_rates_multiyear_2=st.session_state.get("export_rates_multiyear_2") if nem_switch else None,
-                cod_year=cod_year,
-                degradation_pct=annual_degradation_pct,
-            )
+            it_proj = _main_projection
             it_df = build_indexed_tariff_annual(
                 it_proj,
                 base_savings_pct=it_savings_pct,
@@ -2676,12 +2703,7 @@ if st.session_state.billing_result is not None:
             years=dl_monthly_years,
             export_rates_multiyear=st.session_state.get("export_rates_multiyear"),
             result_pv_only=pv_only_for_display,
-            nem_regime_1=nem_regime_1,
-            nem_regime_2=nem_regime_2 if nem_switch else None,
-            num_years_1=num_years_1 if nem_switch else None,
-            export_rates_multiyear_2=st.session_state.get("export_rates_multiyear_2") if nem_switch else None,
-            cod_year=cod_year,
-            degradation_pct=annual_degradation_pct,
+            **_common_nem_kw,
         )
 
         col_dl1, col_dl2, col_dl3 = st.columns(3)
@@ -2767,3 +2789,101 @@ if st.session_state.billing_result is not None:
             file_name="pv_sim_details.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
+
+        # --- Customer Proposal (PPTX) ---
+        st.divider()
+        st.subheader("Customer Proposal (PPTX)")
+        st.caption(
+            "Generate a branded 38DN customer proposal deck from the current simulation. "
+            "Fill in the fields below and click Generate."
+        )
+
+        # Pull indicative PPA rate from PPA Rate tab computation
+        _prop_ppa_rate = 0.0
+        try:
+            _it_savings = st.session_state.get("it_savings_pct", 10.0)
+            _it_sav_esc = st.session_state.get("it_savings_esc", 0.0)
+            _it_proj = _main_projection
+            _it_df = build_indexed_tariff_annual(
+                _it_proj,
+                base_savings_pct=_it_savings,
+                savings_escalator_pct=_it_sav_esc,
+            )
+            if len(_it_df) >= 1 and "PPA Rate ($/kWh)" in _it_df.columns:
+                _yr1_rate = _it_df["PPA Rate ($/kWh)"].iloc[0]
+                if _yr1_rate > 0:
+                    _prop_ppa_rate = round(_yr1_rate, 4)
+        except Exception:
+            pass
+
+        # PPA escalator comes from PPA Rate tab inputs
+        _prop_ppa_esc = st.session_state.get("it_ppa_esc_1", 2.9)
+
+        col_p1, col_p2 = st.columns(2)
+        with col_p1:
+            prop_customer = st.text_input("Customer / Facility Name", key="prop_customer")
+            prop_address = st.text_input("Site Address", key="prop_address")
+            prop_account = st.text_input(
+                "Utility Account ID (optional)", key="prop_account",
+            )
+        with col_p2:
+            prop_term = st.number_input(
+                "Term (years)", min_value=1, max_value=40,
+                value=25, step=1, key="prop_term",
+            )
+            prop_new_tariff = st.text_input(
+                "Proposed Tariff (if switching)", key="prop_new_tariff",
+                help="Leave blank to keep current tariff.",
+            )
+
+        _prop_date = date.today().strftime("%B %Y")
+        _batt_cap = st.session_state.get("battery_capacity_kwh", 0) or 0
+        _batt_cfg = st.session_state.get("battery_config")
+        _batt_kw = _batt_cap / (_batt_cfg.battery_hours if _batt_cfg else 4.0) if _batt_cap > 0 else 0
+
+        if st.button("Generate Customer Proposal", type="primary", key="btn_gen_proposal"):
+            if not prop_customer:
+                st.warning("Please enter a customer name.")
+            else:
+                with st.spinner("Building proposal deck..."):
+                    # Build a term-length projection for the proposal
+                    _prop_proj_df = build_annual_projection(
+                        result=result,
+                        system_cost=system_cost,
+                        rate_escalator_pct=rate_escalator,
+                        load_escalator_pct=load_escalator,
+                        years=prop_term,
+                        export_rates_multiyear=st.session_state.get("export_rates_multiyear"),
+                        result_pv_only=pv_only_for_display,
+                        **_common_nem_kw,
+                    )
+                    proposal_bytes = generate_proposal_pptx(
+                        customer_name=prop_customer,
+                        address=prop_address,
+                        utility_account=prop_account,
+                        utility_name=utility_name,
+                        tariff_name=selected_rate_name or "",
+                        new_tariff_name=prop_new_tariff or None,
+                        date_str=_prop_date,
+                        system_size_kw=system_size_kw,
+                        dc_ac_ratio=dc_ac_ratio,
+                        battery_kwh=_batt_cap,
+                        battery_kw=_batt_kw,
+                        ppa_rate=_prop_ppa_rate if _prop_ppa_rate > 0 else None,
+                        ppa_escalator_pct=_prop_ppa_esc if _prop_ppa_rate > 0 else None,
+                        term_years=prop_term,
+                        rate_escalator_pct=rate_escalator,
+                        result=result,
+                        annual_proj_df=_prop_proj_df,
+                        nem_regime_1=nem_regime_1,
+                        nem_regime_2=nem_regime_2 if nem_switch else None,
+                        num_years_1=num_years_1 if nem_switch else None,
+                        customer_savings_pct=st.session_state.get("it_savings_pct", 10.0),
+                    )
+                _safe_name = prop_customer.replace(" ", "_")[:30]
+                st.download_button(
+                    label="Download Customer Proposal (.pptx)",
+                    data=proposal_bytes,
+                    file_name=f"{_safe_name}_Proposal_{_prop_date.replace(' ', '_')}.pptx",
+                    mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                )

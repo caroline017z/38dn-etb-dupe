@@ -3,11 +3,18 @@ PVWatts v8 API integration for solar production 8760 generation.
 """
 
 import os
+import re
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 import pandas as pd
 import numpy as np
 from dataclasses import dataclass
 from functools import lru_cache
+
+_retry = Retry(total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
+_session = requests.Session()
+_session.mount("https://", HTTPAdapter(max_retries=_retry))
 
 
 @dataclass
@@ -21,7 +28,7 @@ class PVSystemConfig:
 
 def _geocode_google(address: str, api_key: str) -> tuple[float, float]:
     """Geocode via Google Maps Geocoding API."""
-    resp = requests.get(
+    resp = _session.get(
         "https://maps.googleapis.com/maps/api/geocode/json",
         params={"address": address, "key": api_key},
         timeout=10,
@@ -62,7 +69,8 @@ def geocode_address(address: str) -> tuple[float, float]:
     Uses Google Maps Geocoding API if GOOGLE_MAPS_API_KEY is set in the
     environment, otherwise falls back to Nominatim (OSM).
     """
-    if "CA" not in address.upper() and "CALIFORNIA" not in address.upper():
+    _upper = address.upper()
+    if not re.search(r"\bCA\b", _upper) and "CALIFORNIA" not in _upper:
         address = f"{address}, CA"
 
     google_key = os.environ.get("GOOGLE_MAPS_API_KEY")
@@ -101,7 +109,7 @@ def fetch_production_8760(
     }
 
     url = "https://developer.nrel.gov/api/pvwatts/v8.json"
-    response = requests.get(url, params=params, timeout=30)
+    response = _session.get(url, params=params, timeout=30)
 
     if response.status_code != 200:
         raise RuntimeError(

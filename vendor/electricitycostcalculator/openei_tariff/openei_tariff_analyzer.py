@@ -7,10 +7,16 @@ from electricitycostcalculator.cost_calculator.rate_structure import *
 import time
 from datetime import datetime
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 import json
 import pytz
 import os
 from dateutil.parser import parse
+
+_retry = Retry(total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
+_session = requests.Session()
+_session.mount("https://", HTTPAdapter(max_retries=_retry))
 
 # ----------- FUNCTIONS SPECIFIC TO OpenEI REQUESTS -------------- #
 THIS_PATH = os.path.dirname(os.path.abspath(__file__)) + '/'
@@ -22,7 +28,7 @@ SUFFIX_REVISED = '_revised'  # this is the suffix we added to the json filename 
 class OpenEI_tariff(object):
 
     URL_OPENEI = 'https://api.openei.org/utility_rates'
-    API_KEY = 'BgEcyD9nM0C24J2vL4ezN7ZNAllII0vKA9l7UEBu'
+    API_KEY = os.getenv('OPENEI_API_KEY', '')
     FORMAT = 'json'
     VERSION = 'latest'
     DIRECTION_SORT = 'asc'
@@ -66,7 +72,8 @@ class OpenEI_tariff(object):
 
     def call_api(self, store_as_json=None):
 
-        r = requests.get(self.URL_OPENEI, params=self.req_param)
+        r = _session.get(self.URL_OPENEI, params=self.req_param, timeout=30)
+        r.raise_for_status()
         data_openei = r.json()
         data_filtered = []
 

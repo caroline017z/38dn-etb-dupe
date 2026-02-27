@@ -2,10 +2,19 @@
 Shared simulation management helpers — used by both app.py and pages/All_Simulations.py.
 """
 import os
+import re
 import json
 import glob
 import pandas as pd
 from datetime import date, datetime
+
+
+def sanitize_filename(name: str) -> str:
+    """Strip directory components and unsafe characters from a user-supplied name."""
+    name = os.path.basename(name)
+    name = re.sub(r'[<>:"/\\|?*\x00]', '_', name)
+    name = name.lstrip('.')
+    return name or "untitled"
 
 from modules.tariff import TariffSchedule, NSC_DEFAULT_RATE, UTILITY_EIA_IDS
 
@@ -23,6 +32,7 @@ def list_saved_simulations() -> list[str]:
 
 def load_simulation(name: str) -> dict:
     """Load a simulation JSON by name."""
+    name = sanitize_filename(name)
     with open(os.path.join(SIMULATIONS_DIR, f"{name}.json"), "r") as f:
         return json.load(f)
 
@@ -38,12 +48,14 @@ def save_simulation(name, result, summary, projection_df, inputs, **extra):
         "projection": projection_df.to_dict(orient="records") if projection_df is not None else [],
     }
     data.update(extra)
+    name = sanitize_filename(name)
     with open(os.path.join(SIMULATIONS_DIR, f"{name}.json"), "w") as f:
         json.dump(data, f, indent=2)
 
 
 def delete_simulation(name: str):
     """Delete a simulation JSON file."""
+    name = sanitize_filename(name)
     fp = os.path.join(SIMULATIONS_DIR, f"{name}.json")
     if os.path.exists(fp):
         os.remove(fp)
@@ -51,6 +63,7 @@ def delete_simulation(name: str):
 
 def touch_simulation_mtime(name: str):
     """Update file mtime to now (marks simulation as recently accessed)."""
+    name = sanitize_filename(name)
     fp = os.path.join(SIMULATIONS_DIR, f"{name}.json")
     if os.path.exists(fp):
         os.utime(fp, None)

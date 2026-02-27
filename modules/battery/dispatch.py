@@ -293,7 +293,7 @@ def _solve_single_lp(
             if prob.status in (cp.OPTIMAL, cp.OPTIMAL_INACCURATE):
                 solved = True
                 break
-        except (cp.SolverError, Exception):
+        except cp.SolverError:
             continue
 
     if not solved:
@@ -408,6 +408,7 @@ def dispatch_battery(
     battery_config: BatteryConfig,
     capacity_kwh: float,
     monthly: bool = False,
+    dt_index: "pd.DatetimeIndex | None" = None,
 ) -> DispatchResult:
     """Solve the optimal battery dispatch LP.
 
@@ -448,7 +449,8 @@ def dispatch_battery(
 
     cfg = battery_config
     min_soc = cfg.min_soc_pct / 100.0 * capacity_kwh
-    dt_index = pd.date_range("2023-01-01", periods=N, freq="h")
+    if dt_index is None:
+        dt_index = pd.date_range("2023-01-01", periods=N, freq="h")
 
     # ---- Monthly decomposition path ----
     if monthly and N == 8760:

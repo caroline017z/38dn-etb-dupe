@@ -4,12 +4,18 @@ OpenEI Utility Rate Database (URDB) integration for tariff schedule lookup and p
 
 import os
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from dataclasses import dataclass, field
 from dotenv import load_dotenv
 
 load_dotenv()
 
 OPENEI_API_KEY = os.getenv("OPENEI_API_KEY", "")
+
+_retry = Retry(total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
+_session = requests.Session()
+_session.mount("https://", HTTPAdapter(max_retries=_retry))
 
 
 # EIA utility IDs for California IOUs
@@ -90,7 +96,7 @@ def fetch_available_rates(utility_name: str) -> list[dict]:
         "is_default": "false",
     }
 
-    response = requests.get(url, params=params, timeout=30)
+    response = _session.get(url, params=params, timeout=30)
     if response.status_code != 200:
         raise RuntimeError(f"OpenEI API error (HTTP {response.status_code}): {response.text}")
 
@@ -129,7 +135,7 @@ def fetch_tariff_detail(rate_label: str) -> TariffSchedule:
         "getpage": rate_label,
     }
 
-    response = requests.get(url, params=params, timeout=30)
+    response = _session.get(url, params=params, timeout=30)
     if response.status_code != 200:
         raise RuntimeError(f"OpenEI API error (HTTP {response.status_code}): {response.text}")
 
@@ -178,12 +184,13 @@ def fetch_tariff_detail(rate_label: str) -> TariffSchedule:
 def _sum_fixed_charges(raw: dict) -> float:
     """Sum all fixed monthly charges from raw tariff data."""
     total = 0.0
-    # fixedmonthlycharge
-    total += raw.get("fixedmonthlycharge", 0.0) or 0.0
-    # fixedchargeunits might indicate it's $/day — convert
+    raw_fixed = raw.get("fixedmonthlycharge", 0.0) or 0.0
     if raw.get("fixedchargeunits", "") == "$/day":
-        total = (raw.get("fixedmonthlycharge", 0.0) or 0.0) * 30.44  # avg days/month
-    # Also check for fixedchargefirstmeter, fixedchargeunits
+        total += raw_fixed * 30.44  # avg days/month
+    else:
+        total += raw_fixed
+    # Also check for fixedchargefirstmeter
+    total += raw.get("fixedchargefirstmeter", 0.0) or 0.0
     return total
 
 

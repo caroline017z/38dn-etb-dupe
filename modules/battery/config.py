@@ -12,6 +12,10 @@ class BatteryConfig:
     # Sizing — power is derived from capacity_kwh / battery_hours
     battery_hours: float  # hours of storage at rated power (e.g. 4.0)
 
+    def __post_init__(self):
+        if self.battery_hours <= 0:
+            raise ValueError(f"battery_hours must be > 0, got {self.battery_hours}")
+
     # Export power cap: max % of rated power that can be exported to grid
     discharge_limit_pct: float = 80.0  # e.g. 80 = export up to 80% of power_kw
 
