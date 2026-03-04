@@ -21,7 +21,7 @@ env/
 # Runtime data (user-generated profiles, simulations, cached tariffs)
 data/simulations/
 data/load_profiles/
-data/export_profiles/
+# data/export_profiles/ — committed (shared defaults)
 data/ecc_tariffs/
 data/nema_profiles/
 data/system_profiles/
