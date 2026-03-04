@@ -39,6 +39,7 @@ def load_simulation(name: str) -> dict:
 
 def save_simulation(name, result, summary, projection_df, inputs, **extra):
     """Save a simulation to JSON."""
+    name = sanitize_filename(name)
     data = {
         "name": name,
         "saved_at": datetime.now().isoformat(),
@@ -48,7 +49,6 @@ def save_simulation(name, result, summary, projection_df, inputs, **extra):
         "projection": projection_df.to_dict(orient="records") if projection_df is not None else [],
     }
     data.update(extra)
-    name = sanitize_filename(name)
     with open(os.path.join(SIMULATIONS_DIR, f"{name}.json"), "w") as f:
         json.dump(data, f, indent=2)
 
@@ -217,6 +217,51 @@ def populate_session_from_simulation(st_session_state, sim_data: dict):
         td = sim_data["tariff_data"]
         st_session_state["tariff"] = TariffSchedule(**td)
 
-    # 8) Close saved view and flag editing mode
+    # 8) Restore NEM-A profile if present
+    _saved_load_mode = inp.get("load_mode", "Single Meter")
+    st_session_state["load_mode"] = _saved_load_mode
+    if _saved_load_mode == "NEM-A Aggregation":
+        st_session_state["nema_utility"] = inp.get("nema_utility", "PG&E")
+        _nema_meters_data = sim_data.get("nema_meters", [])
+        st_session_state["nema_meters"] = _nema_meters_data
+        # Restore per-meter load profiles
+        dt_idx = pd.date_range(
+            start=f"{_restore_cod_year}-01-01 00:00", periods=8760, freq="h"
+        )
+        _nema_loads = sim_data.get("nema_meter_loads", {})
+        _restored_loads = {}
+        for k, v in _nema_loads.items():
+            _restored_loads[int(k)] = pd.Series(v, index=dt_idx, name="load_kwh")
+        st_session_state["nema_meter_loads"] = _restored_loads
+
+        # Restore per-meter tariffs
+        _nema_tariffs_data = sim_data.get("nema_meter_tariffs", {})
+        _restored_tariffs = {}
+        for k, v in _nema_tariffs_data.items():
+            _restored_tariffs[int(k)] = TariffSchedule(**v)
+        st_session_state["nema_meter_tariffs"] = _restored_tariffs
+
+    # 9) Restore existing solar (repower) config if present
+    st_session_state["existing_solar_enabled"] = inp.get("existing_solar_enabled", False)
+    if st_session_state["existing_solar_enabled"]:
+        st_session_state["sb_existing_solar_size"] = float(inp.get("existing_solar_size_kw", 100.0))
+        _es_type = inp.get("existing_solar_system_type", "Fixed Tilt (Ground Mount)")
+        _es_type_options = ["Fixed Tilt (Ground Mount)", "Single Axis Tracker"]
+        st_session_state["sb_existing_solar_type"] = (
+            _es_type if _es_type in _es_type_options else _es_type_options[0]
+        )
+        st_session_state["sb_existing_solar_dc_ac"] = float(inp.get("existing_solar_dc_ac_ratio", 1.2))
+        st_session_state["sb_existing_solar_age"] = int(inp.get("existing_solar_age", 10))
+        st_session_state["sb_existing_solar_degradation"] = float(inp.get("existing_solar_degradation_pct", 0.5))
+        st_session_state["existing_solar_nema_meters"] = inp.get("existing_solar_nema_meters", [])
+        if sim_data.get("existing_solar_production_8760"):
+            dt_idx = pd.date_range(
+                start=f"{_restore_cod_year}-01-01 00:00", periods=8760, freq="h"
+            )
+            st_session_state["existing_solar_production_8760"] = pd.Series(
+                sim_data["existing_solar_production_8760"], index=dt_idx, name="solar_kwh"
+            )
+
+    # 10) Close saved view and flag editing mode
     st_session_state["saved_view"] = None
     st_session_state["editing_saved_sim"] = True

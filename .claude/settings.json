@@ -1,0 +1,26 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if echo \"$CLAUDE_FILE_PATHS\" | grep -q 'tests/\\|modules/'; then cd C:/Users/CarolineZepecki/pv-rate-sim && python -m pytest tests/ -x -q 2>&1 | tail -5; fi"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if echo \"$CLAUDE_FILE_PATHS\" | grep -qE '\\.env$'; then echo 'BLOCKED: Do not edit .env files containing API keys' >&2; exit 2; fi"
+          }
+        ]
+      }
+    ]
+  }
+}

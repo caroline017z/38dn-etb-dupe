@@ -404,8 +404,9 @@ class TestPVCharging:
         np.testing.assert_allclose(
             r.batt_charge_kwh[no_pv], 0.0, atol=TOL,
         )
-        # Battery charge never exceeds PV production
-        assert np.all(r.batt_charge_kwh <= pv + TOL)
+        # Battery charge never exceeds surplus PV (PV minus load)
+        surplus_pv = np.maximum(0.0, pv - load)
+        assert np.all(r.batt_charge_kwh <= surplus_pv + TOL)
 
 
 # ---------------------------------------------------------------------------
@@ -758,15 +759,15 @@ class TestSolverFallback:
     """Verify the failed-solver fallback returns PV-only flows."""
 
     def test_infeasible_config_falls_back(self):
-        """An impossible SOC config (min_soc==max_soc==100% with discharge
-        required) should trigger fallback to PV-only flows."""
+        """Contradictory SOC bounds (min > max) make the LP infeasible,
+        triggering fallback to PV-only flows."""
         N = 48
         pv = np.zeros(N)
         load = np.full(N, 5.0)  # constant load, no PV
 
         cfg = _cfg(
-            min_soc_pct=100.0,
-            max_soc_pct=100.0,
+            min_soc_pct=80.0,   # min_soc > max_soc → infeasible
+            max_soc_pct=20.0,
             charge_eff=0.95,
             discharge_eff=0.95,
         )
