@@ -28,7 +28,11 @@ SUFFIX_REVISED = '_revised'  # this is the suffix we added to the json filename 
 class OpenEI_tariff(object):
 
     URL_OPENEI = 'https://api.openei.org/utility_rates'
-    API_KEY = os.getenv('OPENEI_API_KEY', '')
+    try:
+        import streamlit as st
+        API_KEY = st.secrets.get('OPENEI_API_KEY') or os.getenv('OPENEI_API_KEY', '')
+    except (ImportError, FileNotFoundError):
+        API_KEY = os.getenv('OPENEI_API_KEY', '')
     FORMAT = 'json'
     VERSION = 'latest'
     DIRECTION_SORT = 'asc'

@@ -4,6 +4,7 @@ OpenEI Utility Rate Database (URDB) integration for tariff schedule lookup and p
 
 import os
 import requests
+import streamlit as st
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from dataclasses import dataclass, field
@@ -11,7 +12,15 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-OPENEI_API_KEY = os.getenv("OPENEI_API_KEY", "")
+
+def _get_secret(key: str, default: str = "") -> str:
+    try:
+        return st.secrets[key]
+    except (KeyError, FileNotFoundError):
+        return os.getenv(key, default)
+
+
+OPENEI_API_KEY = _get_secret("OPENEI_API_KEY")
 
 _retry = Retry(total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
 _session = requests.Session()

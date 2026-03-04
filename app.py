@@ -82,6 +82,15 @@ from modules.outputs import (
 
 load_dotenv()
 
+
+def _get_secret(key: str, default: str = "") -> str:
+    """Read from Streamlit secrets (Cloud) first, then fall back to env vars (local)."""
+    try:
+        return st.secrets[key]
+    except (KeyError, FileNotFoundError):
+        return os.getenv(key, default)
+
+
 # =============================================================================
 # DIRECTORIES
 # =============================================================================
@@ -2604,7 +2613,7 @@ elif save_btn and st.session_state.get("billing_result") is None:
 # PRODUCTION PROFILE GENERATION
 # =============================================================================
 if generate_prod and lat is not None and lon is not None:
-    api_key = os.getenv("NREL_API_KEY", "")
+    api_key = _get_secret("NREL_API_KEY")
     if not api_key:
         st.error("NREL_API_KEY not found. Add `NREL_API_KEY=your_key` to the `.env` file in the project root. Get a free key at https://developer.nrel.gov/signup/")
     else:
@@ -2632,7 +2641,7 @@ if generate_prod and lat is not None and lon is not None:
 # EXISTING SOLAR PROFILE GENERATION
 # =============================================================================
 if generate_existing_solar and lat is not None and lon is not None:
-    api_key = os.getenv("NREL_API_KEY", "")
+    api_key = _get_secret("NREL_API_KEY")
     if not api_key:
         st.error("NREL_API_KEY not found.")
     else:
