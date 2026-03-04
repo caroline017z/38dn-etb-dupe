@@ -23,6 +23,8 @@ data/simulations/
 data/load_profiles/
 data/export_profiles/
 data/ecc_tariffs/
+data/nema_profiles/
+data/system_profiles/
 data/acc_export_rates/
 
 # IDE

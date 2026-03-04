@@ -38,12 +38,21 @@ from modules.export_value import (
     parse_multiyear_export_rates,
 )
 from modules.billing import run_billing_simulation, BillingResult
+from modules.billing_aggregation import (
+    MeterConfig,
+    NemAProfile,
+    NEMA_FEES,
+    compute_nema_fees,
+    compute_effective_export_price,
+    run_aggregation_simulation,
+)
 from modules.proposal import generate_proposal_pptx
 from modules.billing_ecc import (
     fetch_and_populate_ecc_tariff,
     load_ecc_tariff_from_json,
     run_ecc_billing_simulation,
 )
+from modules.load_adjustment import adjust_load_single_meter, adjust_loads_nema
 from modules.battery import BatteryConfig
 from modules.battery.sizing import optimize_capacity_kwh
 from modules.billing import _build_demand_lp_inputs, _build_hourly_energy_rates
@@ -82,8 +91,9 @@ LOAD_PROFILES_DIR = os.path.join(DATA_DIR, "load_profiles")
 EXPORT_PROFILES_DIR = os.path.join(DATA_DIR, "export_profiles")
 ECC_TARIFFS_DIR = os.path.join(DATA_DIR, "ecc_tariffs")
 SYSTEM_PROFILES_DIR = os.path.join(DATA_DIR, "system_profiles")
+NEMA_PROFILES_DIR = os.path.join(DATA_DIR, "nema_profiles")
 
-for d in [SIMULATIONS_DIR, LOAD_PROFILES_DIR, EXPORT_PROFILES_DIR, ECC_TARIFFS_DIR, SYSTEM_PROFILES_DIR]:
+for d in [SIMULATIONS_DIR, LOAD_PROFILES_DIR, EXPORT_PROFILES_DIR, ECC_TARIFFS_DIR, SYSTEM_PROFILES_DIR, NEMA_PROFILES_DIR]:
     os.makedirs(d, exist_ok=True)
 
 
@@ -107,6 +117,17 @@ def _list_saved(directory: str, ext: str = ".json") -> list[str]:
     files = glob.glob(os.path.join(directory, f"*{ext}"))
     files.sort(key=os.path.getmtime, reverse=True)
     return [os.path.splitext(os.path.basename(f))[0] for f in files]
+
+
+def _list_all_load_profiles() -> list[tuple[str, str]]:
+    """Return unified (name, type) list of CSV + NEM-A profiles sorted by mtime (newest first)."""
+    entries: list[tuple[float, str, str]] = []  # (mtime, name, type)
+    for f in glob.glob(os.path.join(LOAD_PROFILES_DIR, "*.csv")):
+        entries.append((os.path.getmtime(f), os.path.splitext(os.path.basename(f))[0], "csv"))
+    for f in glob.glob(os.path.join(NEMA_PROFILES_DIR, "*.json")):
+        entries.append((os.path.getmtime(f), os.path.splitext(os.path.basename(f))[0], "nema"))
+    entries.sort(key=lambda x: x[0], reverse=True)
+    return [(name, typ) for _, name, typ in entries]
 
 
 def _delete_file(directory, name, ext):
@@ -201,12 +222,60 @@ def _load_system_profile(name: str) -> dict:
         return json.load(f)
 
 
+def _load_nema_profile_into_session(profile_name: str):
+    """Load a saved NEM-A profile bundle into session state.
+
+    Restores: nema_utility, nema_meters, nema_meter_loads, nema_meter_tariffs,
+    existing_solar_nema_meters, and sets load_8760 from the generating meter.
+    """
+    path = os.path.join(NEMA_PROFILES_DIR, f"{profile_name}.json")
+    with open(path) as f:
+        data = json.load(f)
+    st.session_state["nema_utility"] = data.get("utility", "PG&E")
+    year = st.session_state.get("sb_cod_date", date(2026, 1, 1)).year
+    dt = pd.date_range(f"{year}-01-01", periods=8760, freq="h")
+    meters, loads, tariffs = [], {}, {}
+    for i, m in enumerate(data.get("meters", [])):
+        meters.append({
+            "name": m["name"],
+            "is_generating": m.get("is_generating", False),
+            "use_gen_tariff": m.get("use_gen_tariff", not m.get("is_generating", False)),
+            "load_key": f"nema_load_{i}",
+            "tariff_key": f"nema_tariff_{i}",
+        })
+        if m.get("load_8760"):
+            loads[i] = pd.Series(m["load_8760"], index=dt, name="load_kwh")
+        if m.get("tariff"):
+            tariffs[i] = TariffSchedule(**m["tariff"])
+    st.session_state["nema_meters"] = meters
+    st.session_state["nema_meter_loads"] = loads
+    st.session_state["_raw_nema_meter_loads"] = {k: v.copy() for k, v in loads.items()}
+    st.session_state["nema_meter_tariffs"] = tariffs
+    st.session_state["existing_solar_nema_meters"] = data.get("existing_solar_meters", [])
+    st.session_state["load_mode"] = "NEM-A Aggregation"
+    # Set generating meter load as the main load_8760
+    for i, m in enumerate(meters):
+        if m["is_generating"] and i in loads:
+            st.session_state["load_8760"] = loads[i]
+            st.session_state["_raw_load_8760"] = loads[i].copy()
+            break
+
+
 def _parse_8760_csv(df: pd.DataFrame) -> np.ndarray:
-    """Extract the first numeric column from a DataFrame, validate 8760 rows."""
+    """Extract the load numeric column from a DataFrame, validate 8760 rows.
+
+    If the first numeric column is an hour-year index (1-8760 sequential integers),
+    skip it and use the next numeric column instead.
+    """
     numeric_cols = df.select_dtypes(include=[np.number]).columns
     if len(numeric_cols) == 0:
         raise ValueError("No numeric columns found in CSV.")
-    values = np.asarray(df[numeric_cols[0]].values)
+    col = numeric_cols[0]
+    if len(numeric_cols) > 1 and len(df) == 8760:
+        first_vals = df[col].values
+        if np.array_equal(first_vals, np.arange(1, 8761)):
+            col = numeric_cols[1]
+    values = np.asarray(df[col].values)
     if len(values) != 8760:
         raise ValueError(f"Expected 8760 rows, got {len(values)}.")
     return values
@@ -236,6 +305,142 @@ input, select, textarea, button, p, div, h1, h2, h3, h4, h5, h6, label, li {
 span:not([class*="material"]):not([data-testid*="Icon"]):not([class*="icon"]) {
     font-family: "Aptos Narrow", "Aptos", "Calibri", "Arial Narrow", sans-serif !important;
 }
+
+/* Typography scale */
+h1 { font-size: 22px !important; letter-spacing: 0.3px !important; font-weight: 600 !important; }
+h2 { font-size: 18px !important; letter-spacing: 0.3px !important; font-weight: 600 !important; }
+h3 { font-size: 16px !important; letter-spacing: 0.2px !important; font-weight: 600 !important; }
+p, li, div, label, input, select, textarea {
+    font-size: 13px !important;
+}
+.stCaption, [data-testid="stCaptionContainer"] {
+    font-size: 11px !important;
+    color: #6b7280 !important;
+}
+
+/* Metric cards */
+[data-testid="stMetric"] {
+    background: #f8fafc !important;
+    border: 1px solid #e2e8f0 !important;
+    border-radius: 8px !important;
+    padding: 12px 16px !important;
+}
+[data-testid="stMetric"] label {
+    font-size: 11px !important;
+    font-weight: 500 !important;
+    color: #6b7280 !important;
+    text-transform: uppercase !important;
+    letter-spacing: 0.5px !important;
+}
+[data-testid="stMetric"] [data-testid="stMetricValue"] {
+    font-size: 20px !important;
+    font-weight: 600 !important;
+    color: #1e293b !important;
+}
+
+/* Tighter content spacing */
+.block-container {
+    padding-left: 2rem !important;
+    padding-right: 2rem !important;
+}
+/* Subtle dividers */
+hr {
+    border: none !important;
+    border-top: 1px solid #e5e7eb !important;
+    margin: 12px 0 !important;
+}
+/* Consistent section gaps */
+[data-testid="stVerticalBlock"] > div {
+    margin-bottom: 4px !important;
+}
+
+/* ===== Fixed Navy Top Bar — full width, above sidebar ===== */
+header[data-testid="stHeader"] {
+    background-color: transparent !important;
+}
+.nav-bar-wrapper {
+    position: fixed !important;
+    top: 0 !important;
+    left: 0 !important;
+    right: 0 !important;
+    height: 54px !important;
+    background-color: #0a1628 !important;
+    z-index: 999999 !important;
+    padding: 8px 16px 8px 330px !important;
+    display: flex !important;
+    align-items: center !important;
+    overflow: visible !important;
+    gap: 0 !important;
+}
+.nav-bar-wrapper > div[data-testid="stColumn"] {
+    padding-left: 0 !important;
+    padding-right: 0 !important;
+}
+/* Push main content below the fixed bar */
+.block-container {
+    padding-top: 70px !important;
+}
+/* Sidebar below the bar */
+section[data-testid="stSidebar"] {
+    top: 54px !important;
+    height: calc(100vh - 54px) !important;
+}
+/* When collapsed: keep a 28px visible strip so user can click to re-open */
+section[data-testid="stSidebar"][aria-expanded="false"] {
+    min-width: 28px !important;
+    border-right: 1px solid #ddd !important;
+    background-color: #f0f2f6 !important;
+}
+section[data-testid="stSidebar"][aria-expanded="false"] > div:first-child {
+    min-width: 28px !important;
+    width: 28px !important;
+}
+section[data-testid="stSidebar"][aria-expanded="false"]:hover {
+    min-width: 40px !important;
+    cursor: pointer !important;
+}
+/* Sidebar refinements */
+section[data-testid="stSidebar"] [data-testid="stHeader"] {
+    font-size: 16px !important;
+}
+section[data-testid="stSidebar"] h2 {
+    font-size: 15px !important;
+    padding-top: 8px !important;
+    border-top: 1px solid #ddd !important;
+    margin-top: 8px !important;
+}
+section[data-testid="stSidebar"] h3 {
+    font-size: 14px !important;
+    color: #374151 !important;
+    font-weight: 600 !important;
+}
+section[data-testid="stSidebar"] .stSelectbox label,
+section[data-testid="stSidebar"] .stTextInput label,
+section[data-testid="stSidebar"] .stNumberInput label {
+    font-size: 12px !important;
+    font-weight: 500 !important;
+    color: #4b5563 !important;
+}
+/* Popovers: ensure decent width */
+[data-testid="stPopoverBody"] {
+    min-width: 320px !important;
+}
+/* ALL nav-bar buttons: transparent, white bold text, no shape */
+.nav-bar-wrapper button[data-testid="stPopoverButton"],
+.nav-bar-wrapper button[data-testid="stPopoverButton"] p,
+.nav-bar-wrapper button[data-testid="stPopoverButton"] span {
+    background: transparent !important;
+    color: #ffffff !important;
+    font-weight: 700 !important;
+    font-size: 11px !important;
+    border: none !important;
+    box-shadow: none !important;
+    border-radius: 0 !important;
+}
+.nav-bar-wrapper button[data-testid="stPopoverButton"]:hover {
+    background: rgba(255,255,255,0.1) !important;
+    color: #ffffff !important;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -247,15 +452,15 @@ if os.path.exists(LOGO_PATH):
         f"""
         <style>
         .top-right-logo {{
-            position: absolute;
-            top: -60px;
+            position: fixed;
+            top: 64px;
             right: 20px;
-            z-index: 999999;
+            z-index: 999998;
             pointer-events: none;
         }}
         .top-right-logo img {{
-            height: 72px;
-            width: 72px;
+            height: 48px;
+            width: 48px;
             object-fit: contain;
         }}
         </style>
@@ -303,6 +508,14 @@ for key, default in {
     "pending_sim_load": None,
     "pending_system_profile": None,
     "show_all_sims": False,
+    "load_mode": "Single Meter",
+    "nema_meters": [],
+    "nema_meter_loads": {},
+    "nema_meter_tariffs": {},
+    "nema_utility": "PG&E",
+    "existing_solar_enabled": False,
+    "existing_solar_production_8760": None,
+    "existing_solar_nema_meters": [],
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default
@@ -440,36 +653,85 @@ if st.session_state.get("show_all_sims"):
 # =============================================================================
 # TOP MANAGEMENT BUTTONS — Simulations / Load Profiles / Export Profiles
 # =============================================================================
-# Toggle-button CSS: active button gets a blue highlight, others grey
+# JS to tag the button-row container as the fixed nav bar.
+# st.html (Streamlit 1.54+) injects directly into the DOM (no iframe).
+st.html(
+    """
+    <script>
+    (function tagNavBar() {
+        function apply() {
+            const bc = document.querySelector('.block-container');
+            if (!bc) return false;
+            const hb = bc.querySelector('[data-testid="stHorizontalBlock"]');
+            if (hb && !hb.classList.contains('nav-bar-wrapper')) {
+                hb.classList.add('nav-bar-wrapper');
+            }
+            return !!hb;
+        }
+        // Try immediately
+        if (!apply()) {
+            // Retry after DOM renders
+            const iv = setInterval(function() { if (apply()) clearInterval(iv); }, 100);
+            setTimeout(function() { clearInterval(iv); }, 5000);
+        }
+        // Observe for Streamlit re-renders
+        const obs = new MutationObserver(function() { apply(); });
+        const bc = document.querySelector('.block-container');
+        if (bc) obs.observe(bc, {childList: true, subtree: true});
+    })();
+
+    /* --- Sidebar: expand if collapsed, and add click-to-expand on collapsed strip --- */
+    (function sidebarHelper() {
+        function expandSidebar() {
+            var sb = document.querySelector('section[data-testid="stSidebar"]');
+            if (!sb) return;
+            if (sb.getAttribute('aria-expanded') === 'false') {
+                /* Find any expand button inside the sidebar or header and click it */
+                var btn = document.querySelector('[data-testid="collapsedControl"] button')
+                       || document.querySelector('header button[kind="headerNoPadding"]')
+                       || document.querySelector('header button');
+                if (btn) btn.click();
+            }
+        }
+        /* Force sidebar open on load */
+        setTimeout(expandSidebar, 500);
+        setTimeout(expandSidebar, 1500);
+
+        /* Click handler: clicking the collapsed strip re-opens the sidebar */
+        document.addEventListener('click', function(e) {
+            var sb = e.target.closest('section[data-testid="stSidebar"]');
+            if (sb && sb.getAttribute('aria-expanded') === 'false') {
+                var btn = document.querySelector('[data-testid="collapsedControl"] button')
+                       || document.querySelector('header button[kind="headerNoPadding"]')
+                       || document.querySelector('header button');
+                if (btn) btn.click();
+            }
+        });
+    })();
+    </script>
+    """,
+    unsafe_allow_javascript=True,
+)
+# Hide the st.html element container so it doesn't take vertical space
 st.markdown("""
 <style>
-div[data-testid="stHorizontalBlock"] > div[data-testid="column"] .mgmt-btn button {
-    width: 100%;
+/* Hide the st.html script container (it's an stHtml element before the button row) */
+[data-testid="stHtml"] {
+    height: 0 !important;
+    overflow: hidden !important;
+    margin: 0 !important;
+    padding: 0 !important;
+}
+[data-testid="stHtml"]:has(+ [data-testid="stHorizontalBlock"]) {
+    display: none !important;
 }
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown("""
-<style>
-/* Teal styling for the top management button row */
-div[data-testid="stHorizontalBlock"]:first-of-type button[kind="secondary"],
-div[data-testid="stHorizontalBlock"]:first-of-type button[data-testid="stPopoverButton"] {
-    border-color: #2A7B7B !important;
-    color: #2A7B7B !important;
-}
-div[data-testid="stHorizontalBlock"]:first-of-type button[kind="secondary"]:hover,
-div[data-testid="stHorizontalBlock"]:first-of-type button[data-testid="stPopoverButton"]:hover {
-    border-color: #1E5C5C !important;
-    color: #1E5C5C !important;
-    background-color: rgba(42, 123, 123, 0.08) !important;
-}
-</style>
-""", unsafe_allow_html=True)
-
-_mgmt_btn_cols = st.columns([1.2, 0.05, 0.8, 0.05, 1, 0.05, 1, 0.05, 1.2])
+_mgmt_btn_cols = st.columns([0.15, 1, 1, 1, 1, 1, 2])
 
 # --- Simulations popover ---
-with _mgmt_btn_cols[0]:
+with _mgmt_btn_cols[1]:
     with st.popover("Simulations", width="stretch"):
         _all_sims = list_saved_simulations()
         _recent_3 = _all_sims[:3]
@@ -502,49 +764,116 @@ with _mgmt_btn_cols[0]:
             st.session_state["show_all_sims"] = True
             st.rerun()
 
-# --- System Profiles toggle ---
+# --- System Profiles popover ---
 with _mgmt_btn_cols[2]:
-    if st.button(
-        "System Profiles",
-        key="mgmt_btn_system",
-        width="stretch",
-        type="primary" if st.session_state.active_mgmt_tab == "System Profiles" else "secondary",
-    ):
-        st.session_state.active_mgmt_tab = (
-            None if st.session_state.active_mgmt_tab == "System Profiles" else "System Profiles"
-        )
-        st.rerun()
+    with st.popover("System Profiles", width="stretch"):
+        _sp_names = _list_saved(SYSTEM_PROFILES_DIR, ".json")
+        _sp_recent_3 = _sp_names[:3]
 
-# --- Load Profiles toggle ---
+        if _sp_recent_3:
+            st.markdown("**Recent**")
+            for _sp_r in _sp_recent_3:
+                _sp_r_data = _load_system_profile(_sp_r)
+                _sp_r_size = _sp_r_data.get("system_size_kw", 0)
+                _sp_r_loc = _sp_r_data.get("location", "N/A")
+                if st.button(
+                    _sp_r,
+                    key=f"popover_sp_{_sp_r}",
+                    width="stretch",
+                    help=f"{_sp_r_size:,.0f} kW | {_sp_r_loc}",
+                ):
+                    st.session_state["pending_system_profile"] = _sp_r
+                    st.rerun()
+            st.divider()
+        else:
+            st.caption("No saved system profiles yet.")
+
+        if st.button("View All System Profiles", width="stretch", type="primary"):
+            st.session_state.active_mgmt_tab = "System Profiles"
+            st.rerun()
+
+# --- Load Profiles popover ---
+with _mgmt_btn_cols[3]:
+    with st.popover("Load Profiles", width="stretch"):
+        _lp_all = _list_all_load_profiles()
+        _lp_recent_3 = _lp_all[:3]
+
+        if _lp_recent_3:
+            st.markdown("**Recent**")
+            for _lp_r_name, _lp_r_type in _lp_recent_3:
+                try:
+                    if _lp_r_type == "csv":
+                        _lp_df = _load_profile_csv(LOAD_PROFILES_DIR, _lp_r_name)
+                        _lp_vals = _parse_8760_csv(_lp_df)
+                        _lp_help = f"{_lp_vals.sum():,.0f} kWh/yr"
+                    else:
+                        with open(os.path.join(NEMA_PROFILES_DIR, f"{_lp_r_name}.json")) as _lp_f:
+                            _lp_nd = json.load(_lp_f)
+                        _lp_total = sum(sum(m.get("load_8760", [])) for m in _lp_nd.get("meters", []))
+                        _lp_help = f"NEM-A · {_lp_total:,.0f} kWh/yr"
+                except Exception:
+                    _lp_help = ""
+                if st.button(
+                    _lp_r_name,
+                    key=f"popover_lp_{_lp_r_name}",
+                    width="stretch",
+                    help=_lp_help,
+                ):
+                    st.session_state.active_mgmt_tab = "Load Profiles"
+                    st.session_state["lp_sel"] = _lp_r_name
+                    st.rerun()
+            st.divider()
+        else:
+            st.caption("No saved load profiles yet.")
+
+        if st.button("View All Load Profiles", width="stretch", type="primary"):
+            st.session_state.active_mgmt_tab = "Load Profiles"
+            st.rerun()
+
+# --- Export Profiles popover ---
 with _mgmt_btn_cols[4]:
-    if st.button(
-        "Load Profiles",
-        key="mgmt_btn_load",
-        width="stretch",
-        type="primary" if st.session_state.active_mgmt_tab == "Load Profiles" else "secondary",
-    ):
-        st.session_state.active_mgmt_tab = (
-            None if st.session_state.active_mgmt_tab == "Load Profiles" else "Load Profiles"
-        )
-        st.rerun()
+    with st.popover("Export Profiles", width="stretch"):
+        _ep_names = _list_saved(EXPORT_PROFILES_DIR, ".csv")
+        _ep_recent_3 = _ep_names[:3]
 
-# --- Export Profiles toggle ---
-with _mgmt_btn_cols[6]:
-    if st.button(
-        "Export Profiles",
-        key="mgmt_btn_export",
-        width="stretch",
-        type="primary" if st.session_state.active_mgmt_tab == "Export Profiles" else "secondary",
-    ):
-        st.session_state.active_mgmt_tab = (
-            None if st.session_state.active_mgmt_tab == "Export Profiles" else "Export Profiles"
-        )
-        st.rerun()
+        if _ep_recent_3:
+            st.markdown("**Recent**")
+            for _ep_r in _ep_recent_3:
+                try:
+                    _ep_df = _load_profile_csv(EXPORT_PROFILES_DIR, _ep_r)
+                    _ep_vals = _parse_8760_csv(_ep_df)
+                    _ep_avg = _ep_vals.mean()
+                    _ep_help = f"Avg ${_ep_avg:.4f}/kWh"
+                except Exception:
+                    _ep_help = ""
+                if st.button(
+                    _ep_r,
+                    key=f"popover_ep_{_ep_r}",
+                    width="stretch",
+                    help=_ep_help,
+                ):
+                    try:
+                        _ep_load_df = _load_profile_csv(EXPORT_PROFILES_DIR, _ep_r)
+                        _cod_yr = st.session_state.get("sb_cod_date", date(2026, 1, 1)).year
+                        _ep_multiyear = parse_multiyear_export_rates(_ep_load_df, start_year=_cod_yr)
+                        _ep_first_key = min(_ep_multiyear.keys())
+                        st.session_state["export_rates"] = _ep_multiyear[_ep_first_key]
+                        st.session_state["export_rates_multiyear"] = _ep_multiyear if len(_ep_multiyear) > 1 else None
+                    except Exception:
+                        pass
+                    st.rerun()
+            st.divider()
+        else:
+            st.caption("No saved export profiles yet.")
+
+        if st.button("View All Export Profiles", width="stretch", type="primary"):
+            st.session_state.active_mgmt_tab = "Export Profiles"
+            st.rerun()
 
 # --- Save popover ---
 save_btn = False
 sim_name = ""
-with _mgmt_btn_cols[8]:
+with _mgmt_btn_cols[5]:
     with st.popover("Save", width="stretch"):
         sim_name = st.text_input(
             "Simulation Name",
@@ -560,11 +889,91 @@ with _mgmt_btn_cols[8]:
 
 # ---- LOAD PROFILES SECTION ----
 if st.session_state.active_mgmt_tab == "Load Profiles":
-    saved_loads = _list_saved(LOAD_PROFILES_DIR, ".csv")
-    lp_col1, lp_col2 = st.columns([2, 1])
+    # ================================================================
+    # A. Saved Load Profiles — unified dropdown (CSV + NEM-A)
+    # ================================================================
+    _all_profiles = _list_all_load_profiles()
 
-    with lp_col1:
-        st.markdown("**Upload & Save a Load Profile**")
+    _sel_name = None
+    _sel_type = None
+
+    if _all_profiles:
+        st.markdown("**Saved Load Profiles**")
+        _profile_names = [p[0] for p in _all_profiles]
+        _sel_name = st.selectbox("Select profile", _profile_names, key="lp_sel", index=None, placeholder="Choose a profile to edit...")
+
+        if _sel_name:
+            _sel_idx = _profile_names.index(_sel_name)
+            _sel_type = _all_profiles[_sel_idx][1]
+
+            # Show profile details
+            try:
+                if _sel_type == "csv":
+                    _det_df = _load_profile_csv(LOAD_PROFILES_DIR, _sel_name)
+                    _det_vals = _parse_8760_csv(_det_df)
+                    st.caption(
+                        f"**{_sel_name}** — Single Meter CSV · "
+                        f"{_det_vals.sum():,.0f} kWh/yr · Peak: {_det_vals.max():,.1f} kW"
+                    )
+                else:
+                    with open(os.path.join(NEMA_PROFILES_DIR, f"{_sel_name}.json")) as _det_f:
+                        _det_nd = json.load(_det_f)
+                    _det_meters = _det_nd.get("meters", [])
+                    _det_total = sum(sum(m.get("load_8760", [])) for m in _det_meters)
+                    _det_gen = next((m["name"] for m in _det_meters if m.get("is_generating")), "—")
+                    st.caption(
+                        f"**{_sel_name}** — NEM-A · {_det_nd.get('utility', '')} · "
+                        f"{len(_det_meters)} meters · {_det_total:,.0f} kWh/yr · Gen: {_det_gen}"
+                    )
+            except Exception:
+                pass
+
+            _btn_col1, _btn_col2 = st.columns(2)
+            with _btn_col1:
+                _lp_load_btn = st.button("Load into Session", key="lp_load_session", type="primary")
+            with _btn_col2:
+                _lp_del_btn = st.button("Delete", key="lp_del")
+
+            if _lp_load_btn:
+                try:
+                    _cod_yr = st.session_state.get("sb_cod_date", date(2026, 1, 1)).year
+                    if _sel_type == "csv":
+                        _al_df = _load_profile_csv(LOAD_PROFILES_DIR, _sel_name)
+                        _al_vals = _parse_8760_csv(_al_df)
+                        _al_dt = pd.date_range(f"{_cod_yr}-01-01", periods=8760, freq="h")
+                        st.session_state["load_8760"] = pd.Series(_al_vals, index=_al_dt, name="load_kwh")
+                        st.session_state["_raw_load_8760"] = st.session_state["load_8760"].copy()
+                        st.session_state["load_mode"] = "Single Meter"
+                        st.success(f"Loaded '{_sel_name}': {_al_vals.sum():,.0f} kWh/yr")
+                    else:
+                        _load_nema_profile_into_session(_sel_name)
+                        st.success(f"Loaded NEM-A '{_sel_name}' ({len(st.session_state.get('nema_meters', []))} meters)")
+                except Exception as e:
+                    st.error(f"Error loading profile: {e}")
+
+            if _lp_del_btn:
+                if _sel_type == "csv":
+                    _delete_file(LOAD_PROFILES_DIR, _sel_name, ".csv")
+                else:
+                    _delete_file(NEMA_PROFILES_DIR, _sel_name, ".json")
+                st.success(f"Deleted '{_sel_name}'.")
+                st.rerun()
+    else:
+        st.caption("No saved load profiles yet.")
+
+    # ================================================================
+    # B. Create New Profile (CSV upload or NEM-A builder)
+    # ================================================================
+    st.markdown("---")
+    _new_profile_type = st.radio(
+        "New Profile Type",
+        ["Single Meter CSV", "NEM-A Multi-Meter"],
+        horizontal=True,
+        key="mgmt_new_profile_type",
+    )
+
+    if _new_profile_type == "Single Meter CSV":
+        # --- CSV upload & save ---
         lp_name = st.text_input("Profile Name", placeholder="e.g., Dairy-Farm-2024", key="lp_name")
         lp_file = st.file_uploader("Upload 8760 Load CSV", type=["csv"], key="lp_upload")
         lp_save_btn = st.button("Save Load Profile", disabled=(not lp_name or lp_file is None))
@@ -579,60 +988,454 @@ if st.session_state.active_mgmt_tab == "Load Profiles":
             except Exception as e:
                 st.error(str(e))
 
-    with lp_col2:
-        if saved_loads:
-            st.markdown("**Saved Load Profiles**")
-            sel_lp = st.selectbox("Select profile", saved_loads, key="lp_sel")
-            lp_view_btn = st.button("View / Edit", key="lp_view")
-            lp_del_btn = st.button("Delete", key="lp_del")
+    else:
+        # --- NEM-A multi-meter profile builder ---
+        _nema_profile_name = st.text_input(
+            "NEM-A Profile Name",
+            placeholder="e.g., Dairy-Farm-2024",
+            key="mgmt_nema_profile_name",
+        )
 
-            if lp_del_btn and sel_lp:
-                _delete_file(LOAD_PROFILES_DIR, sel_lp, ".csv")
-                st.success(f"Deleted '{sel_lp}'.")
-                st.rerun()
-        else:
-            st.caption("No saved load profiles yet.")
-            sel_lp = None
-            lp_view_btn = False
+        # --- Utility selector ---
+        _mgmt_nema_utility = st.selectbox(
+            "NEM-A Utility (for fees)",
+            list(NEMA_FEES.keys()),
+            key="mgmt_nema_utility_sel",
+            index=list(NEMA_FEES.keys()).index(st.session_state.get("nema_utility", "PG&E")),
+        )
+        st.session_state["nema_utility"] = _mgmt_nema_utility
 
-    # View / Edit section
-    if saved_loads and lp_view_btn and sel_lp:
-        st.session_state["lp_editing"] = sel_lp
-    if st.session_state.get("lp_editing"):
-        edit_name = st.session_state["lp_editing"]
-        st.subheader(f"Editing: {edit_name}")
-        edit_df = _load_profile_csv(LOAD_PROFILES_DIR, edit_name)
-        try:
-            vals = _parse_8760_csv(edit_df)
-            st.write(f"**Rows:** {len(vals):,} | **Annual:** {vals.sum():,.0f} kWh | **Peak:** {vals.max():,.1f} kW")
+        _mgmt_fee_info = NEMA_FEES[_mgmt_nema_utility]
+        st.caption(
+            f"Admin fees: ${_mgmt_fee_info['setup_per_meter']:.0f}/meter setup"
+            + (f" (cap ${_mgmt_fee_info['setup_cap']:.0f})" if _mgmt_fee_info['setup_cap'] else "")
+            + f", ${_mgmt_fee_info['monthly_per_meter']:.2f}/meter/month"
+        )
 
-            # Monthly summary chart
-            _preview_year = st.session_state.get("sb_cod_date", date(2026, 1, 1)).year
-            dt_idx = pd.date_range(f"{_preview_year}-01-01", periods=8760, freq="h")
-            monthly_kwh = pd.Series(vals, index=dt_idx).resample("ME").sum()
-            import plotly.graph_objects as go
-            fig = go.Figure(go.Bar(x=MONTH_NAMES, y=monthly_kwh.values, marker_color="#636EFA"))
-            fig.update_layout(title="Monthly Load (kWh)", yaxis_title="kWh", height=300, template="plotly_white")
-            st.plotly_chart(fig, width="stretch")
-        except Exception as e:
-            st.warning(str(e))
+        # --- Fetch Available Rates (shared across meters) ---
+        _mgmt_fetch_col1, _mgmt_fetch_col2 = st.columns([1, 2])
+        with _mgmt_fetch_col1:
+            if st.button("Fetch Available Rates", key="mgmt_nema_fetch_rates"):
+                st.session_state["_pending_mgmt_fetch_rates"] = _mgmt_nema_utility
+        if st.session_state.get("available_rates"):
+            st.caption(f"{len(st.session_state['available_rates'])} rate schedules available for per-meter tariff selection.")
 
-        st.caption("Edit the data below and click Save to update.")
-        edited_df = st.data_editor(edit_df, num_rows="fixed", width="stretch", height=400, key="lp_editor")
+        # --- Initialize meter list if needed ---
+        if "nema_meters" not in st.session_state or not st.session_state["nema_meters"]:
+            st.session_state["nema_meters"] = [
+                {"name": "Generating Meter", "is_generating": True, "load_key": "nema_load_0", "tariff_key": "nema_tariff_0"},
+                {"name": "Meter 2", "is_generating": False, "load_key": "nema_load_1", "tariff_key": "nema_tariff_1"},
+            ]
 
-        lp_save_edit = st.button("Save Changes", key="lp_save_edit")
-        if lp_save_edit:
-            try:
-                _parse_8760_csv(edited_df)  # validate
-                _save_profile_csv(LOAD_PROFILES_DIR, edit_name, edited_df)
-                st.success(f"'{edit_name}' updated!")
-                st.rerun()
-            except Exception as e:
-                st.error(str(e))
-
-        if st.button("Close Editor", key="lp_close_edit"):
-            del st.session_state["lp_editing"]
+        # --- Add meter ---
+        if st.button("+ Add Meter", key="mgmt_nema_add_meter"):
+            _mgmt_idx = len(st.session_state["nema_meters"])
+            st.session_state["nema_meters"].append({
+                "name": f"Meter {_mgmt_idx + 1}",
+                "is_generating": False,
+                "load_key": f"nema_load_{_mgmt_idx}",
+                "tariff_key": f"nema_tariff_{_mgmt_idx}",
+            })
             st.rerun()
+
+        st.markdown("---")
+        st.caption("Upload an 8760 load CSV for each meter, then save the entire configuration as one profile.")
+
+        # --- Per-meter expanders (config + upload only) ---
+        _nema_staged_uploads: dict[int, pd.DataFrame] = {}
+        for _lp_i, _lp_meter in enumerate(st.session_state["nema_meters"]):
+            with st.expander(f"{'*' if _lp_meter.get('is_generating') else ''} {_lp_meter['name']}", expanded=(_lp_i < 2)):
+                _lp_meter["name"] = st.text_input(
+                    "Meter Name", value=_lp_meter["name"], key=f"mgmt_nema_name_{_lp_i}",
+                )
+                _lp_meter["is_generating"] = st.checkbox(
+                    "Generating meter (PV/ESS)",
+                    value=_lp_meter["is_generating"],
+                    key=f"mgmt_nema_gen_{_lp_i}",
+                )
+                _lp_m_file = st.file_uploader(
+                    "Upload 8760 Load CSV", type=["csv"], key=f"mgmt_lp_upload_{_lp_i}",
+                )
+                if _lp_m_file is not None:
+                    try:
+                        _lp_m_df = pd.read_csv(_lp_m_file)
+                        _lp_m_vals = _parse_8760_csv(_lp_m_df)
+                        _nema_staged_uploads[_lp_i] = _lp_m_df
+                        st.success(f"{len(_lp_m_vals):,} rows loaded ({_lp_m_vals.sum():,.0f} kWh)")
+                    except Exception as e:
+                        st.error(str(e))
+                else:
+                    _existing_load = st.session_state.get("nema_meter_loads", {}).get(_lp_i)
+                    if _existing_load is not None:
+                        st.caption(f"Loaded: {len(_existing_load):,} rows ({_existing_load.sum():,.0f} kWh)")
+                    elif _lp_meter.get("is_generating") and st.session_state.get("load_8760") is not None:
+                        st.caption(f"Using generating meter load from sidebar ({st.session_state.load_8760.sum():,.0f} kWh)")
+
+                # --- Per-meter tariff selection (non-generating meters) ---
+                if not _lp_meter.get("is_generating"):
+                    st.markdown("**Tariff**")
+                    _lp_use_gen = st.checkbox(
+                        "Use generating meter's tariff",
+                        value=_lp_meter.get("use_gen_tariff", True),
+                        key=f"mgmt_nema_use_gen_tariff_{_lp_i}",
+                    )
+                    _lp_meter["use_gen_tariff"] = _lp_use_gen
+                    if not _lp_use_gen and st.session_state.get("available_rates"):
+                        _mgmt_rate_opts = {f"{r['name']}": r["label"] for r in st.session_state["available_rates"]}
+                        _mgmt_sel_rate = st.selectbox(
+                            "Select Rate Schedule", list(_mgmt_rate_opts.keys()),
+                            key=f"mgmt_nema_tariff_sel_{_lp_i}",
+                        )
+                        if st.button("Load Tariff", key=f"mgmt_nema_tariff_load_{_lp_i}", type="primary"):
+                            st.session_state[f"_pending_mgmt_nema_tariff_{_lp_i}"] = _mgmt_rate_opts[_mgmt_sel_rate]
+                    _lp_cur_tariff = st.session_state.get("nema_meter_tariffs", {}).get(_lp_i)
+                    if _lp_cur_tariff is not None:
+                        st.success(f"Tariff loaded: {_lp_cur_tariff.name}")
+                    elif not _lp_use_gen:
+                        st.warning("No tariff loaded for this meter.")
+
+                # Remove meter
+                if len(st.session_state["nema_meters"]) > 2 and not _lp_meter["is_generating"]:
+                    if st.button("Remove this meter", key=f"mgmt_nema_remove_{_lp_i}"):
+                        st.session_state["nema_meters"].pop(_lp_i)
+                        _old_tariffs = st.session_state.get("nema_meter_tariffs", {})
+                        _new_tariffs = {}
+                        for _tk, _tv in _old_tariffs.items():
+                            if _tk < _lp_i:
+                                _new_tariffs[_tk] = _tv
+                            elif _tk > _lp_i:
+                                _new_tariffs[_tk - 1] = _tv
+                        st.session_state["nema_meter_tariffs"] = _new_tariffs
+                        st.rerun()
+
+        # --- Save NEM-A profile ---
+        st.markdown("---")
+        _nema_save_col1, _nema_save_col2 = st.columns([1, 1])
+        with _nema_save_col1:
+            _nema_save_btn = st.button(
+                "Save NEM-A Profile",
+                type="primary",
+                disabled=(not _nema_profile_name),
+                key="mgmt_nema_save_profile",
+            )
+        if _nema_save_btn and _nema_profile_name:
+            _nema_bundle_meters = []
+            _nema_save_ok = True
+            _nema_existing_loads = st.session_state.get("nema_meter_loads", {})
+            for _si, _sm in enumerate(st.session_state["nema_meters"]):
+                if _si in _nema_staged_uploads:
+                    _s_vals = _parse_8760_csv(_nema_staged_uploads[_si])
+                    _s_load_list = _s_vals.tolist()
+                elif _si in _nema_existing_loads:
+                    _s_load_list = _nema_existing_loads[_si].tolist()
+                elif _sm.get("is_generating") and st.session_state.get("load_8760") is not None:
+                    _s_load_list = st.session_state.load_8760.tolist()
+                else:
+                    _s_load_list = None
+
+                if _s_load_list is None:
+                    st.error(f"No load data for meter '{_sm['name']}'. Upload a CSV or load a profile in the sidebar first.")
+                    _nema_save_ok = False
+                    break
+
+                _nema_save_tariffs = st.session_state.get("nema_meter_tariffs", {})
+                _nema_bundle_meters.append({
+                    "name": _sm["name"],
+                    "is_generating": _sm.get("is_generating", False),
+                    "use_gen_tariff": _sm.get("use_gen_tariff", not _sm.get("is_generating", False)),
+                    "load_8760": _s_load_list,
+                    "tariff": asdict(_nema_save_tariffs[_si]) if _si in _nema_save_tariffs else None,
+                })
+
+            if _nema_save_ok:
+                import json as _json
+                _nema_bundle = {
+                    "utility": _mgmt_nema_utility,
+                    "meters": _nema_bundle_meters,
+                    "existing_solar_meters": st.session_state.get("existing_solar_nema_meters", []),
+                }
+                _nema_save_path = os.path.join(NEMA_PROFILES_DIR, f"{sanitize_filename(_nema_profile_name)}.json")
+                with open(_nema_save_path, "w") as _f:
+                    _json.dump(_nema_bundle, _f)
+                st.success(f"NEM-A profile '{_nema_profile_name}' saved with {len(_nema_bundle_meters)} meters.")
+                st.rerun()
+
+    # ================================================================
+    # C. Editing selected profile
+    # ================================================================
+    if _sel_name and _sel_type:
+        st.markdown("---")
+        # --- Auto-populate: CSV viewer/editor ---
+        if _sel_type == "csv":
+            st.subheader(f"Editing: {_sel_name}")
+            edit_df = _load_profile_csv(LOAD_PROFILES_DIR, _sel_name)
+            try:
+                vals = _parse_8760_csv(edit_df)
+                st.write(f"**Rows:** {len(vals):,} | **Annual:** {vals.sum():,.0f} kWh | **Peak:** {vals.max():,.1f} kW")
+
+                # Chart selector
+                _preview_year = st.session_state.get("sb_cod_date", date(2026, 1, 1)).year
+                dt_idx = pd.date_range(f"{_preview_year}-01-01", periods=8760, freq="h")
+                _lp_chart_type = st.radio(
+                    "Display",
+                    ["Monthly Load", "Average Daily Profile", "Load Duration Curve"],
+                    horizontal=True,
+                    key="lp_chart_type",
+                )
+                import plotly.graph_objects as go
+                _chart_layout = dict(
+                    height=380,
+                    template="plotly_white",
+                    font=dict(family="Aptos Narrow, Aptos, Calibri, Arial Narrow, sans-serif", size=12),
+                    title_font=dict(size=15, color="#1e293b"),
+                    margin=dict(l=40, r=20, t=50, b=40),
+                )
+                if _lp_chart_type == "Monthly Load":
+                    monthly_kwh = pd.Series(vals, index=dt_idx).resample("ME").sum()
+                    fig = go.Figure(go.Bar(x=MONTH_NAMES, y=monthly_kwh.values, marker_color="#636EFA"))
+                    fig.update_layout(title="Monthly Load (kWh)", yaxis_title="kWh", **_chart_layout)
+                    st.plotly_chart(fig, use_container_width=True)
+                elif _lp_chart_type == "Average Daily Profile":
+                    _lp_series = pd.Series(vals, index=dt_idx)
+                    _lp_avg_hourly = _lp_series.groupby(_lp_series.index.hour).mean()
+                    fig = go.Figure(go.Scatter(
+                        x=list(range(24)), y=_lp_avg_hourly.values,
+                        mode="lines+markers", line=dict(color="#636EFA", width=2.5),
+                        marker=dict(size=5), fill="tozeroy", fillcolor="rgba(99,110,250,0.1)",
+                    ))
+                    fig.update_layout(
+                        title="Average Daily Load Profile",
+                        xaxis_title="Hour of Day", yaxis_title="Avg kW",
+                        xaxis=dict(dtick=1, range=[-0.5, 23.5]),
+                        **_chart_layout,
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+                else:  # Load Duration Curve
+                    _lp_sorted = np.sort(vals)[::-1]
+                    fig = go.Figure(go.Scatter(
+                        x=list(range(1, 8761)), y=_lp_sorted,
+                        mode="lines", line=dict(color="#636EFA", width=2),
+                        fill="tozeroy", fillcolor="rgba(99,110,250,0.1)",
+                    ))
+                    fig.update_layout(
+                        title="Load Duration Curve",
+                        xaxis_title="Hours", yaxis_title="kW",
+                        **_chart_layout,
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+            except Exception as e:
+                st.warning(str(e))
+
+            st.caption("Edit the data below and click Save to update.")
+            edited_df = st.data_editor(edit_df, num_rows="fixed", width="stretch", height=400, key="lp_editor")
+
+            lp_save_edit = st.button("Save Changes", key="lp_save_edit")
+            if lp_save_edit:
+                try:
+                    _parse_8760_csv(edited_df)  # validate
+                    _save_profile_csv(LOAD_PROFILES_DIR, _sel_name, edited_df)
+                    st.success(f"'{_sel_name}' updated!")
+                    st.rerun()
+                except Exception as e:
+                    st.error(str(e))
+
+        # --- Auto-populate: NEM-A inline editor ---
+        if _sel_type == "nema":
+            import json as _json
+            _nema_edit_path = os.path.join(NEMA_PROFILES_DIR, f"{_sel_name}.json")
+            if os.path.exists(_nema_edit_path):
+                with open(_nema_edit_path, "r") as _f:
+                    _ne_data = _json.load(_f)
+
+                st.subheader(f"Editing: {_sel_name}")
+
+                # Load into Session button
+                if st.button("Load into Session", key="mgmt_nema_load_profile", type="primary"):
+                    _load_nema_profile_into_session(_sel_name)
+                    st.success(f"Loaded NEM-A profile '{_sel_name}' ({len(st.session_state.get('nema_meters', []))} meters).")
+                    st.rerun()
+
+                # --- Utility selector ---
+                _ne_utility = st.selectbox(
+                    "Utility",
+                    list(NEMA_FEES.keys()),
+                    key="edit_nema_utility",
+                    index=list(NEMA_FEES.keys()).index(_ne_data.get("utility", "PG&E")),
+                )
+
+                _ne_fee_info = NEMA_FEES[_ne_utility]
+                st.caption(
+                    f"Admin fees: ${_ne_fee_info['setup_per_meter']:.0f}/meter setup"
+                    + (f" (cap ${_ne_fee_info['setup_cap']:.0f})" if _ne_fee_info['setup_cap'] else "")
+                    + f", ${_ne_fee_info['monthly_per_meter']:.2f}/meter/month"
+                )
+
+                # Fetch rates for tariff selection
+                if st.button("Fetch Available Rates", key="edit_nema_fetch_rates"):
+                    st.session_state["_pending_edit_nema_fetch_rates"] = _ne_utility
+                if st.session_state.get("available_rates"):
+                    st.caption(f"{len(st.session_state['available_rates'])} rate schedules available.")
+
+                # Initialize edit-state meters from JSON (only on first load of this profile)
+                _ne_edit_key = f"_ne_editing_{_sel_name}"
+                if st.session_state.get("_ne_edit_profile") != _sel_name:
+                    st.session_state["_ne_edit_profile"] = _sel_name
+                    _ne_edit_meters = []
+                    _ne_edit_loads: dict[int, list] = {}
+                    _ne_edit_tariffs: dict[int, dict | None] = {}
+                    for _ei, _em in enumerate(_ne_data.get("meters", [])):
+                        _ne_edit_meters.append({
+                            "name": _em["name"],
+                            "is_generating": _em.get("is_generating", False),
+                            "use_gen_tariff": _em.get("use_gen_tariff", not _em.get("is_generating", False)),
+                        })
+                        if _em.get("load_8760"):
+                            _ne_edit_loads[_ei] = _em["load_8760"]
+                        _ne_edit_tariffs[_ei] = _em.get("tariff")
+                    st.session_state["_ne_edit_meters"] = _ne_edit_meters
+                    st.session_state["_ne_edit_loads"] = _ne_edit_loads
+                    st.session_state["_ne_edit_tariffs"] = _ne_edit_tariffs
+
+                _ne_edit_meters = st.session_state.get("_ne_edit_meters", [])
+                _ne_edit_loads = st.session_state.get("_ne_edit_loads", {})
+                _ne_edit_tariffs = st.session_state.get("_ne_edit_tariffs", {})
+
+                # Add meter
+                if st.button("+ Add Meter", key="edit_nema_add_meter"):
+                    _ne_new_idx = len(_ne_edit_meters)
+                    _ne_edit_meters.append({
+                        "name": f"Meter {_ne_new_idx + 1}",
+                        "is_generating": False,
+                        "use_gen_tariff": True,
+                    })
+                    st.session_state["_ne_edit_meters"] = _ne_edit_meters
+                    st.rerun()
+
+                st.markdown("---")
+
+                # Per-meter expanders
+                _ne_staged_uploads: dict[int, pd.DataFrame] = {}
+                for _ei, _em in enumerate(_ne_edit_meters):
+                    with st.expander(f"{'*' if _em.get('is_generating') else ''} {_em['name']}", expanded=(_ei < 2)):
+                        _em["name"] = st.text_input(
+                            "Meter Name", value=_em["name"], key=f"edit_nema_name_{_ei}",
+                        )
+                        _em["is_generating"] = st.checkbox(
+                            "Generating meter (PV/ESS)",
+                            value=_em.get("is_generating", False),
+                            key=f"edit_nema_gen_{_ei}",
+                        )
+
+                        # Load upload
+                        _ne_m_file = st.file_uploader(
+                            "Upload 8760 Load CSV", type=["csv"], key=f"edit_nema_upload_{_ei}",
+                        )
+                        if _ne_m_file is not None:
+                            try:
+                                _ne_m_df = pd.read_csv(_ne_m_file)
+                                _ne_m_vals = _parse_8760_csv(_ne_m_df)
+                                _ne_staged_uploads[_ei] = _ne_m_df
+                                st.success(f"{len(_ne_m_vals):,} rows loaded ({_ne_m_vals.sum():,.0f} kWh)")
+                            except Exception as e:
+                                st.error(str(e))
+                        else:
+                            _ne_cur_load = _ne_edit_loads.get(_ei)
+                            if _ne_cur_load is not None:
+                                _ne_load_sum = sum(_ne_cur_load)
+                                st.caption(f"Loaded: {len(_ne_cur_load):,} rows ({_ne_load_sum:,.0f} kWh)")
+
+                        # Tariff selection (non-generating)
+                        if not _em.get("is_generating"):
+                            st.markdown("**Tariff**")
+                            _ne_use_gen = st.checkbox(
+                                "Use generating meter's tariff",
+                                value=_em.get("use_gen_tariff", True),
+                                key=f"edit_nema_use_gen_tariff_{_ei}",
+                            )
+                            _em["use_gen_tariff"] = _ne_use_gen
+                            if not _ne_use_gen and st.session_state.get("available_rates"):
+                                _ne_rate_opts = {f"{r['name']}": r["label"] for r in st.session_state["available_rates"]}
+                                _ne_sel_rate = st.selectbox(
+                                    "Select Rate Schedule", list(_ne_rate_opts.keys()),
+                                    key=f"edit_nema_tariff_sel_{_ei}",
+                                )
+                                if st.button("Load Tariff", key=f"edit_nema_tariff_load_{_ei}", type="primary"):
+                                    st.session_state[f"_pending_edit_nema_tariff_{_ei}"] = _ne_rate_opts[_ne_sel_rate]
+                            _ne_cur_tariff = _ne_edit_tariffs.get(_ei)
+                            if _ne_cur_tariff is not None and isinstance(_ne_cur_tariff, dict) and _ne_cur_tariff.get("name"):
+                                st.success(f"Tariff: {_ne_cur_tariff['name']}")
+                            elif not _ne_use_gen:
+                                st.warning("No tariff loaded for this meter.")
+                        else:
+                            _em["use_gen_tariff"] = False
+
+                        # Remove meter
+                        if len(_ne_edit_meters) > 2 and not _em.get("is_generating"):
+                            if st.button("Remove this meter", key=f"edit_nema_remove_{_ei}"):
+                                _ne_edit_meters.pop(_ei)
+                                # Re-index loads and tariffs
+                                _new_loads = {}
+                                for _k, _v in _ne_edit_loads.items():
+                                    if _k < _ei:
+                                        _new_loads[_k] = _v
+                                    elif _k > _ei:
+                                        _new_loads[_k - 1] = _v
+                                _new_tariffs = {}
+                                for _k, _v in _ne_edit_tariffs.items():
+                                    if _k < _ei:
+                                        _new_tariffs[_k] = _v
+                                    elif _k > _ei:
+                                        _new_tariffs[_k - 1] = _v
+                                st.session_state["_ne_edit_meters"] = _ne_edit_meters
+                                st.session_state["_ne_edit_loads"] = _new_loads
+                                st.session_state["_ne_edit_tariffs"] = _new_tariffs
+                                st.rerun()
+
+                # Save Changes button
+                st.markdown("---")
+                if st.button("Save Changes", key="edit_nema_save", type="primary"):
+                    _ne_bundle_meters = []
+                    _ne_save_ok = True
+                    for _si, _sm in enumerate(_ne_edit_meters):
+                        if _si in _ne_staged_uploads:
+                            _s_vals = _parse_8760_csv(_ne_staged_uploads[_si])
+                            _s_load_list = _s_vals.tolist()
+                        elif _si in _ne_edit_loads:
+                            _s_load_list = _ne_edit_loads[_si]
+                            if not isinstance(_s_load_list, list):
+                                _s_load_list = list(_s_load_list)
+                        else:
+                            _s_load_list = None
+
+                        if _s_load_list is None:
+                            st.error(f"No load data for meter '{_sm['name']}'. Upload a CSV.")
+                            _ne_save_ok = False
+                            break
+
+                        _ne_s_tariff = _ne_edit_tariffs.get(_si)
+                        _ne_bundle_meters.append({
+                            "name": _sm["name"],
+                            "is_generating": _sm.get("is_generating", False),
+                            "use_gen_tariff": _sm.get("use_gen_tariff", not _sm.get("is_generating", False)),
+                            "load_8760": _s_load_list,
+                            "tariff": _ne_s_tariff,
+                        })
+
+                    if _ne_save_ok:
+                        _ne_bundle = {
+                            "utility": _ne_utility,
+                            "meters": _ne_bundle_meters,
+                            "existing_solar_meters": _ne_data.get("existing_solar_meters", []),
+                        }
+                        with open(_nema_edit_path, "w") as _f:
+                            _json.dump(_ne_bundle, _f)
+                        # Update edit state loads with staged uploads
+                        for _ui, _udf in _ne_staged_uploads.items():
+                            _ne_edit_loads[_ui] = _parse_8760_csv(_udf).tolist()
+                        st.session_state["_ne_edit_loads"] = _ne_edit_loads
+                        st.success(f"'{_sel_name}' updated with {len(_ne_bundle_meters)} meters.")
+                        st.rerun()
+
 
 
 # ---- EXPORT PROFILES SECTION ----
@@ -970,23 +1773,151 @@ with st.sidebar:
 
     # --- 3. Load Profile ---
     st.subheader("3. Load Profile")
-    saved_load_names = _list_saved(LOAD_PROFILES_DIR, ".csv")
-    load_source = st.radio(
-        "Load profile source",
-        ["Upload new CSV", "Use saved profile"],
-        key="load_source_radio",
+
+    load_mode = st.radio(
+        "Configuration",
+        ["Single Meter", "NEM-A Aggregation"],
+        horizontal=True,
+        key="load_mode_radio",
+        index=0 if st.session_state.get("load_mode", "Single Meter") == "Single Meter" else 1,
     )
+    st.session_state["load_mode"] = load_mode
 
     load_file = None
-    selected_load_profile = None
-    if load_source == "Upload new CSV":
-        st.caption("Upload a CSV with 8760 rows of hourly kWh values.")
-        load_file = st.file_uploader("Upload 8760 Load CSV", type=["csv"], key="sidebar_load_upload")
+
+    # --- A. Unified saved profiles dropdown (CSV + NEM-A) ---
+    _sb_all_profiles = _list_all_load_profiles()
+
+    if _sb_all_profiles:
+        _sb_profile_names = [p[0] for p in _sb_all_profiles]
+        _sb_sel_name = st.selectbox(
+            "Saved Load Profile",
+            _sb_profile_names,
+            key="sidebar_profile_sel",
+        )
+        _sb_sel_idx = _sb_profile_names.index(_sb_sel_name)
+        _sb_sel_type = _sb_all_profiles[_sb_sel_idx][1]
+
+        # Auto-load on selection change
+        _last_loaded = st.session_state.get("_last_loaded_sidebar_profile")
+        if _sb_sel_name != _last_loaded:
+            st.session_state["_last_loaded_sidebar_profile"] = _sb_sel_name
+            try:
+                if _sb_sel_type == "csv":
+                    _sb_df = _load_profile_csv(LOAD_PROFILES_DIR, _sb_sel_name)
+                    _sb_vals = _parse_8760_csv(_sb_df)
+                    _sb_dt = pd.date_range(f"{cod_year}-01-01", periods=8760, freq="h")
+                    st.session_state.load_8760 = pd.Series(_sb_vals, index=_sb_dt, name="load_kwh")
+                    st.session_state["_raw_load_8760"] = st.session_state.load_8760.copy()
+                    st.session_state["load_mode"] = "Single Meter"
+                    st.sidebar.success(
+                        f"Loaded '{_sb_sel_name}': {_sb_vals.sum():,.0f} kWh/yr, "
+                        f"Peak: {_sb_vals.max():,.1f} kW"
+                    )
+                else:
+                    _load_nema_profile_into_session(_sb_sel_name)
+                    st.sidebar.success(
+                        f"Loaded NEM-A '{_sb_sel_name}' "
+                        f"({len(st.session_state.get('nema_meters', []))} meters)"
+                    )
+            except Exception as e:
+                st.sidebar.error(f"Error loading profile: {e}")
+
+        # Show NEM-A meter breakdown when a NEM-A profile is active
+        if _sb_sel_type == "nema":
+            _sb_meters = st.session_state.get("nema_meters", [])
+            _sb_meter_loads = st.session_state.get("nema_meter_loads", {})
+            if _sb_meters:
+                for _mi, _m in enumerate(_sb_meters):
+                    _m_label = _m["name"]
+                    if _m.get("is_generating"):
+                        _m_label += " *"
+                    _m_kwh = ""
+                    if _mi in _sb_meter_loads:
+                        _m_kwh = f" — {_sb_meter_loads[_mi].sum():,.0f} kWh/yr"
+                    st.caption(f"{_m_label}{_m_kwh}")
     else:
-        if saved_load_names:
-            selected_load_profile = st.selectbox("Select Load Profile", saved_load_names, key="sidebar_load_sel")
-        else:
-            st.caption("No saved profiles. Upload via the Load Profiles tab above.")
+        st.caption("No saved profiles. Create one in the Load Profiles tab.")
+
+    # --- B. Ad-hoc CSV upload ---
+    st.caption("Or upload a CSV directly:")
+    load_file = st.file_uploader("Upload 8760 Load CSV", type=["csv"], key="sidebar_load_upload")
+
+    # --- Existing Solar (Repower) ---
+    st.divider()
+    existing_solar_enabled = st.toggle(
+        "Existing Solar (Decommission)",
+        key="existing_solar_toggle",
+    )
+    st.session_state["existing_solar_enabled"] = existing_solar_enabled
+
+    generate_existing_solar = False
+    if existing_solar_enabled:
+        st.caption(
+            "If the site has an existing solar system being decommissioned, "
+            "enter its specs below. The old system's estimated production will be added "
+            "back to the interval data to recover the true gross load."
+        )
+        existing_solar_size_kw = st.number_input(
+            "Existing System Size (kW-DC)",
+            min_value=0.1,
+            value=100.0,
+            step=10.0,
+            key="sb_existing_solar_size",
+        )
+        existing_solar_system_type = st.radio(
+            "System Type",
+            ["Fixed Tilt (Ground Mount)", "Single Axis Tracker"],
+            key="sb_existing_solar_type",
+            horizontal=True,
+        )
+        existing_solar_dc_ac = st.number_input(
+            "DC/AC Ratio",
+            min_value=0.5,
+            max_value=3.0,
+            value=1.2,
+            step=0.05,
+            key="sb_existing_solar_dc_ac",
+        )
+        existing_solar_age = st.number_input(
+            "System Age (years)",
+            min_value=0,
+            max_value=50,
+            value=10,
+            step=1,
+            key="sb_existing_solar_age",
+        )
+        existing_solar_degradation = st.number_input(
+            "Annual Degradation (%)",
+            min_value=0.0,
+            max_value=5.0,
+            value=0.50,
+            step=0.05,
+            format="%.2f",
+            key="sb_existing_solar_degradation",
+        )
+
+        # NEM-A mode: meter selection checkboxes
+        if load_mode == "NEM-A Aggregation":
+            st.caption("Select which meters the existing system was offsetting:")
+            _nema_selected = []
+            for _esi, _esm in enumerate(st.session_state.get("nema_meters", [])):
+                _es_default = _esm.get("is_generating", False)
+                _es_checked = st.checkbox(
+                    _esm["name"],
+                    value=_es_default,
+                    key=f"existing_solar_meter_{_esi}",
+                )
+                if _es_checked:
+                    _nema_selected.append(_esi)
+            st.session_state["existing_solar_nema_meters"] = _nema_selected
+
+        generate_existing_solar = st.button("Generate Existing Solar Profile", key="gen_existing_solar_btn")
+
+        # Show status if profile already generated
+        _es_prod = st.session_state.get("existing_solar_production_8760")
+        if _es_prod is not None:
+            st.success(f"Existing solar profile loaded: {_es_prod.sum():,.0f} kWh/yr (degraded)")
 
     # --- 4. Utility & Rate ---
     st.subheader("4. Utility & Rate")
@@ -1082,6 +2013,39 @@ with st.sidebar:
                 if meta.get("tariff_names"):
                     for tname in meta["tariff_names"][:10]:
                         st.caption(f"  - {tname}")
+
+    # --- Per-Meter Tariff Selection (NEM-A with Custom engine) ---
+    if billing_engine == "Custom" and st.session_state.get("load_mode") == "NEM-A Aggregation":
+        _pmt_meters = st.session_state.get("nema_meters", [])
+        _pmt_needs_tariff = [
+            (_pmt_i, _pmt_m) for _pmt_i, _pmt_m in enumerate(_pmt_meters)
+            if not _pmt_m.get("is_generating") and not st.session_state.get(f"nema_use_gen_tariff_{_pmt_i}", True)
+        ]
+        if _pmt_needs_tariff:
+            st.markdown("---")
+            st.markdown("**Per-Meter Tariff Selection**")
+            st.caption("Load a separate tariff for meters not using the generating meter's tariff.")
+            _pmt_loaded_tariffs = st.session_state.get("nema_meter_tariffs", {})
+            for _pmt_i, _pmt_m in _pmt_needs_tariff:
+                with st.expander(f"Tariff for: {_pmt_m['name']}", expanded=True):
+                    if st.session_state.available_rates:
+                        _pmt_rate_options = {f"{r['name']}": r["label"] for r in st.session_state.available_rates}
+                        _pmt_sel_name = st.selectbox(
+                            "Select Rate Schedule", list(_pmt_rate_options.keys()),
+                            key=f"nema_tariff_sel_{_pmt_i}",
+                        )
+                        _pmt_sel_label = _pmt_rate_options[_pmt_sel_name]
+                        if st.button("Load Tariff", key=f"nema_tariff_load_{_pmt_i}", type="primary"):
+                            st.session_state[f"_pending_nema_tariff_load_{_pmt_i}"] = _pmt_sel_label
+                    else:
+                        st.caption("Fetch rates above first to select a tariff.")
+
+                    # Show current tariff status
+                    _pmt_current = _pmt_loaded_tariffs.get(_pmt_i)
+                    if _pmt_current is not None:
+                        st.success(f"Loaded: {_pmt_current.name}")
+                    else:
+                        st.warning("No tariff loaded for this meter.")
 
     # --- 5. Export Compensation ---
     st.subheader("5. Export Compensation")
@@ -1443,6 +2407,11 @@ with st.sidebar:
 # =============================================================================
 # SAVE SIMULATION HANDLER (after sidebar so variables are available)
 # =============================================================================
+# Handle main-area Save Simulation button (triggers via session state)
+if st.session_state.get("_pending_save_name"):
+    save_btn = True
+    sim_name = st.session_state.pop("_pending_save_name")
+
 if save_btn and sim_name and st.session_state.get("billing_result") is not None:
     result_to_save = st.session_state.billing_result
     summary_to_save = build_savings_summary(result_to_save, system_cost)
@@ -1560,6 +2529,25 @@ if save_btn and sim_name and st.session_state.get("billing_result") is not None:
             if _export_multiyear_2 else None
         )
 
+    # Save NEM-A meter data when in aggregation mode
+    _save_load_mode = st.session_state.get("load_mode", "Single Meter")
+    if _save_load_mode == "NEM-A Aggregation":
+        extra_save["nema_meters"] = st.session_state.get("nema_meters", [])
+        _nema_meter_loads = st.session_state.get("nema_meter_loads", {})
+        extra_save["nema_meter_loads"] = {
+            str(k): list(v.values) for k, v in _nema_meter_loads.items()
+        }
+        _nema_meter_tariffs = st.session_state.get("nema_meter_tariffs", {})
+        if _nema_meter_tariffs:
+            extra_save["nema_meter_tariffs"] = {
+                str(k): asdict(v) for k, v in _nema_meter_tariffs.items()
+            }
+
+    # Save existing solar production profile
+    _es_prod_save = st.session_state.get("existing_solar_production_8760")
+    if _es_prod_save is not None:
+        extra_save["existing_solar_production_8760"] = list(_es_prod_save.values)
+
     _save_simulation(
         name=sim_name,
         result=result_to_save,
@@ -1590,6 +2578,15 @@ if save_btn and sim_name and st.session_state.get("billing_result") is not None:
             "nbc_rate": nbc_rate,
             "nsc_rate": nsc_rate,
             "billing_option": billing_option,
+            "load_mode": _save_load_mode,
+            "nema_utility": st.session_state.get("nema_utility", "PG&E") if _save_load_mode == "NEM-A Aggregation" else None,
+            "existing_solar_enabled": st.session_state.get("existing_solar_enabled", False),
+            "existing_solar_size_kw": st.session_state.get("sb_existing_solar_size", 100.0),
+            "existing_solar_system_type": st.session_state.get("sb_existing_solar_type", "Fixed Tilt (Ground Mount)"),
+            "existing_solar_dc_ac_ratio": st.session_state.get("sb_existing_solar_dc_ac", 1.2),
+            "existing_solar_age": st.session_state.get("sb_existing_solar_age", 10),
+            "existing_solar_degradation_pct": st.session_state.get("sb_existing_solar_degradation", 0.5),
+            "existing_solar_nema_meters": st.session_state.get("existing_solar_nema_meters", []),
         },
         production_8760=_prod_list,
         load_8760=_load_list,
@@ -1632,39 +2629,136 @@ if generate_prod and lat is not None and lon is not None:
 
 
 # =============================================================================
+# EXISTING SOLAR PROFILE GENERATION
+# =============================================================================
+if generate_existing_solar and lat is not None and lon is not None:
+    api_key = os.getenv("NREL_API_KEY", "")
+    if not api_key:
+        st.error("NREL_API_KEY not found.")
+    else:
+        with st.spinner("Generating existing solar profile via PVWatts..."):
+            try:
+                _es_config = PVSystemConfig(
+                    system_capacity_kw_dc=existing_solar_size_kw,
+                    dc_ac_ratio=existing_solar_dc_ac,
+                    array_type=get_array_type_code(existing_solar_system_type),
+                )
+                _es_prod, _es_summary = fetch_production_8760(
+                    api_key, lat, lon, _es_config, start_year=cod_year
+                )
+                # Apply compound degradation
+                _es_degradation_factor = (1 - existing_solar_degradation / 100) ** existing_solar_age
+                _es_prod = _es_prod * _es_degradation_factor
+                st.session_state["existing_solar_production_8760"] = _es_prod
+                st.sidebar.success(
+                    f"Existing solar profile: {_es_prod.sum():,.0f} kWh/yr "
+                    f"(degraded {existing_solar_age}yr @ {existing_solar_degradation}%/yr)"
+                )
+            except Exception as e:
+                st.error(f"Existing solar PVWatts error: {e}")
+
+
+# =============================================================================
 # LOAD PROFILE PARSING
 # =============================================================================
-if load_source == "Upload new CSV" and load_file is not None:
-    try:
-        df_load = pd.read_csv(load_file)
-        load_values = _parse_8760_csv(df_load)
-        dt_index = pd.date_range(start=f"{cod_year}-01-01 00:00", periods=8760, freq="h")
-        st.session_state.load_8760 = pd.Series(load_values, index=dt_index, name="load_kwh")
-        annual_load = load_values.sum()
-        peak_load = load_values.max()
-        load_factor = annual_load / (peak_load * 8760) * 100 if peak_load > 0 else 0
-        st.sidebar.success(
-            f"Load profile loaded: {annual_load:,.0f} kWh/yr, "
-            f"Peak: {peak_load:,.1f} kW, LF: {load_factor:.1f}%"
-        )
-    except Exception as e:
-        st.error(f"Error reading load file: {e}")
+if load_mode == "Single Meter":
+    # Only handle ad-hoc CSV upload; saved profiles already loaded by sidebar selection
+    if load_file is not None:
+        try:
+            df_load = pd.read_csv(load_file)
+            load_values = _parse_8760_csv(df_load)
+            dt_index = pd.date_range(start=f"{cod_year}-01-01 00:00", periods=8760, freq="h")
+            st.session_state.load_8760 = pd.Series(load_values, index=dt_index, name="load_kwh")
+            st.session_state["_raw_load_8760"] = st.session_state.load_8760.copy()
+            annual_load = load_values.sum()
+            peak_load = load_values.max()
+            load_factor = annual_load / (peak_load * 8760) * 100 if peak_load > 0 else 0
+            st.sidebar.success(
+                f"Load profile loaded: {annual_load:,.0f} kWh/yr, "
+                f"Peak: {peak_load:,.1f} kW, LF: {load_factor:.1f}%"
+            )
+        except Exception as e:
+            st.error(f"Error reading load file: {e}")
+else:
+    # NEM-A: preserve session data loaded by _load_nema_profile_into_session
+    _prev_loads = st.session_state.get("nema_meter_loads", {})
+    st.session_state["nema_meter_loads"] = _prev_loads
+    _prev_raw = st.session_state.get("_raw_nema_meter_loads", {})
+    st.session_state["_raw_nema_meter_loads"] = _prev_raw
 
-elif load_source == "Use saved profile" and selected_load_profile:
-    try:
-        df_load = _load_profile_csv(LOAD_PROFILES_DIR, selected_load_profile)
-        load_values = _parse_8760_csv(df_load)
-        dt_index = pd.date_range(start=f"{cod_year}-01-01 00:00", periods=8760, freq="h")
-        st.session_state.load_8760 = pd.Series(load_values, index=dt_index, name="load_kwh")
-        annual_load = load_values.sum()
-        peak_load = load_values.max()
-        load_factor = annual_load / (peak_load * 8760) * 100 if peak_load > 0 else 0
-        st.sidebar.success(
-            f"Loaded '{selected_load_profile}': {annual_load:,.0f} kWh/yr, "
-            f"Peak: {peak_load:,.1f} kW, LF: {load_factor:.1f}%"
-        )
-    except Exception as e:
-        st.error(f"Error loading profile: {e}")
+# =============================================================================
+# EXISTING SOLAR LOAD ADJUSTMENT
+# =============================================================================
+# Bootstrap raw loads from NEM-A profile file if not yet set (migration).
+# This ensures sessions started before the raw-load fix get clean base data.
+if (
+    load_mode != "Single Meter"
+    and not st.session_state.get("_raw_nema_meter_loads")
+    and st.session_state.get("nema_meter_loads")
+):
+    _bootstrap_name = st.session_state.get("_last_loaded_sidebar_profile")
+    if _bootstrap_name:
+        try:
+            _bp = os.path.join(NEMA_PROFILES_DIR, f"{_bootstrap_name}.json")
+            if os.path.exists(_bp):
+                with open(_bp) as _bf:
+                    _bd = json.load(_bf)
+                _by = st.session_state.get("sb_cod_date", date(2026, 1, 1)).year
+                _bdt = pd.date_range(f"{_by}-01-01", periods=8760, freq="h")
+                _raw_boots: dict[int, pd.Series] = {}
+                for _bi, _bm in enumerate(_bd.get("meters", [])):
+                    if _bm.get("load_8760"):
+                        _raw_boots[_bi] = pd.Series(_bm["load_8760"], index=_bdt, name="load_kwh")
+                if _raw_boots:
+                    st.session_state["_raw_nema_meter_loads"] = _raw_boots
+                    st.session_state["nema_meter_loads"] = {k: v.copy() for k, v in _raw_boots.items()}
+                    for _bi2, _bm2 in enumerate(st.session_state.get("nema_meters", [])):
+                        if _bm2.get("is_generating") and _bi2 in _raw_boots:
+                            st.session_state["load_8760"] = _raw_boots[_bi2].copy()
+                            st.session_state["_raw_load_8760"] = _raw_boots[_bi2].copy()
+                            break
+        except Exception:
+            pass
+
+# Bootstrap raw load for single meter if missing
+if (
+    load_mode == "Single Meter"
+    and st.session_state.get("_raw_load_8760") is None
+    and st.session_state.get("load_8760") is not None
+):
+    _sb_profile_name = st.session_state.get("_last_loaded_sidebar_profile")
+    if _sb_profile_name:
+        try:
+            _sb_df = _load_profile_csv(LOAD_PROFILES_DIR, _sb_profile_name)
+            _sb_raw_vals = _parse_8760_csv(_sb_df)
+            _sb_yr = st.session_state.get("sb_cod_date", date(2026, 1, 1)).year
+            _sb_dtr = pd.date_range(f"{_sb_yr}-01-01", periods=8760, freq="h")
+            _sb_raw_series = pd.Series(_sb_raw_vals, index=_sb_dtr, name="load_kwh")
+            st.session_state["_raw_load_8760"] = _sb_raw_series
+            st.session_state["load_8760"] = _sb_raw_series.copy()
+        except Exception:
+            pass
+
+_es_enabled = st.session_state.get("existing_solar_enabled", False)
+_es_production = st.session_state.get("existing_solar_production_8760")
+if _es_enabled and _es_production is not None:
+    if load_mode == "Single Meter":
+        _raw_load = st.session_state.get("_raw_load_8760")
+        if _raw_load is not None:
+            st.session_state.load_8760 = adjust_load_single_meter(
+                _raw_load, _es_production
+            )
+    else:
+        _es_selected = st.session_state.get("existing_solar_nema_meters", [])
+        _raw_nema = st.session_state.get("_raw_nema_meter_loads", {})
+        if _es_selected and _raw_nema:
+            _adjusted_nema = adjust_loads_nema(_raw_nema, _es_production, _es_selected)
+            st.session_state["nema_meter_loads"] = _adjusted_nema
+            # Update load_8760 if generating meter was adjusted
+            for _ami, _aminfo in enumerate(st.session_state.get("nema_meters", [])):
+                if _aminfo.get("is_generating") and _ami in _adjusted_nema:
+                    st.session_state.load_8760 = _adjusted_nema[_ami]
+                    break
 
 
 # =============================================================================
@@ -1687,6 +2781,51 @@ if load_tariff_btn and selected_label:
             st.sidebar.success(f"Tariff loaded: {tariff.name}")
         except Exception as e:
             st.error(f"Error loading tariff: {e}")
+
+# --- Management tab: Fetch rates handler ---
+if st.session_state.get("_pending_mgmt_fetch_rates"):
+    _mgmt_fetch_util = st.session_state.pop("_pending_mgmt_fetch_rates")
+    with st.spinner(f"Fetching rates for {_mgmt_fetch_util}..."):
+        try:
+            rates = fetch_available_rates(_mgmt_fetch_util)
+            st.session_state.available_rates = rates
+            st.success(f"Found {len(rates)} rate schedules.")
+        except Exception as e:
+            st.error(f"Error fetching rates: {e}")
+
+# --- Management tab: Per-meter tariff load handlers ---
+for _mgmt_ti in range(len(st.session_state.get("nema_meters", []))):
+    _mgmt_tariff_key = f"_pending_mgmt_nema_tariff_{_mgmt_ti}"
+    _mgmt_tariff_label = st.session_state.get(_mgmt_tariff_key)
+    if _mgmt_tariff_label:
+        st.session_state.pop(_mgmt_tariff_key)
+        with st.spinner(f"Loading tariff for meter {_mgmt_ti}..."):
+            try:
+                _mgmt_tariff = fetch_tariff_detail(_mgmt_tariff_label)
+                if "nema_meter_tariffs" not in st.session_state:
+                    st.session_state["nema_meter_tariffs"] = {}
+                st.session_state["nema_meter_tariffs"][_mgmt_ti] = _mgmt_tariff
+                _mgmt_meter_name = st.session_state.get("nema_meters", [])[_mgmt_ti].get("name", f"Meter {_mgmt_ti}")
+                st.success(f"Tariff loaded for {_mgmt_meter_name}: {_mgmt_tariff.name}")
+            except Exception as e:
+                st.error(f"Error loading per-meter tariff: {e}")
+
+# --- Per-meter tariff load handlers (NEM-A sidebar) ---
+for _pmt_load_i in range(len(st.session_state.get("nema_meters", []))):
+    _pmt_pending_key = f"_pending_nema_tariff_load_{_pmt_load_i}"
+    _pmt_pending_label = st.session_state.get(_pmt_pending_key)
+    if _pmt_pending_label:
+        st.session_state.pop(_pmt_pending_key)
+        with st.spinner(f"Loading tariff for meter {_pmt_load_i}..."):
+            try:
+                _pmt_tariff = fetch_tariff_detail(_pmt_pending_label)
+                if "nema_meter_tariffs" not in st.session_state:
+                    st.session_state["nema_meter_tariffs"] = {}
+                st.session_state["nema_meter_tariffs"][_pmt_load_i] = _pmt_tariff
+                _pmt_meter_name = st.session_state.get("nema_meters", [])[_pmt_load_i].get("name", f"Meter {_pmt_load_i}")
+                st.sidebar.success(f"Tariff loaded for {_pmt_meter_name}: {_pmt_tariff.name}")
+            except Exception as e:
+                st.error(f"Error loading per-meter tariff: {e}")
 
 # --- ECC tariff fetch/load handlers ---
 if ecc_fetch_btn:
@@ -1875,18 +3014,43 @@ if nem_switch and export_method_2 is not None:
 # =============================================================================
 # RUN SIMULATION
 # =============================================================================
+_nema_mode = st.session_state.get("load_mode") == "NEM-A Aggregation"
+
+if _nema_mode:
+    # NEM-A: check that all meters have load profiles
+    _nema_loads_ready = st.session_state.load_8760 is not None  # generating meter
+    _nema_all_loads = st.session_state.get("nema_meter_loads", {})
+    _nema_meter_list = st.session_state.get("nema_meters", [])
+    for _mi, _minfo in enumerate(_nema_meter_list):
+        if not _minfo.get("is_generating") and _mi not in _nema_all_loads:
+            _nema_loads_ready = False
+            break
+    _load_ready = _nema_loads_ready
+else:
+    _load_ready = st.session_state.load_8760 is not None
+
+# Check per-meter tariffs for NEM-A with Custom engine
+_tariff_ready = (
+    st.session_state.tariff is not None
+    if billing_engine == "Custom"
+    else st.session_state.get("ecc_cost_calculator") is not None
+)
+if _tariff_ready and billing_engine == "Custom" and _nema_mode:
+    _nema_meter_tariffs = st.session_state.get("nema_meter_tariffs", {})
+    for _rc_i, _rc_m in enumerate(st.session_state.get("nema_meters", [])):
+        if not _rc_m.get("is_generating") and not _rc_m.get("use_gen_tariff", True):
+            if _rc_i not in _nema_meter_tariffs:
+                _tariff_ready = False
+                break
+
 ready_checks = {
     "Production profile": st.session_state.production_8760 is not None,
-    "Load profile": st.session_state.load_8760 is not None,
-    "Tariff schedule": (
-        st.session_state.tariff is not None
-        if billing_engine == "Custom"
-        else st.session_state.get("ecc_cost_calculator") is not None
-    ),
+    "Load profile": _load_ready,
+    "Tariff schedule": _tariff_ready,
     "Export rates": (
         st.session_state.export_rates is not None
-        if nem_regime_1 == "NEM-3 / NVBT"
-        else True  # Not needed for NEM-1/NEM-2 (exports valued at retail rate)
+        if nem_regime_1 == "NEM-3 / NVBT" and not _nema_mode
+        else True  # Not needed for NEM-1/NEM-2 or NEM-A (exports valued at retail rate)
     ),
 }
 all_ready = all(ready_checks.values())
@@ -1896,7 +3060,7 @@ if not all_ready:
     _checklist_hints = {
         "Production profile": "Sidebar Section 1-2: enter a location, configure PV system, and click **Generate Production Profile**",
         "Load profile": "Sidebar Section 3: upload an 8760 CSV or select a saved load profile",
-        "Tariff schedule": "Sidebar Section 4: fetch and load a rate schedule from your selected utility",
+        "Tariff schedule": "Sidebar Section 4: fetch and load a rate schedule. For NEM-A meters not using the generating meter's tariff, load per-meter tariffs below the rate selector.",
         "Export rates": "Sidebar Section 5: choose an export compensation method (saved profile, CSV upload, or flat rate)",
     }
     for check, status in ready_checks.items():
@@ -1907,9 +3071,20 @@ if not all_ready:
             st.caption(f"  ↳ {_checklist_hints.get(check, '')}")
     st.info("Complete all inputs in the sidebar, then click **Run Simulation** below.")
 
-_run_col, _edit_col = st.columns([1, 1])
+_run_col, _save_col, _edit_col = st.columns(3)
 with _run_col:
     run_sim = st.button("Run Simulation", type="primary", disabled=not all_ready, width="stretch")
+with _save_col:
+    _has_result = st.session_state.get("billing_result") is not None
+    with st.popover("Save Simulation", use_container_width=True, disabled=not _has_result):
+        _main_sim_name = st.text_input(
+            "Simulation Name",
+            placeholder="e.g., Ranch-500kW-AG1-SAT",
+            key="main_sim_name_input",
+        )
+        if st.button("Save", disabled=not _main_sim_name, width="stretch", key="main_save_btn"):
+            st.session_state["_pending_save_name"] = _main_sim_name
+            st.rerun()
 with _edit_col:
     _has_saved_view = st.session_state.saved_view is not None
     edit_sim = st.button(
@@ -1925,6 +3100,7 @@ if edit_sim and _has_saved_view:
     st.rerun()
 
 if run_sim:
+    st.session_state.active_mgmt_tab = None
     _overlay = st.empty()
     _overlay.markdown(
         _progress_overlay_html(0, "Initializing..."),
@@ -1972,7 +3148,9 @@ if run_sim:
             # For NEM-1/NEM-2, export rates are not used (valued at retail TOU),
             # but the function signature requires an array — provide zeros as placeholder.
             _export_rates_for_sim = st.session_state.export_rates
-            if _export_rates_for_sim is None and nem_regime_1 in ("NEM-1", "NEM-2"):
+            if _export_rates_for_sim is None:
+                # NEM-1/NEM-2 value exports at retail TOU (zeros placeholder).
+                # NEM-A may also reach here if NEM-3 export rates weren't loaded.
                 _dt_idx_placeholder = pd.date_range(start=f"{cod_year}-01-01 00:00", periods=8760, freq="h")
                 _export_rates_for_sim = pd.Series(
                     np.zeros(8760), index=_dt_idx_placeholder, name="export_rate_per_kwh",
@@ -1983,164 +3161,276 @@ if run_sim:
             _nem_nsc = nsc_rate if nem_regime_1 in ("NEM-1", "NEM-2") else 0.0
             _nem_billing = billing_option if nem_regime_1 in ("NEM-1", "NEM-2") else "ABO"
 
-            # --- Step 1: PV-only billing ---
-            _overlay.markdown(
-                _progress_overlay_html(5, "Running PV-only billing simulation..."),
-                unsafe_allow_html=True,
-            )
-            result_pv_only = run_billing_simulation(
-                load_8760=st.session_state.load_8760,
-                production_8760=st.session_state.production_8760,
-                tariff=st.session_state.tariff,
-                export_rates_8760=_export_rates_for_sim,
-                nem_regime=nem_regime_1,
-                nbc_rate=_nem_nbc,
-                nsc_rate=_nem_nsc,
-                billing_option=_nem_billing,
-            )
-            st.session_state.billing_result_pv_only = result_pv_only
-            st.session_state.sizing_result = None
+            if st.session_state.get("load_mode") == "NEM-A Aggregation":
+                # ============ NEM-A Aggregation path ============
+                _overlay.markdown(
+                    _progress_overlay_html(10, "Building NEM-A meter profiles..."),
+                    unsafe_allow_html=True,
+                )
 
-            _overlay.markdown(
-                _progress_overlay_html(25, "PV-only simulation complete."),
-                unsafe_allow_html=True,
-            )
+                # Build MeterConfig list from session state
+                _nema_meter_loads = st.session_state.get("nema_meter_loads", {})
+                _nema_meters_info = st.session_state.get("nema_meters", [])
+                _gen_tariff = st.session_state.tariff
+                _meter_configs = []
 
-            # --- Step 2: Battery dispatch (if enabled) ---
-            if st.session_state.battery_enabled and st.session_state.battery_config is not None:
-                batt_cfg = st.session_state.battery_config
-                _use_monthly = st.session_state.get("battery_fast_dispatch", False)
-
-                if st.session_state.get("battery_optimize", False):
-                    # ---- Sizing sweep ----
-                    opt_min, opt_max, opt_step = st.session_state.battery_opt_range
-                    if opt_max > opt_min and opt_step > 0:
-                        import numpy as _np
-                        candidates = _np.arange(opt_min, opt_max + opt_step / 2, opt_step).tolist()
-
-                        _overlay.markdown(
-                            _progress_overlay_html(30, f"Running sizing sweep ({len(candidates)} candidates)..."),
-                            unsafe_allow_html=True,
-                        )
-
-                        _tariff = st.session_state.tariff
-                        _dt_idx = cast(pd.DatetimeIndex, st.session_state.load_8760.index)
-                        d_masks, d_prices = _build_demand_lp_inputs(_tariff, _dt_idx)
-                        _energy_rates = _build_hourly_energy_rates(_tariff, _dt_idx)
-
-                        _export_for_sizing = (
-                            _export_rates_for_sim
-                            if st.session_state.export_rates is None
-                            else st.session_state.export_rates
-                        )
-                        sizing_res = optimize_capacity_kwh(
-                            candidate_sizes_kwh=candidates,
-                            pv_kwh=np.asarray(st.session_state.production_8760),
-                            load_kwh=np.asarray(st.session_state.load_8760.values),
-                            import_price=_energy_rates,
-                            export_price=np.asarray(_export_for_sizing.values),
-                            demand_window_masks=d_masks,
-                            demand_prices=d_prices,
-                            battery_config=batt_cfg,
-                            monthly=_use_monthly,
-                            dt_index=_dt_idx,
-                        )
-                        st.session_state.sizing_result = sizing_res
-
-                        _overlay.markdown(
-                            _progress_overlay_html(50, "Sizing complete. Running final billing..."),
-                            unsafe_allow_html=True,
-                        )
-
-                        # Run full billing with best size to get proper BillingResult
-                        result_batt = run_billing_simulation(
-                            load_8760=st.session_state.load_8760,
-                            production_8760=st.session_state.production_8760,
-                            tariff=st.session_state.tariff,
-                            export_rates_8760=_export_rates_for_sim,
-                            battery_config=batt_cfg,
-                            capacity_kwh=sizing_res.best_size_kwh,
-                            monthly_dispatch=_use_monthly,
-                            nem_regime=nem_regime_1,
-                            nbc_rate=_nem_nbc,
-                            nsc_rate=_nem_nsc,
-                            billing_option=_nem_billing,
-                        )
-                        st.session_state.billing_result = result_batt
-                        st.session_state.billing_result_batt = result_batt
-                        st.session_state.battery_capacity_kwh = sizing_res.best_size_kwh
-
-                        _overlay.markdown(
-                            _progress_overlay_html(75, "Building results..."),
-                            unsafe_allow_html=True,
-                        )
-
-                        _overlay.markdown(
-                            _progress_overlay_html(100, "Done!"),
-                            unsafe_allow_html=True,
-                        )
-                        st.success(
-                            f"Optimization complete! Best size: "
-                            f"{sizing_res.best_size_kwh:,.0f} kWh"
-                        )
+                for _mi, _minfo in enumerate(_nema_meters_info):
+                    if _minfo.get("is_generating"):
+                        _m_load = st.session_state.load_8760
+                        _m_tariff = _gen_tariff
                     else:
-                        st.session_state.billing_result = result_pv_only
-                        st.session_state.billing_result_batt = None
-                        st.warning("Invalid optimize range. Running PV-only.")
-                else:
-                    # ---- Fixed-size dispatch ----
+                        _m_load = _nema_meter_loads.get(_mi)
+                        if _m_load is None:
+                            raise ValueError(f"No load profile for meter '{_minfo['name']}'")
+                        # Use generating meter's tariff if checkbox is set, else use per-meter tariff
+                        if _minfo.get("use_gen_tariff", True):
+                            _m_tariff = _gen_tariff
+                        else:
+                            _m_tariff = st.session_state.get("nema_meter_tariffs", {}).get(_mi)
+                            if _m_tariff is None:
+                                raise ValueError(
+                                    f"No tariff loaded for meter '{_minfo['name']}'. "
+                                    f"Load a tariff in Section 4 or check 'Use generating meter's tariff'."
+                                )
+
+                    _meter_configs.append(MeterConfig(
+                        name=_minfo["name"],
+                        load_8760=_m_load,
+                        tariff=_m_tariff,
+                        is_generating=_minfo.get("is_generating", False),
+                    ))
+
+                _nema_profile = NemAProfile(
+                    utility=st.session_state.get("nema_utility", utility_name),
+                    meters=_meter_configs,
+                    nem_regime=nem_regime_1,
+                    nbc_rate=_nem_nbc,
+                    nsc_rate=_nem_nsc if nem_regime_1 in ("NEM-1", "NEM-2") else 0.04,
+                    billing_option=_nem_billing,
+                )
+
+                # PV-only aggregation run (no battery)
+                _overlay.markdown(
+                    _progress_overlay_html(25, "Running NEM-A PV-only simulation..."),
+                    unsafe_allow_html=True,
+                )
+                result_pv_only = run_aggregation_simulation(
+                    profile=_nema_profile,
+                    production_8760=st.session_state.production_8760,
+                    export_rates_8760=_export_rates_for_sim,
+                )
+                st.session_state.billing_result_pv_only = result_pv_only
+                st.session_state.sizing_result = None
+
+                # Battery dispatch (if enabled)
+                if st.session_state.battery_enabled and st.session_state.battery_config is not None:
+                    batt_cfg = st.session_state.battery_config
+                    _use_monthly = st.session_state.get("battery_fast_dispatch", False)
                     batt_cap = st.session_state.get("battery_capacity_kwh", 0)
+
                     if batt_cap > 0:
                         _overlay.markdown(
-                            _progress_overlay_html(30, "Running PV + Battery dispatch..."),
+                            _progress_overlay_html(50, "Running NEM-A PV + Battery simulation..."),
                             unsafe_allow_html=True,
                         )
-                        result_batt = run_billing_simulation(
-                            load_8760=st.session_state.load_8760,
+
+                        # Use effective export price for battery dispatch
+                        _dt_idx = cast(pd.DatetimeIndex, st.session_state.load_8760.index)
+                        _eff_export = compute_effective_export_price(_meter_configs, _dt_idx)
+                        _eff_export_series = pd.Series(_eff_export, index=_dt_idx, name="export_rate_per_kwh")
+
+                        result_batt = run_aggregation_simulation(
+                            profile=_nema_profile,
                             production_8760=st.session_state.production_8760,
-                            tariff=st.session_state.tariff,
-                            export_rates_8760=_export_rates_for_sim,
+                            export_rates_8760=_eff_export_series,
                             battery_config=batt_cfg,
                             capacity_kwh=batt_cap,
                             monthly_dispatch=_use_monthly,
-                            nem_regime=nem_regime_1,
-                            nbc_rate=_nem_nbc,
-                            nsc_rate=_nem_nsc,
-                            billing_option=_nem_billing,
                         )
                         st.session_state.billing_result = result_batt
                         st.session_state.billing_result_batt = result_batt
-
-                        _overlay.markdown(
-                            _progress_overlay_html(75, "Building results..."),
-                            unsafe_allow_html=True,
-                        )
-
-                        _overlay.markdown(
-                            _progress_overlay_html(100, "Done!"),
-                            unsafe_allow_html=True,
-                        )
-                        st.success("Simulation complete (PV + Battery)!")
                     else:
                         st.session_state.billing_result = result_pv_only
                         st.session_state.billing_result_batt = None
-                        _overlay.markdown(
-                            _progress_overlay_html(100, "Done!"),
-                            unsafe_allow_html=True,
-                        )
-                        st.success("Simulation complete (PV only).")
-            else:
-                st.session_state.billing_result = result_pv_only
-                st.session_state.billing_result_batt = None
-                _overlay.markdown(
-                    _progress_overlay_html(50, "Building results..."),
-                    unsafe_allow_html=True,
+                else:
+                    st.session_state.billing_result = result_pv_only
+                    st.session_state.billing_result_batt = None
+
+                # Show NEM-A fee summary
+                _nema_agg_count = sum(1 for m in _meter_configs if not m.is_generating)
+                _nema_fees = compute_nema_fees(
+                    st.session_state.get("nema_utility", utility_name), _nema_agg_count
                 )
                 _overlay.markdown(
                     _progress_overlay_html(100, "Done!"),
                     unsafe_allow_html=True,
                 )
-                st.success("Simulation complete!")
+                st.success(
+                    f"NEM-A simulation complete! "
+                    f"{len(_meter_configs)} meters, "
+                    f"${_nema_fees['annual_admin']:,.0f}/yr admin fees"
+                )
+
+            else:
+                # ============ Single-meter Custom billing path (original) ============
+                # --- Step 1: PV-only billing ---
+                _overlay.markdown(
+                    _progress_overlay_html(5, "Running PV-only billing simulation..."),
+                    unsafe_allow_html=True,
+                )
+                result_pv_only = run_billing_simulation(
+                    load_8760=st.session_state.load_8760,
+                    production_8760=st.session_state.production_8760,
+                    tariff=st.session_state.tariff,
+                    export_rates_8760=_export_rates_for_sim,
+                    nem_regime=nem_regime_1,
+                    nbc_rate=_nem_nbc,
+                    nsc_rate=_nem_nsc,
+                    billing_option=_nem_billing,
+                )
+                st.session_state.billing_result_pv_only = result_pv_only
+                st.session_state.sizing_result = None
+
+                _overlay.markdown(
+                    _progress_overlay_html(25, "PV-only simulation complete."),
+                    unsafe_allow_html=True,
+                )
+
+                # --- Step 2: Battery dispatch (if enabled) ---
+                if st.session_state.battery_enabled and st.session_state.battery_config is not None:
+                    batt_cfg = st.session_state.battery_config
+                    _use_monthly = st.session_state.get("battery_fast_dispatch", False)
+
+                    if st.session_state.get("battery_optimize", False):
+                        # ---- Sizing sweep ----
+                        opt_min, opt_max, opt_step = st.session_state.battery_opt_range
+                        if opt_max > opt_min and opt_step > 0:
+                            import numpy as _np
+                            candidates = _np.arange(opt_min, opt_max + opt_step / 2, opt_step).tolist()
+
+                            _overlay.markdown(
+                                _progress_overlay_html(30, f"Running sizing sweep ({len(candidates)} candidates)..."),
+                                unsafe_allow_html=True,
+                            )
+
+                            _tariff = st.session_state.tariff
+                            _dt_idx = cast(pd.DatetimeIndex, st.session_state.load_8760.index)
+                            d_masks, d_prices = _build_demand_lp_inputs(_tariff, _dt_idx)
+                            _energy_rates = _build_hourly_energy_rates(_tariff, _dt_idx)
+
+                            _export_for_sizing = (
+                                _export_rates_for_sim
+                                if st.session_state.export_rates is None
+                                else st.session_state.export_rates
+                            )
+                            sizing_res = optimize_capacity_kwh(
+                                candidate_sizes_kwh=candidates,
+                                pv_kwh=np.asarray(st.session_state.production_8760),
+                                load_kwh=np.asarray(st.session_state.load_8760.values),
+                                import_price=_energy_rates,
+                                export_price=np.asarray(_export_for_sizing.values),
+                                demand_window_masks=d_masks,
+                                demand_prices=d_prices,
+                                battery_config=batt_cfg,
+                                monthly=_use_monthly,
+                                dt_index=_dt_idx,
+                            )
+                            st.session_state.sizing_result = sizing_res
+
+                            _overlay.markdown(
+                                _progress_overlay_html(50, "Sizing complete. Running final billing..."),
+                                unsafe_allow_html=True,
+                            )
+
+                            # Run full billing with best size to get proper BillingResult
+                            result_batt = run_billing_simulation(
+                                load_8760=st.session_state.load_8760,
+                                production_8760=st.session_state.production_8760,
+                                tariff=st.session_state.tariff,
+                                export_rates_8760=_export_rates_for_sim,
+                                battery_config=batt_cfg,
+                                capacity_kwh=sizing_res.best_size_kwh,
+                                monthly_dispatch=_use_monthly,
+                                nem_regime=nem_regime_1,
+                                nbc_rate=_nem_nbc,
+                                nsc_rate=_nem_nsc,
+                                billing_option=_nem_billing,
+                            )
+                            st.session_state.billing_result = result_batt
+                            st.session_state.billing_result_batt = result_batt
+                            st.session_state.battery_capacity_kwh = sizing_res.best_size_kwh
+
+                            _overlay.markdown(
+                                _progress_overlay_html(75, "Building results..."),
+                                unsafe_allow_html=True,
+                            )
+
+                            _overlay.markdown(
+                                _progress_overlay_html(100, "Done!"),
+                                unsafe_allow_html=True,
+                            )
+                            st.success(
+                                f"Optimization complete! Best size: "
+                                f"{sizing_res.best_size_kwh:,.0f} kWh"
+                            )
+                        else:
+                            st.session_state.billing_result = result_pv_only
+                            st.session_state.billing_result_batt = None
+                            st.warning("Invalid optimize range. Running PV-only.")
+                    else:
+                        # ---- Fixed-size dispatch ----
+                        batt_cap = st.session_state.get("battery_capacity_kwh", 0)
+                        if batt_cap > 0:
+                            _overlay.markdown(
+                                _progress_overlay_html(30, "Running PV + Battery dispatch..."),
+                                unsafe_allow_html=True,
+                            )
+                            result_batt = run_billing_simulation(
+                                load_8760=st.session_state.load_8760,
+                                production_8760=st.session_state.production_8760,
+                                tariff=st.session_state.tariff,
+                                export_rates_8760=_export_rates_for_sim,
+                                battery_config=batt_cfg,
+                                capacity_kwh=batt_cap,
+                                monthly_dispatch=_use_monthly,
+                                nem_regime=nem_regime_1,
+                                nbc_rate=_nem_nbc,
+                                nsc_rate=_nem_nsc,
+                                billing_option=_nem_billing,
+                            )
+                            st.session_state.billing_result = result_batt
+                            st.session_state.billing_result_batt = result_batt
+
+                            _overlay.markdown(
+                                _progress_overlay_html(75, "Building results..."),
+                                unsafe_allow_html=True,
+                            )
+
+                            _overlay.markdown(
+                                _progress_overlay_html(100, "Done!"),
+                                unsafe_allow_html=True,
+                            )
+                            st.success("Simulation complete (PV + Battery)!")
+                        else:
+                            st.session_state.billing_result = result_pv_only
+                            st.session_state.billing_result_batt = None
+                            _overlay.markdown(
+                                _progress_overlay_html(100, "Done!"),
+                                unsafe_allow_html=True,
+                            )
+                            st.success("Simulation complete (PV only).")
+                else:
+                    st.session_state.billing_result = result_pv_only
+                    st.session_state.billing_result_batt = None
+                    _overlay.markdown(
+                        _progress_overlay_html(50, "Building results..."),
+                        unsafe_allow_html=True,
+                    )
+                    _overlay.markdown(
+                        _progress_overlay_html(100, "Done!"),
+                        unsafe_allow_html=True,
+                    )
+                    st.success("Simulation complete!")
 
         # Clear overlay and editing flag when done
         _overlay.empty()
@@ -2167,7 +3457,12 @@ if st.session_state.billing_result is not None:
     # CSS for white table backgrounds and bold totals row
     st.markdown("""
     <style>
-    [data-testid="stDataFrame"] { background-color: #FFFFFF; padding: 4px; border-radius: 6px; }
+    [data-testid="stDataFrame"] {
+        background-color: #FFFFFF;
+        padding: 6px;
+        border-radius: 8px;
+        border: 1px solid #e2e8f0;
+    }
     </style>
     """, unsafe_allow_html=True)
 

@@ -80,28 +80,29 @@ def render_styled_table(
 
     html = [
         '<div style="overflow-x:auto;">',
-        '<table style="width:100%; border-collapse:collapse; font-size:13px;">',
+        '<table style="width:100%; border-collapse:collapse; font-size:13px; font-family:Aptos Narrow,Aptos,Calibri,Arial Narrow,sans-serif;">',
         "<thead><tr>",
     ]
     for col in col_list:
-        weight = "font-weight:700;" if col in bold_set else ""
+        weight = "font-weight:700;" if col in bold_set else "font-weight:600;"
         html.append(
-            f'<th style="text-align:right; padding:6px 10px; border-bottom:2px solid #ccc;'
-            f' background:#f8f8f8; white-space:nowrap; {weight}">{_esc(str(col))}</th>'
+            f'<th style="text-align:right; padding:6px 8px;'
+            f' background:#0a1628; color:#ffffff; white-space:nowrap; {weight}">{_esc(str(col))}</th>'
         )
     html.append("</tr></thead><tbody>")
 
     for i, (_, row) in enumerate(df.iterrows()):
         is_last = i == len(df) - 1
         row_weight = "font-weight:700;" if (bold_last_row and is_last) else ""
-        border = "border-top:2px solid #ccc;" if (bold_last_row and is_last) else ""
-        html.append(f"<tr style='{row_weight}{border}'>")
+        border = "border-top:1.5px solid #d1d5db;" if (bold_last_row and is_last) else ""
+        row_bg = "background-color:#fafbfc;" if (i % 2 == 0 and not (bold_last_row and is_last)) else ""
+        html.append(f"<tr style='{row_weight}{border}{row_bg}'>")
         for j, val in enumerate(row):
             s = str(val)
             col_bold = "font-weight:700;" if col_list[j] in bold_set else ""
-            cell_style = f"text-align:right; padding:5px 10px; white-space:nowrap; {col_bold}"
+            cell_style = f"text-align:right; padding:4px 8px; white-space:nowrap; {col_bold}"
             if j == 0:
-                cell_style = f"text-align:left; padding:5px 10px; white-space:nowrap; {col_bold}"
+                cell_style = f"text-align:left; padding:4px 8px; white-space:nowrap; {col_bold}"
             if "(" in s:
                 cell_style += " color:#cc0000; background-color:#ffe0e0;"
             html.append(f"<td style='{cell_style}'>{_esc(s)}</td>")
@@ -136,7 +137,7 @@ def build_monthly_summary_display(
     Otherwise, only "Demand kW (PV)" is shown (from result itself).
     """
     df = result.monthly_summary.copy()
-    df["month_name"] = [MONTH_NAMES[m - 1] for m in df["month"]]
+    df["month_name"] = [MONTH_NAMES[int(m) - 1] for m in df["month"]]
 
     # Build display columns and rename map
     display_cols = [
@@ -353,11 +354,12 @@ def build_annual_projection(
     if result.monthly_baseline_details:
         year1_baseline_demand = sum(d.get("demand", 0) for d in result.monthly_baseline_details)
         year1_baseline_energy = sum(d.get("energy", 0) for d in result.monthly_baseline_details)
-        year1_fixed = sum(d.get("fixed", 0) for d in result.monthly_baseline_details)
+        year1_baseline_fixed = sum(d.get("fixed", 0) for d in result.monthly_baseline_details)
     else:
         # Fallback: approximate from total no-solar bill
         year1_baseline_demand = year1_demand
-        year1_baseline_energy = year1_bill_no_solar - year1_baseline_demand - year1_fixed
+        year1_baseline_fixed = year1_fixed
+        year1_baseline_energy = year1_bill_no_solar - year1_baseline_demand - year1_baseline_fixed
 
     rate_mult = rate_escalator_pct / 100.0
     load_mult = load_escalator_pct / 100.0
@@ -440,15 +442,16 @@ def build_annual_projection(
             active_my_max = multiyear_max
 
         # Energy cost depends on active regime:
-        #   NEM-1/2: TOU-netted energy (lower because exports offset imports within each period)
+        #   NEM-1/2 (and NEM-A): TOU-netted energy (lower because exports offset imports within each period)
         #   NEM-3/NVBT: raw import energy cost (no netting, exports valued separately)
-        if active_regime in ("NEM-1", "NEM-2"):
+        _is_tou_netted = active_regime in ("NEM-1", "NEM-2") or active_regime.startswith("NEM-A")
+        if _is_tou_netted:
             yr_energy = tou_year1_energy * load_factor * rate_factor
         else:
             yr_energy = raw_year1_energy * import_ratio * rate_factor
 
         # Compute export credit based on active regime
-        if active_regime in ("NEM-1", "NEM-2"):
+        if _is_tou_netted:
             # TOU-netted credit scaled by rate escalation and volume change
             yr_export = year1_tou_credit * rate_factor * volume_ratio
         elif active_my_max > 0 and active_multiyear:
@@ -469,8 +472,8 @@ def build_annual_projection(
             # Single-year / flat / auto: existing rate escalation
             yr_export = year1_export * rate_factor * volume_ratio
 
-        # NBC: only applies during NEM-2 regime years
-        if active_regime == "NEM-2":
+        # NBC: only applies during NEM-2 regime years (including NEM-A (NEM-2))
+        if active_regime == "NEM-2" or active_regime == "NEM-A (NEM-2)":
             yr_nbc = year1_nbc * rate_factor if year1_nbc > 0 else 0.0
         else:
             yr_nbc = 0.0
@@ -481,7 +484,7 @@ def build_annual_projection(
         # Baseline (no solar): load grows and rates increase
         yr_baseline_energy = year1_baseline_energy * load_factor * rate_factor
         yr_baseline_demand = year1_baseline_demand * load_factor
-        yr_bill_no_solar = yr_baseline_energy + yr_baseline_demand + yr_fixed
+        yr_bill_no_solar = yr_baseline_energy + yr_baseline_demand + year1_baseline_fixed
 
         yr_savings = yr_bill_no_solar - yr_bill_solar
         cumulative_savings += yr_savings
@@ -529,7 +532,7 @@ def create_production_vs_load_chart(result: BillingResult) -> go.Figure:
     fig.add_trace(go.Bar(x=MONTH_NAMES, y=df["load_kwh"], name="Load", marker_color="#EF553B", opacity=0.85))
     fig.add_trace(go.Bar(x=MONTH_NAMES, y=df["solar_kwh"], name="Solar Production", marker_color="#FFB347", opacity=0.85))
     fig.add_trace(go.Scatter(x=MONTH_NAMES, y=df["import_kwh"], name="Net Import", mode="lines+markers", line=dict(color="#636EFA", width=2.5), marker=dict(size=7)))
-    fig.update_layout(title="Monthly Production vs. Load", xaxis_title="Month", yaxis_title="Energy (kWh)", barmode="group", template="plotly_white", legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1), height=450)
+    fig.update_layout(title="Monthly Production vs. Load", xaxis_title="Month", yaxis_title="Energy (kWh)", barmode="group", template="plotly_white", legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1), height=380, font=dict(family="Aptos Narrow, Aptos, Calibri, Arial Narrow, sans-serif", size=12), title_font=dict(size=15, color="#1e293b"), margin=dict(l=40, r=20, t=50, b=40))
     return fig
 
 
@@ -544,7 +547,7 @@ def create_monthly_bill_chart(result: BillingResult) -> go.Figure:
     if "nbc_charge" in df.columns and df["nbc_charge"].sum() > 0:
         fig.add_trace(go.Bar(x=MONTH_NAMES, y=df["nbc_charge"], name="NBC Charges", marker_color="#FFA15A"))
     fig.add_trace(go.Bar(x=MONTH_NAMES, y=-df["export_credit"], name="Export Credit", marker_color="#00CC96"))
-    fig.update_layout(title="Monthly Bill Breakdown (With Solar)", xaxis_title="Month", yaxis_title="Cost ($)", barmode="relative", template="plotly_white", legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1), height=450)
+    fig.update_layout(title="Monthly Bill Breakdown (With Solar)", xaxis_title="Month", yaxis_title="Cost ($)", barmode="relative", template="plotly_white", legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1), height=380, font=dict(family="Aptos Narrow, Aptos, Calibri, Arial Narrow, sans-serif", size=12), title_font=dict(size=15, color="#1e293b"), margin=dict(l=40, r=20, t=50, b=40))
     return fig
 
 
@@ -977,8 +980,11 @@ def build_grid_exchange_summary(
         credit_offpeak = float(hd.loc[offpeak_m, "export_credit"].sum())
         credit_total = credit_peak + credit_offpeak
 
+        solar_m = float(hd.loc[mm, "solar_kwh"].sum())
+
         row = {
             "Month": MONTH_NAMES[m - 1],
+            "Degraded Solar- Assumed Demand Offset (kWh)": round(solar_m, 0),
             "Import Total (kWh)": round(imp_total, 0),
             "Import Peak (kWh)": round(imp_peak, 0),
             "Import Off-Peak (kWh)": round(imp_offpeak, 0),

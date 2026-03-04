@@ -33,7 +33,8 @@ def _find_rate_column(df: pd.DataFrame) -> str:
     for col in df.columns:
         col_lower = col.lower()
         if any(kw in col_lower for kw in ["rate", "export", "value", "price", "avoided"]):
-            return col
+            if pd.api.types.is_numeric_dtype(df[col]):
+                return col
 
     numeric_cols = df.select_dtypes(include=[np.number]).columns
     if len(numeric_cols) > 0:
