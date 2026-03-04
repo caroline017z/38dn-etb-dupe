@@ -73,7 +73,11 @@ def geocode_address(address: str) -> tuple[float, float]:
     if not re.search(r"\bCA\b", _upper) and "CALIFORNIA" not in _upper:
         address = f"{address}, CA"
 
-    google_key = os.environ.get("GOOGLE_MAPS_API_KEY")
+    try:
+        import streamlit as st
+        google_key = st.secrets.get("GOOGLE_MAPS_API_KEY") or os.environ.get("GOOGLE_MAPS_API_KEY")
+    except (ImportError, FileNotFoundError):
+        google_key = os.environ.get("GOOGLE_MAPS_API_KEY")
     if google_key:
         return _geocode_google(address, google_key)
     return _geocode_nominatim(address)
