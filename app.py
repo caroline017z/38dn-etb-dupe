@@ -347,7 +347,7 @@ p, li, div, label, input, select, textarea {
 [data-testid="stMetric"] [data-testid="stMetricValue"] {
     font-size: 20px !important;
     font-weight: 600 !important;
-    color: #1e293b !important;
+    color: #0E2841 !important;
 }
 
 /* Tighter content spacing */
@@ -376,7 +376,7 @@ header[data-testid="stHeader"] {
     left: 0 !important;
     right: 0 !important;
     height: 54px !important;
-    background-color: #0a1628 !important;
+    background-color: #0E2841 !important;
     z-index: 999999 !important;
     padding: 8px 16px 8px 330px !important;
     display: flex !important;
@@ -1205,7 +1205,7 @@ if st.session_state["active_mgmt_tab"] == "Load Profiles":
                     height=380,
                     template="plotly_white",
                     font=dict(family="Aptos Narrow, Aptos, Calibri, Arial Narrow, sans-serif", size=12),
-                    title_font=dict(size=15, color="#1e293b"),
+                    title_font=dict(size=15, color="#0E2841"),
                     margin=dict(l=40, r=20, t=50, b=40),
                 )
                 if _lp_chart_type == "Monthly Load":
@@ -2567,10 +2567,18 @@ if save_btn and sim_name and st.session_state.get("billing_result") is not None:
                 str(k): asdict(v) for k, v in _nema_meter_tariffs.items()
             }
 
-    # Save existing solar production profile
+    # Save existing solar production profile and raw (pre-adjustment) load
     _es_prod_save = st.session_state.get("existing_solar_production_8760")
     if _es_prod_save is not None:
         extra_save["existing_solar_production_8760"] = list(_es_prod_save.values)
+    _raw_load_save = st.session_state.get("_raw_load_8760")
+    if _raw_load_save is not None:
+        extra_save["raw_load_8760"] = list(_raw_load_save.values)
+    _raw_nema_save = st.session_state.get("_raw_nema_meter_loads")
+    if _raw_nema_save:
+        extra_save["raw_nema_meter_loads"] = {
+            str(k): list(v.values) for k, v in _raw_nema_save.items()
+        }
 
     _save_simulation(
         name=sim_name,
@@ -3930,6 +3938,8 @@ if st.session_state["billing_result"] is not None:
                 regime_2_savings_pct=it_regime_2_savings,
                 nem_regime_2=nem_regime_2 if nem_switch else None,
                 num_years_1=num_years_1 if nem_switch else None,
+                ppa_escalator_pct=it_ppa_esc_1,
+                ppa_escalator_pct_2=it_ppa_esc_2 if nem_switch else None,
             )
             # Format for display
             it_display = it_df.copy()
@@ -3974,6 +3984,8 @@ if st.session_state["billing_result"] is not None:
                 regime_2_savings_pct=it_regime_2_savings,
                 nem_regime_2=nem_regime_2 if nem_switch else None,
                 num_years_1=num_years_1 if nem_switch else None,
+                ppa_escalator_pct=it_ppa_esc_1,
+                ppa_escalator_pct_2=it_ppa_esc_2 if nem_switch else None,
             )
             # Format for display
             it_display = it_df.copy()
@@ -4134,6 +4146,10 @@ if st.session_state["billing_result"] is not None:
                     _it_proj,
                     base_savings_pct=_it_savings,
                     savings_escalator_pct=_it_sav_esc,
+                    ppa_escalator_pct=st.session_state.get("it_ppa_esc_1", 2.9),
+                    ppa_escalator_pct_2=st.session_state.get("it_ppa_esc_2", 2.9) if nem_switch else None,
+                    nem_regime_2=nem_regime_2 if nem_switch else None,
+                    num_years_1=num_years_1 if nem_switch else None,
                 )
                 if len(_it_df) >= 1 and "PPA Rate ($/kWh)" in _it_df.columns:
                     _yr1_rate = _it_df["PPA Rate ($/kWh)"].iloc[0]
@@ -4196,6 +4212,8 @@ if st.session_state["billing_result"] is not None:
                         regime_2_savings_pct=_prop_sav_2 if nem_switch else None,
                         nem_regime_2=nem_regime_2 if nem_switch else None,
                         num_years_1=num_years_1 if nem_switch else None,
+                        ppa_escalator_pct=_prop_ppa_esc,
+                        ppa_escalator_pct_2=st.session_state.get("it_ppa_esc_2", 2.9) if nem_switch else None,
                     )
                     if len(_cs_it_df) >= 1 and "PPA Rate ($/kWh)" in _cs_it_df.columns:
                         _cs_r1 = _cs_it_df["PPA Rate ($/kWh)"].iloc[0]
@@ -4207,38 +4225,6 @@ if st.session_state["billing_result"] is not None:
                             _cs_r2 = _cs_it_df["PPA Rate ($/kWh)"].iloc[num_years_1]
                             with _mc2:
                                 st.metric(f"{nem_regime_2} PPA Rate (Yr {num_years_1 + 1})", f"${_cs_r2:.4f}/kWh")
-                        # --- DEBUG: show PPA backsolve breakdown ---
-                        with st.expander("DEBUG: PPA Backsolve Breakdown", expanded=False):
-                            _dbg_yr1 = _cs_it_df.iloc[0]
-                            st.write(f"**Year 1 ({nem_regime_1}):**")
-                            st.write(f"- Bill w/o Solar: ${_dbg_yr1['Bill w/o Solar ($)']:,.0f}")
-                            st.write(f"- Bill w/ Solar: ${_dbg_yr1['Bill w/ Solar ($)']:,.0f}")
-                            st.write(f"- Utility Savings: ${_dbg_yr1['Utility Savings ($)']:,.0f}")
-                            st.write(f"- Solar kWh: {_dbg_yr1['Solar (kWh)']:,.0f}")
-                            st.write(f"- Savings Target: {_dbg_yr1['Savings Target (%)']:.1f}%")
-                            st.write(f"- PPA Rate: ${_dbg_yr1['PPA Rate ($/kWh)']:.5f}/kWh")
-                            if nem_switch and num_years_1 and len(_cs_it_df) > num_years_1:
-                                _dbg_yr2 = _cs_it_df.iloc[num_years_1]
-                                st.write(f"**Year {num_years_1 + 1} ({nem_regime_2}):**")
-                                st.write(f"- Bill w/o Solar: ${_dbg_yr2['Bill w/o Solar ($)']:,.0f}")
-                                st.write(f"- Bill w/ Solar: ${_dbg_yr2['Bill w/ Solar ($)']:,.0f}")
-                                st.write(f"- Utility Savings: ${_dbg_yr2['Utility Savings ($)']:,.0f}")
-                                st.write(f"- Solar kWh: {_dbg_yr2['Solar (kWh)']:,.0f}")
-                                st.write(f"- Savings Target: {_dbg_yr2['Savings Target (%)']:.1f}%")
-                                st.write(f"- PPA Rate: ${_dbg_yr2['PPA Rate ($/kWh)']:.5f}/kWh")
-                            # Also show projection underlying values
-                            st.write("**Projection row details:**")
-                            _proj_yr1 = _main_projection.iloc[0]
-                            st.write(f"Yr 1 - Energy: ${_proj_yr1.get('Energy ($)', 0):,.0f}, "
-                                     f"Demand: ${_proj_yr1.get('Demand ($)', 0):,.0f}, "
-                                     f"Fixed: ${_proj_yr1.get('Fixed ($)', 0):,.0f}, "
-                                     f"Export Credit: ${_proj_yr1.get('Export Credit ($)', 0):,.0f}")
-                            if nem_switch and num_years_1 and len(_main_projection) > num_years_1:
-                                _proj_yr2 = _main_projection.iloc[num_years_1]
-                                st.write(f"Yr {num_years_1+1} - Energy: ${_proj_yr2.get('Energy ($)', 0):,.0f}, "
-                                         f"Demand: ${_proj_yr2.get('Demand ($)', 0):,.0f}, "
-                                         f"Fixed: ${_proj_yr2.get('Fixed ($)', 0):,.0f}, "
-                                         f"Export Credit: ${_proj_yr2.get('Export Credit ($)', 0):,.0f}")
                 except Exception as e:
                     logger.warning("Failed to compute per-regime PPA rates: %s", e)
 
@@ -4264,6 +4250,11 @@ if st.session_state["billing_result"] is not None:
                             **_common_nem_kw,
                         )
 
+                        # Keep the original (utility-only) projection for PPA
+                        # backsolve — the savings matrix and regime-2 rate need
+                        # Bill w/ Solar BEFORE any PPA overlay.
+                        _prop_proj_original = _prop_proj_df.copy()
+
                         # When custom savings toggle is ON, compute per-year PPA
                         # cost from the backsolve and layer it onto the utility
                         # residual so the PPTX shows true customer economics:
@@ -4271,13 +4262,15 @@ if st.session_state["billing_result"] is not None:
                         #   Customer Savings = Bill w/o Solar - Total Cost
                         if _prop_custom_savings:
                             _cs_tariff = build_indexed_tariff_annual(
-                                _prop_proj_df,
+                                _prop_proj_original,
                                 base_savings_pct=_prop_sav_1,
                                 savings_escalator_pct=_it_sav_esc,
                                 regime_1_savings_pct=_prop_sav_1,
                                 regime_2_savings_pct=_prop_sav_2 if nem_switch else None,
                                 nem_regime_2=nem_regime_2 if nem_switch else None,
                                 num_years_1=num_years_1 if nem_switch else None,
+                                ppa_escalator_pct=_prop_ppa_esc,
+                                ppa_escalator_pct_2=st.session_state.get("it_ppa_esc_2", 2.9) if nem_switch else None,
                             )
                             _prop_proj_df = _prop_proj_df.copy()
                             for idx, row in _prop_proj_df.iterrows():
@@ -4295,6 +4288,29 @@ if st.session_state["billing_result"] is not None:
                                 _prop_proj_df.at[idx, "Bill w/ Solar ($)"] = round(total_cost, 2)
                                 _prop_proj_df.at[idx, "Annual Savings ($)"] = round(bill_no - total_cost, 2)
                             _prop_proj_df["Cumulative Savings ($)"] = _prop_proj_df["Annual Savings ($)"].cumsum().round(2)
+
+                        # Compute regime 2 PPA rate for exec summary using the
+                        # ORIGINAL projection (before PPA overlay)
+                        _prop_ppa_rate_r2 = None
+                        if nem_switch and num_years_1 and _prop_ppa_rate > 0:
+                            try:
+                                _r2_tariff = build_indexed_tariff_annual(
+                                    _prop_proj_original,
+                                    base_savings_pct=_prop_sav_1 if _prop_custom_savings else _it_savings,
+                                    savings_escalator_pct=_it_sav_esc,
+                                    regime_1_savings_pct=_prop_sav_1 if _prop_custom_savings else None,
+                                    regime_2_savings_pct=_prop_sav_2 if _prop_custom_savings else None,
+                                    nem_regime_2=nem_regime_2,
+                                    num_years_1=num_years_1,
+                                    ppa_escalator_pct=_prop_ppa_esc,
+                                    ppa_escalator_pct_2=st.session_state.get("it_ppa_esc_2", 2.9) if nem_switch else None,
+                                )
+                                if len(_r2_tariff) > num_years_1:
+                                    _r2_rate = _r2_tariff["PPA Rate ($/kWh)"].iloc[num_years_1]
+                                    if _r2_rate > 0:
+                                        _prop_ppa_rate_r2 = round(float(_r2_rate), 4)
+                            except Exception as e:
+                                logger.warning("Failed to compute regime 2 PPA rate: %s", e)
 
                         proposal_bytes = generate_proposal_pptx(
                             customer_name=prop_customer,
@@ -4319,6 +4335,8 @@ if st.session_state["billing_result"] is not None:
                             num_years_1=num_years_1 if nem_switch else None,
                             customer_savings_pct=_prop_sav_1 if _prop_custom_savings else st.session_state.get("it_savings_pct", 10.0),
                             customer_savings_pct_2=_prop_sav_2 if _prop_custom_savings and nem_switch else None,
+                            ppa_rate_regime_2=_prop_ppa_rate_r2,
+                            annual_proj_df_original=_prop_proj_original,
                         )
                     _safe_name = prop_customer.replace(" ", "_")[:30]
                     st.download_button(

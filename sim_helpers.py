@@ -206,6 +206,14 @@ def populate_session_from_simulation(st_session_state, sim_data: dict):
         st_session_state["load_8760"] = pd.Series(
             sim_data["load_8760"], index=dt_idx, name="load_kwh"
         )
+    # Restore raw (pre-existing-solar-adjustment) load if saved
+    if sim_data.get("raw_load_8760"):
+        dt_idx = pd.date_range(
+            start=f"{_restore_cod_year}-01-01 00:00", periods=8760, freq="h"
+        )
+        st_session_state["_raw_load_8760"] = pd.Series(
+            sim_data["raw_load_8760"], index=dt_idx, name="load_kwh"
+        )
     if sim_data.get("export_rates"):
         dt_idx = pd.date_range(
             start=f"{_restore_cod_year}-01-01 00:00", periods=8760, freq="h"
@@ -241,9 +249,22 @@ def populate_session_from_simulation(st_session_state, sim_data: dict):
             _restored_tariffs[int(k)] = TariffSchedule(**v)
         st_session_state["nema_meter_tariffs"] = _restored_tariffs
 
+        # Restore raw (pre-existing-solar-adjustment) NEM-A loads if saved
+        _raw_nema_data = sim_data.get("raw_nema_meter_loads", {})
+        if _raw_nema_data:
+            dt_idx = pd.date_range(
+                start=f"{_restore_cod_year}-01-01 00:00", periods=8760, freq="h"
+            )
+            _raw_nema_loads = {}
+            for k, v in _raw_nema_data.items():
+                _raw_nema_loads[int(k)] = pd.Series(v, index=dt_idx, name="load_kwh")
+            st_session_state["_raw_nema_meter_loads"] = _raw_nema_loads
+
     # 9) Restore existing solar (repower) config if present
-    st_session_state["existing_solar_enabled"] = inp.get("existing_solar_enabled", False)
-    if st_session_state["existing_solar_enabled"]:
+    _es_enabled = inp.get("existing_solar_enabled", False)
+    st_session_state["existing_solar_enabled"] = _es_enabled
+    st_session_state["existing_solar_toggle"] = _es_enabled  # widget key for st.toggle
+    if _es_enabled:
         st_session_state["sb_existing_solar_size"] = float(inp.get("existing_solar_size_kw", 100.0))
         _es_type = inp.get("existing_solar_system_type", "Fixed Tilt (Ground Mount)")
         _es_type_options = ["Fixed Tilt (Ground Mount)", "Single Axis Tracker"]
@@ -261,6 +282,19 @@ def populate_session_from_simulation(st_session_state, sim_data: dict):
             st_session_state["existing_solar_production_8760"] = pd.Series(
                 sim_data["existing_solar_production_8760"], index=dt_idx, name="solar_kwh"
             )
+            # Backward compat: if raw_load_8760 wasn't saved, reconstruct it
+            # by reversing the existing solar adjustment (load_8760 - es_prod)
+            # since the saved load_8760 = raw_load + es_prod (adjustment adds
+            # existing solar back to recover gross load).
+            if (
+                st_session_state.get("_raw_load_8760") is None
+                and st_session_state.get("load_8760") is not None
+            ):
+                _adj_load = st_session_state["load_8760"]
+                _es_prod = st_session_state["existing_solar_production_8760"]
+                st_session_state["_raw_load_8760"] = pd.Series(
+                    _adj_load.values - _es_prod.values, index=_adj_load.index, name="load_kwh"
+                )
 
     # 10) Close saved view and flag editing mode
     st_session_state["saved_view"] = None

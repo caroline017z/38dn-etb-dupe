@@ -87,7 +87,7 @@ def render_styled_table(
         weight = "font-weight:700;" if col in bold_set else "font-weight:600;"
         html.append(
             f'<th style="text-align:right; padding:6px 8px;'
-            f' background:#0a1628; color:#ffffff; white-space:nowrap; {weight}">{_esc(str(col))}</th>'
+            f' background:#0E2841; color:#ffffff; white-space:nowrap; {weight}">{_esc(str(col))}</th>'
         )
     html.append("</tr></thead><tbody>")
 
@@ -291,12 +291,6 @@ def _compute_tou_netted_monthly(hourly_detail: pd.DataFrame) -> tuple[
     return annual_energy, annual_credit, month_energy, month_credit
 
 
-def _compute_tou_netted_credit(hourly_detail: pd.DataFrame) -> float:
-    """Compute annual TOU-netted export credit from hourly data (NEM-1/2 logic)."""
-    _, credit, _, _ = _compute_tou_netted_monthly(hourly_detail)
-    return credit
-
-
 def build_annual_projection(
     result: BillingResult,
     system_cost: float,
@@ -305,7 +299,7 @@ def build_annual_projection(
     years: int = 10,
     export_rates_multiyear: dict[int, "pd.Series"] | None = None,
     result_pv_only: BillingResult | None = None,
-    nem_regime_1: str = "NEM-3/NVBT",
+    nem_regime_1: str = "NEM-3 / NVBT",
     nem_regime_2: str | None = None,
     num_years_1: int | None = None,
     export_rates_multiyear_2: dict[int, "pd.Series"] | None = None,
@@ -363,10 +357,19 @@ def build_annual_projection(
         year1_baseline_energy = sum(d.get("energy", 0) for d in result.monthly_baseline_details)
         year1_baseline_fixed = sum(d.get("fixed", 0) for d in result.monthly_baseline_details)
     else:
-        # Fallback: approximate from total no-solar bill
-        year1_baseline_demand = year1_demand
+        # Fallback: approximate from total no-solar bill.
+        # Fixed charges are the same with or without solar.
+        # Demand and energy must be split from the remaining no-solar bill.
+        # Use the with-solar demand ratio as a rough proxy since no-solar
+        # demand would be higher (no solar offset), but we lack the exact value.
         year1_baseline_fixed = year1_fixed
-        year1_baseline_energy = year1_bill_no_solar - year1_baseline_demand - year1_baseline_fixed
+        _remaining = year1_bill_no_solar - year1_baseline_fixed
+        if year1_demand + year1_energy > 0:
+            _demand_share = year1_demand / (year1_demand + year1_energy)
+        else:
+            _demand_share = 0.3  # reasonable default split
+        year1_baseline_demand = _remaining * _demand_share
+        year1_baseline_energy = _remaining * (1.0 - _demand_share)
 
     rate_mult = rate_escalator_pct / 100.0
     load_mult = load_escalator_pct / 100.0
@@ -394,8 +397,11 @@ def build_annual_projection(
     # Blended import rate ($/kWh) for valuing kWh that shift from export→import
     # as solar degrades.  Uses the generating meter's hourly data since only the
     # generating meter has solar (and thus exports that shift to imports).
+    # Denominator uses generating meter's import kWh (from hourly_detail),
+    # not annual_import_kwh which may include aggregated meters for NEM-A.
+    _gen_import_kwh = float(result.hourly_detail["import_kwh"].sum())
     blended_import_rate = (
-        _gen_raw_energy / year1_import_kwh if year1_import_kwh > 0 else 0.0
+        _gen_raw_energy / _gen_import_kwh if _gen_import_kwh > 0 else 0.0
     )
 
     rows = []
@@ -455,7 +461,7 @@ def build_annual_projection(
         yr_import_kwh = year1_import_kwh + lost_self_from_degrad + max(0, extra_load - lost_export_from_load)
 
         # Export TOU volumes scale proportionally to total export
-        export_volume_ratio = yr_export_kwh / year1_export_kwh if year1_export_kwh > 0 else 1.0
+        export_volume_ratio = yr_export_kwh / year1_export_kwh if year1_export_kwh > 0 else 0.0
         yr_export_peak_kwh = year1_export_peak_kwh * export_volume_ratio
         yr_export_offpeak_kwh = year1_export_offpeak_kwh * export_volume_ratio
 
@@ -467,7 +473,7 @@ def build_annual_projection(
         yr_demand = year1_demand * load_factor
         yr_fixed = year1_fixed
         # Export credit: rates escalate, but export volume may shrink
-        volume_ratio = yr_export_kwh / year1_export_kwh if year1_export_kwh > 0 else 1.0
+        volume_ratio = yr_export_kwh / year1_export_kwh if year1_export_kwh > 0 else 0.0
         # Import volume ratio (for scaling raw energy cost under NEM-3)
         import_ratio = yr_import_kwh / year1_import_kwh if year1_import_kwh > 0 else load_factor
 
@@ -589,7 +595,7 @@ def build_annual_projection(
             "Demand ($)": round(yr_demand),
             "Fixed ($)": round(yr_fixed),
         })
-        _any_nem2 = (nem_regime_1 == "NEM-2") or (nem_regime_2 == "NEM-2")
+        _any_nem2 = any(r in ("NEM-2", "NEM-A (NEM-2)") for r in (nem_regime_1, nem_regime_2) if r)
         if _any_nem2 or year1_nbc > 0:
             row["NBC ($)"] = round(yr_nbc)
         if yr_nsc > 0:
@@ -612,7 +618,7 @@ def create_production_vs_load_chart(result: BillingResult) -> go.Figure:
     fig.add_trace(go.Bar(x=MONTH_NAMES, y=df["load_kwh"], name="Load", marker_color="#EF553B", opacity=0.85))
     fig.add_trace(go.Bar(x=MONTH_NAMES, y=df["solar_kwh"], name="Solar Production", marker_color="#FFB347", opacity=0.85))
     fig.add_trace(go.Scatter(x=MONTH_NAMES, y=df["import_kwh"], name="Net Import", mode="lines+markers", line=dict(color="#636EFA", width=2.5), marker=dict(size=7)))
-    fig.update_layout(title="Monthly Production vs. Load", xaxis_title="Month", yaxis_title="Energy (kWh)", barmode="group", template="plotly_white", legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1), height=380, font=dict(family="Aptos Narrow, Aptos, Calibri, Arial Narrow, sans-serif", size=12), title_font=dict(size=15, color="#1e293b"), margin=dict(l=40, r=20, t=50, b=40))
+    fig.update_layout(title="Monthly Production vs. Load", xaxis_title="Month", yaxis_title="Energy (kWh)", barmode="group", template="plotly_white", legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1), height=380, font=dict(family="Aptos Narrow, Aptos, Calibri, Arial Narrow, sans-serif", size=12), title_font=dict(size=15, color="#0E2841"), margin=dict(l=40, r=20, t=50, b=40))
     return fig
 
 
@@ -627,7 +633,7 @@ def create_monthly_bill_chart(result: BillingResult) -> go.Figure:
     if "nbc_charge" in df.columns and df["nbc_charge"].sum() > 0:
         fig.add_trace(go.Bar(x=MONTH_NAMES, y=df["nbc_charge"], name="NBC Charges", marker_color="#FFA15A"))
     fig.add_trace(go.Bar(x=MONTH_NAMES, y=-df["export_credit"], name="Export Credit", marker_color="#00CC96"))
-    fig.update_layout(title="Monthly Bill Breakdown (With Solar)", xaxis_title="Month", yaxis_title="Cost ($)", barmode="relative", template="plotly_white", legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1), height=380, font=dict(family="Aptos Narrow, Aptos, Calibri, Arial Narrow, sans-serif", size=12), title_font=dict(size=15, color="#1e293b"), margin=dict(l=40, r=20, t=50, b=40))
+    fig.update_layout(title="Monthly Bill Breakdown (With Solar)", xaxis_title="Month", yaxis_title="Cost ($)", barmode="relative", template="plotly_white", legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1), height=380, font=dict(family="Aptos Narrow, Aptos, Calibri, Arial Narrow, sans-serif", size=12), title_font=dict(size=15, color="#0E2841"), margin=dict(l=40, r=20, t=50, b=40))
     return fig
 
 
@@ -654,7 +660,7 @@ def _build_multiyear_monthly_df(
     load_escalator_pct: float = 0.0,
     years: int = 1,
     export_rates_multiyear: dict[int, "pd.Series"] | None = None,
-    nem_regime_1: str = "NEM-3/NVBT",
+    nem_regime_1: str = "NEM-3 / NVBT",
     nem_regime_2: str | None = None,
     num_years_1: int | None = None,
     export_rates_multiyear_2: dict[int, "pd.Series"] | None = None,
@@ -697,10 +703,16 @@ def _build_multiyear_monthly_df(
     year1_solar = float(ms["solar_kwh"].sum())
     year1_export = float(ms["export_kwh"].sum())
 
-    # Precompute per-month TOU-netted energy AND credit (for NEM-1/2 regime years)
+    # Per-month TOU-netted energy AND credit (for NEM-1/2 regime years)
     # and per-month raw import energy cost (for NEM-3 regime years)
     hd = result.hourly_detail
-    _, _, month_tou_energy, month_tou_credits = _compute_tou_netted_monthly(hd)
+    # Use pre-computed per-month TOU breakdowns from billing engine (preferred)
+    # or fall back to recomputation for legacy BillingResult objects
+    if result.tou_monthly_energy is not None and result.tou_monthly_credit is not None:
+        month_tou_energy = result.tou_monthly_energy
+        month_tou_credits = result.tou_monthly_credit
+    else:
+        _, _, month_tou_energy, month_tou_credits = _compute_tou_netted_monthly(hd)
     raw_month_energy: dict[int, float] = {}
     month_import_kwh: dict[int, float] = {}
     for month in range(1, 13):
@@ -720,7 +732,7 @@ def _build_multiyear_monthly_df(
         else:
             month_wtd_rate[month] = 0.0
 
-    _any_nem2 = (nem_regime_1 == "NEM-2") or (nem_regime_2 == "NEM-2")
+    _any_nem2 = any(r in ("NEM-2", "NEM-A (NEM-2)") for r in (nem_regime_1, nem_regime_2) if r)
 
     rows = []
     for yr in range(1, years + 1):
@@ -729,7 +741,7 @@ def _build_multiyear_monthly_df(
         solar_factor = (1.0 - degrad_rate) ** (yr - 1)
         net_delta = year1_load * (load_factor - 1) + year1_solar * (1.0 - solar_factor)
         yr_export_total = max(0, year1_export - net_delta)
-        volume_ratio = yr_export_total / year1_export if year1_export > 0 else 1.0
+        volume_ratio = yr_export_total / year1_export if year1_export > 0 else 0.0
 
         # Import volume ratio (for scaling raw energy cost under NEM-3)
         absorbed = year1_export - yr_export_total
@@ -750,7 +762,7 @@ def _build_multiyear_monthly_df(
 
         # Per-month export credit recompute based on active regime
         month_export_credit_override = None
-        if active_regime in ("NEM-1", "NEM-2"):
+        if active_regime in ("NEM-1", "NEM-2") or active_regime.startswith("NEM-A"):
             # TOU-netted credits scaled by rate escalation and volume change
             month_export_credit_override = {}
             for m in range(1, 13):
@@ -811,18 +823,19 @@ def _build_multiyear_monthly_df(
             r["Wtd Avg Rate ($/kWh)"] = round(month_wtd_rate[m] * rate_factor, 5)
 
             # Energy cost depends on active regime:
-            #   NEM-1/2: TOU-netted energy (exports offset imports within each TOU period)
+            #   NEM-1/2 (and NEM-A): TOU-netted energy (exports offset imports within each TOU period)
             #   NEM-3/NVBT: raw import energy cost (no netting; exports valued separately)
-            if active_regime in ("NEM-1", "NEM-2"):
+            _is_tou_netted = active_regime in ("NEM-1", "NEM-2") or active_regime.startswith("NEM-A")
+            if _is_tou_netted:
                 r["Energy ($)"] = round(month_tou_energy[m] * load_factor * rate_factor * _prorate, 2)
             else:
                 r["Energy ($)"] = round(raw_month_energy[m] * import_ratio * rate_factor * _prorate, 2)
             r["Demand ($)"] = round(mrow["total_demand_charge"] * load_factor, 2)
             r["Fixed ($)"] = round(mrow["fixed_charge"] * _prorate, 2)
 
-            # NBC: only applies during NEM-2 regime years
+            # NBC: only applies during NEM-2 regime years (including NEM-A (NEM-2))
             _m_nbc = 0.0
-            if active_regime == "NEM-2" and "nbc_charge" in ms.columns and mrow["nbc_charge"] > 0:
+            if active_regime in ("NEM-2", "NEM-A (NEM-2)") and "nbc_charge" in ms.columns and mrow["nbc_charge"] > 0:
                 _m_nbc = round(mrow["nbc_charge"] * rate_factor, 2)
             if _any_nem2:
                 r["NBC ($)"] = _m_nbc
@@ -856,7 +869,7 @@ def generate_monthly_csv(
     load_escalator_pct: float = 0.0,
     years: int = 1,
     export_rates_multiyear: dict[int, "pd.Series"] | None = None,
-    nem_regime_1: str = "NEM-3/NVBT",
+    nem_regime_1: str = "NEM-3 / NVBT",
     nem_regime_2: str | None = None,
     num_years_1: int | None = None,
     export_rates_multiyear_2: dict[int, "pd.Series"] | None = None,
@@ -903,15 +916,25 @@ def _indexed_tariff_savings_target(
     nem_regime_2: str | None,
     num_years_1: int | None,
 ) -> float:
-    """Compute the savings target (%) for a given projection year."""
-    if regime_1_savings_pct is not None and regime_2_savings_pct is not None:
-        if nem_regime_2 and num_years_1 and yr > num_years_1:
-            base = regime_2_savings_pct
+    """Compute the savings target (%) for a given projection year.
+
+    Handles partial specification: if only regime_1 or regime_2 savings
+    is set, the set value is used for its regime and falls back to
+    regime_1 (or base) for the other.
+    """
+    # Per-regime savings: activate when any regime-specific value is provided
+    if regime_1_savings_pct is not None or regime_2_savings_pct is not None:
+        is_regime_2 = bool(nem_regime_2 and num_years_1 and yr > num_years_1)
+        if is_regime_2:
+            base = (regime_2_savings_pct if regime_2_savings_pct is not None
+                    else regime_1_savings_pct if regime_1_savings_pct is not None
+                    else base_savings_pct)
             esc_yr = yr - num_years_1
         else:
-            base = regime_1_savings_pct
+            base = regime_1_savings_pct if regime_1_savings_pct is not None else base_savings_pct
             esc_yr = yr
         return base + savings_escalator_pct * (esc_yr - 1)
+    # Uniform savings across all years
     return base_savings_pct + savings_escalator_pct * (yr - 1)
 
 
@@ -923,15 +946,26 @@ def build_indexed_tariff_annual(
     regime_2_savings_pct: float | None = None,
     nem_regime_2: str | None = None,
     num_years_1: int | None = None,
+    ppa_escalator_pct: float = 0.0,
+    ppa_escalator_pct_2: float | None = None,
 ) -> pd.DataFrame:
     """Build an annual Indexed Tariff table solving for PPA rate per year.
 
-    Utility Savings = Bill w/o Solar - Bill w/ Solar
-    PPA Cost  = Utility Savings × (1 - savings_frac)
-    PPA Rate  = PPA Cost / Solar kWh
-    Customer Savings = Utility Savings × savings_frac
+    When ppa_escalator_pct > 0, backsolves a Year 1 PPA rate per NEM regime
+    such that the escalated rate delivers the target savings over the regime
+    period.  Each year shows the escalated PPA rate and actual savings.
+
+    Without escalator (ppa_escalator_pct == 0), falls back to per-year
+    independent backsolve:
+        PPA Rate  = Utility Savings × (1 - savings_frac) / Solar kWh
     """
-    rows = []
+    esc_1 = (ppa_escalator_pct or 0.0) / 100.0
+    esc_2 = ((ppa_escalator_pct_2 if ppa_escalator_pct_2 is not None
+              else ppa_escalator_pct) or 0.0) / 100.0
+    use_escalator = esc_1 > 0 or esc_2 > 0
+
+    # Collect per-year data
+    year_data = []
     for _, row in annual_proj_df.iterrows():
         yr = int(row["Year"])
         savings_target = _indexed_tariff_savings_target(
@@ -944,16 +978,57 @@ def build_indexed_tariff_annual(
         bill_solar = row["Bill w/ Solar ($)"]
         solar_kwh = row["Solar (kWh)"]
         utility_savings = bill_no_solar - bill_solar
+        cal_yr = int(row["Calendar Year"]) if "Calendar Year" in row.index else None
+        year_data.append((yr, bill_no_solar, bill_solar, solar_kwh,
+                          utility_savings, savings_frac, savings_target, cal_yr))
 
-        if solar_kwh > 0:
-            ppa_rate = utility_savings * (1.0 - savings_frac) / solar_kwh
+    # Backsolve Year 1 PPA rate per regime when escalator is set
+    yr1_ppa_rate_r1 = 0.0
+    yr1_ppa_rate_r2 = 0.0
+    if use_escalator:
+        # Regime 1 years
+        r1_years = [(yr, us, sf, skwh) for yr, _, _, skwh, us, sf, _, _ in year_data
+                     if not (nem_regime_2 and num_years_1 and yr > num_years_1)]
+        if r1_years:
+            num = sum(us * (1.0 - sf) for _, us, sf, _ in r1_years)
+            den = sum(((1 + esc_1) ** (yr - 1)) * skwh for yr, _, _, skwh in r1_years)
+            yr1_ppa_rate_r1 = num / den if den > 0 else 0.0
+
+        # Regime 2 years
+        if nem_regime_2 and num_years_1:
+            r2_years = [(yr, us, sf, skwh) for yr, _, _, skwh, us, sf, _, _ in year_data
+                         if yr > num_years_1]
+            if r2_years:
+                r2_start = num_years_1 + 1
+                num = sum(us * (1.0 - sf) for _, us, sf, _ in r2_years)
+                den = sum(((1 + esc_2) ** (yr - r2_start)) * skwh for yr, _, _, skwh in r2_years)
+                yr1_ppa_rate_r2 = num / den if den > 0 else 0.0
+
+    rows = []
+    for yr, bill_no_solar, bill_solar, solar_kwh, utility_savings, savings_frac, savings_target, cal_yr in year_data:
+        if use_escalator:
+            # Determine which regime and escalated rate
+            if nem_regime_2 and num_years_1 and yr > num_years_1:
+                esc = esc_2
+                yr1_rate = yr1_ppa_rate_r2
+                regime_yr = yr - num_years_1
+            else:
+                esc = esc_1
+                yr1_rate = yr1_ppa_rate_r1
+                regime_yr = yr
+            ppa_rate = yr1_rate * ((1 + esc) ** (regime_yr - 1))
+            customer_savings = utility_savings - ppa_rate * solar_kwh
         else:
-            ppa_rate = 0.0
+            # No escalator: per-year independent backsolve
+            if solar_kwh > 0:
+                ppa_rate = utility_savings * (1.0 - savings_frac) / solar_kwh
+            else:
+                ppa_rate = 0.0
+            customer_savings = utility_savings * savings_frac
 
-        customer_savings = utility_savings * savings_frac
         r = {"Year": yr}
-        if "Calendar Year" in row.index:
-            r["Calendar Year"] = int(row["Calendar Year"])
+        if cal_yr is not None:
+            r["Calendar Year"] = cal_yr
         r.update({
             "Bill w/o Solar ($)": round(bill_no_solar, 2),
             "Bill w/ Solar ($)": round(bill_solar, 2),
@@ -976,15 +1051,21 @@ def build_indexed_tariff_monthly(
     regime_2_savings_pct: float | None = None,
     nem_regime_2: str | None = None,
     num_years_1: int | None = None,
+    ppa_escalator_pct: float = 0.0,
+    ppa_escalator_pct_2: float | None = None,
 ) -> pd.DataFrame:
     """Build a monthly Indexed Tariff table solving for PPA rate per month.
 
-    Utility Savings = Baseline Bill - Net Bill
-    PPA Cost  = Utility Savings × (1 - savings_frac)
-    PPA Rate  = PPA Cost / Solar kWh
-    Customer Savings = Utility Savings × savings_frac
+    When ppa_escalator_pct > 0, uses the annual Year 1 PPA rate (backsolve)
+    escalated to each year.  The same rate applies to all months within a year.
     """
-    rows = []
+    esc_1 = (ppa_escalator_pct or 0.0) / 100.0
+    esc_2 = ((ppa_escalator_pct_2 if ppa_escalator_pct_2 is not None
+              else ppa_escalator_pct) or 0.0) / 100.0
+    use_escalator = esc_1 > 0 or esc_2 > 0
+
+    # Collect per-row data for escalator backsolve
+    row_data = []
     for _, row in multiyear_monthly_df.iterrows():
         yr = int(row["Year"])
         savings_target = _indexed_tariff_savings_target(
@@ -993,25 +1074,64 @@ def build_indexed_tariff_monthly(
             nem_regime_2, num_years_1,
         )
         savings_frac = savings_target / 100.0
-
         baseline_bill = row.get("Baseline Bill ($)", 0.0)
         if baseline_bill is None or (isinstance(baseline_bill, float) and np.isnan(baseline_bill)):
             baseline_bill = 0.0
         net_bill = row["Net Bill ($)"]
         solar_kwh = row["Solar (kWh)"]
         utility_savings = baseline_bill - net_bill
+        cal_yr = int(row["Calendar Year"]) if "Calendar Year" in row.index else None
+        month = row["Month"]
+        row_data.append((yr, month, baseline_bill, net_bill, solar_kwh,
+                         utility_savings, savings_frac, savings_target, cal_yr))
 
-        if solar_kwh > 0:
-            ppa_rate = utility_savings * (1.0 - savings_frac) / solar_kwh
+    # Backsolve Year 1 PPA rates per regime when escalator is set
+    yr1_ppa_rate_r1 = 0.0
+    yr1_ppa_rate_r2 = 0.0
+    if use_escalator:
+        # Regime 1 months
+        r1_rows = [(yr, us, sf, skwh) for yr, _, _, _, skwh, us, sf, _, _ in row_data
+                    if not (nem_regime_2 and num_years_1 and yr > num_years_1)]
+        if r1_rows:
+            num = sum(us * (1.0 - sf) for _, us, sf, _ in r1_rows)
+            den = sum(((1 + esc_1) ** (yr - 1)) * skwh for yr, _, _, skwh in r1_rows)
+            yr1_ppa_rate_r1 = num / den if den > 0 else 0.0
+
+        # Regime 2 months
+        if nem_regime_2 and num_years_1:
+            r2_rows = [(yr, us, sf, skwh) for yr, _, _, _, skwh, us, sf, _, _ in row_data
+                        if yr > num_years_1]
+            if r2_rows:
+                r2_start = num_years_1 + 1
+                num = sum(us * (1.0 - sf) for _, us, sf, _ in r2_rows)
+                den = sum(((1 + esc_2) ** (yr - r2_start)) * skwh for yr, _, _, skwh in r2_rows)
+                yr1_ppa_rate_r2 = num / den if den > 0 else 0.0
+
+    rows = []
+    for yr, month, baseline_bill, net_bill, solar_kwh, utility_savings, savings_frac, savings_target, cal_yr in row_data:
+        if use_escalator:
+            if nem_regime_2 and num_years_1 and yr > num_years_1:
+                esc = esc_2
+                yr1_rate = yr1_ppa_rate_r2
+                regime_yr = yr - num_years_1
+            else:
+                esc = esc_1
+                yr1_rate = yr1_ppa_rate_r1
+                regime_yr = yr
+            ppa_rate = yr1_rate * ((1 + esc) ** (regime_yr - 1))
+            customer_savings = utility_savings - ppa_rate * solar_kwh
         else:
-            ppa_rate = 0.0
+            if solar_kwh > 0:
+                ppa_rate = utility_savings * (1.0 - savings_frac) / solar_kwh
+            else:
+                ppa_rate = 0.0
+            customer_savings = utility_savings * savings_frac
 
-        customer_savings = utility_savings * savings_frac
         r = {"Year": yr}
-        if "Calendar Year" in row.index:
-            r["Calendar Year"] = int(row["Calendar Year"])
+        if cal_yr is not None:
+            r["Calendar Year"] = cal_yr
         r.update({
-            "Month": row["Month"],
+            "Month": month,
             "Bill w/o Solar ($)": round(baseline_bill, 2),
             "Net Bill ($)": round(net_bill, 2),
             "Utility Savings ($)": round(utility_savings, 2),
@@ -1507,7 +1627,7 @@ def generate_simulation_excel(
 
         # Style header rows (row 1) across all sheets
         from openpyxl.styles import Alignment, Font, PatternFill
-        _header_fill = PatternFill(start_color="212B48", end_color="212B48", fill_type="solid")
+        _header_fill = PatternFill(start_color="0E2841", end_color="0E2841", fill_type="solid")
         _header_font = Font(color="FFFFFF", bold=True)
         for ws in writer.sheets.values():
             for cell in ws[1]:

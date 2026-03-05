@@ -339,7 +339,7 @@ def _build_aggregate_result(
 
     annual_load = sum(r.annual_load_kwh for r in all_results)
     annual_solar = gen_result.annual_solar_kwh
-    annual_import = gen_result.annual_import_kwh  # Only gen meter has solar offset
+    annual_import = sum(r.annual_import_kwh for r in all_results)
     annual_export = gen_result.annual_export_kwh
 
     annual_energy_cost = float(monthly_summary["energy_cost"].sum())
