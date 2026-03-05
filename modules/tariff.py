@@ -3,6 +3,7 @@ OpenEI Utility Rate Database (URDB) integration for tariff schedule lookup and p
 """
 
 import os
+import warnings
 import requests
 import streamlit as st
 from requests.adapters import HTTPAdapter
@@ -44,6 +45,9 @@ NBC_DEFAULTS = {
 # Default Net Surplus Compensation rate ($/kWh)
 NSC_DEFAULT_RATE = 0.04
 
+# Average days per month (365 / 12), used to convert $/day fixed charges to $/month
+DAYS_PER_MONTH_AVG = 365.0 / 12.0
+
 
 @dataclass
 class TariffSchedule:
@@ -76,8 +80,12 @@ class TariffSchedule:
     demand_weekday_schedule: list = field(default_factory=list)
     demand_weekend_schedule: list = field(default_factory=list)
 
-    # Flat (non-coincident) demand charges: list of tiers
+    # Flat (non-coincident) demand charges: list of periods, each period is list of tiers
     demand_flat_structure: list = field(default_factory=list)
+
+    # Month-to-period mapping for flat demand: 12-element list (0-indexed months)
+    # Each value is the period index into demand_flat_structure
+    demand_flat_months: list = field(default_factory=list)
 
     # Non-bypassable charge ($/kWh), used for NEM-2 only
     nbc_rate: float = 0.0
@@ -186,6 +194,7 @@ def fetch_tariff_detail(rate_label: str) -> TariffSchedule:
     tariff.demand_flat_structure = _parse_rate_structure(
         raw.get("flatdemandstructure", [])
     )
+    tariff.demand_flat_months = raw.get("flatdemandmonths", [])
 
     return tariff
 
@@ -195,7 +204,7 @@ def _sum_fixed_charges(raw: dict) -> float:
     total = 0.0
     raw_fixed = raw.get("fixedmonthlycharge", 0.0) or 0.0
     if raw.get("fixedchargeunits", "") == "$/day":
-        total += raw_fixed * 30.44  # avg days/month
+        total += raw_fixed * DAYS_PER_MONTH_AVG
     else:
         total += raw_fixed
     # Also check for fixedchargefirstmeter
@@ -247,6 +256,12 @@ def get_energy_rate(tariff: TariffSchedule, month: int, hour: int, is_weekend: b
 
     # For simplicity in v1: use first tier rate (most AG rates are flat within period)
     if tiers:
+        if len(tiers) > 1:
+            warnings.warn(
+                f"Energy rate period {period} has {len(tiers)} tiers; "
+                "only the first tier rate is used. Tiered pricing is not yet supported.",
+                stacklevel=2,
+            )
         return tiers[0]["effective_rate"]
     return 0.0
 

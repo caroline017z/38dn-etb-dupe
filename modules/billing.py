@@ -46,22 +46,73 @@ class BillingResult:
     annual_nsc_adjustment: float = 0.0     # NSC reduction at true-up (NEM-1/NEM-2)
     nem_regime: str = "NEM-3"              # Which regime was used
 
+    # TOU-netted annual values (NEM-1/2 only; 0.0 for NEM-3)
+    tou_annual_energy: float = 0.0   # positive side of TOU per-period netting
+    tou_annual_credit: float = 0.0   # negative side of TOU per-period netting
+
+    # Raw import energy cost: sum(import_kwh * energy_rate) across all hours.
+    # Always represents gross import cost regardless of TOU netting or billing option.
+    # Used by projection for NEM-3 regime-switch energy cost baseline.
+    raw_annual_energy: float = 0.0
+
     # Monthly baseline breakdown (no-solar bill components per month)
     monthly_baseline_details: list[dict] | None = None  # 12 dicts: {energy, demand, fixed, total}
+
+
+def _build_schedule_arrays(
+    tariff: TariffSchedule,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Build 2-D NumPy schedule and rate arrays from tariff for vectorised lookups.
+
+    Returns:
+        (weekday_sched, weekend_sched, period_rates)
+        - weekday_sched / weekend_sched: int arrays of shape (12, 24) — period index
+        - period_rates: 1-D float array mapping period index -> $/kWh
+    """
+    wkday = tariff.energy_weekday_schedule
+    wkend = tariff.energy_weekend_schedule or wkday
+    weekday_sched = np.asarray(wkday, dtype=int)   # (12, 24)
+    weekend_sched = np.asarray(wkend, dtype=int)    # (12, 24)
+
+    n_periods = max(int(weekday_sched.max()), int(weekend_sched.max())) + 1
+    period_rates = np.zeros(n_periods)
+    if tariff.energy_rate_structure:
+        for pidx, tiers in enumerate(tariff.energy_rate_structure):
+            if pidx < n_periods and tiers:
+                period_rates[pidx] = tiers[0]["effective_rate"]
+
+    return weekday_sched, weekend_sched, period_rates
+
+
+def _vectorized_period_and_rate(
+    tariff: TariffSchedule, dt_index: pd.DatetimeIndex,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Vectorised energy-period and energy-rate lookup for every hour.
+
+    Returns:
+        (energy_period, energy_rate) — both 1-D arrays of length len(dt_index)
+    """
+    weekday_sched, weekend_sched, period_rate_map = _build_schedule_arrays(tariff)
+
+    months = dt_index.month.values - 1        # 0-indexed
+    hours = dt_index.hour.values
+    is_weekend = dt_index.weekday.values >= 5
+
+    # Fancy-index both schedules, then select per-hour
+    periods_wkday = weekday_sched[months, hours]
+    periods_wkend = weekend_sched[months, hours]
+    energy_period = np.where(is_weekend, periods_wkend, periods_wkday)
+
+    energy_rate = period_rate_map[energy_period]
+    return energy_period, energy_rate
 
 
 def _build_hourly_energy_rates(
     tariff: TariffSchedule, dt_index: pd.DatetimeIndex,
 ) -> np.ndarray:
     """Return an array of $/kWh energy rates for every hour in dt_index."""
-    n = len(dt_index)
-    rates = np.zeros(n)
-    for h in range(n):
-        dt = dt_index[h]
-        rates[h] = get_energy_rate(
-            tariff, dt.month - 1, dt.hour, dt.weekday() >= 5,
-        )
-    return rates
+    _, energy_rate = _vectorized_period_and_rate(tariff, dt_index)
+    return energy_rate
 
 
 def _build_demand_lp_inputs(
@@ -79,13 +130,17 @@ def _build_demand_lp_inputs(
     # ---- flat (non-coincident) demand ----
     if tariff.demand_flat_structure:
         masks["flat"] = np.ones(n, dtype=bool)
-        rate = 0.0
+        # Use the maximum flat demand rate across all seasonal periods as LP price.
+        # The LP needs a single scalar price for flat demand; using the max ensures
+        # the optimizer doesn't under-value demand reduction in any season.
+        max_rate = 0.0
         for period_tiers in tariff.demand_flat_structure:
             if period_tiers:
-                rate = period_tiers[0].get("effective_rate", 0.0)
-            break
-        if rate > 0:
-            prices["flat"] = rate
+                r = period_tiers[0].get("effective_rate", 0.0)
+                if r > max_rate:
+                    max_rate = r
+        if max_rate > 0:
+            prices["flat"] = max_rate
 
     # ---- TOU demand periods ----
     if tariff.demand_rate_structure and tariff.demand_weekday_schedule:
@@ -154,47 +209,17 @@ def run_billing_simulation(
     dt_index = cast(pd.DatetimeIndex, load_8760.index)
 
     n_hours = len(load)
-    assert n_hours == 8760, f"Expected 8760 hours, got {n_hours}"
+    if n_hours != 8760:
+        raise ValueError(f"Expected 8760 hours, got {n_hours}")
 
-    # --- Hour-by-hour calculation ---
-    import_kwh = np.zeros(n_hours)
-    export_kwh = np.zeros(n_hours)
-    net_kwh = np.zeros(n_hours)
-    energy_cost = np.zeros(n_hours)
-    export_credit = np.zeros(n_hours)
-    energy_period = np.zeros(n_hours, dtype=int)
-    energy_rate = np.zeros(n_hours)
+    # --- Vectorised hour-by-hour calculation ---
+    net_kwh = load - solar
+    import_kwh = np.maximum(net_kwh, 0.0)
+    export_kwh = np.maximum(-net_kwh, 0.0)
 
-    for h in range(n_hours):
-        dt = dt_index[h]
-        month_idx = dt.month - 1  # 0-indexed for OpenEI
-        hour_of_day = dt.hour
-        is_weekend = dt.weekday() >= 5
-
-        # Net energy
-        net = load[h] - solar[h]
-        net_kwh[h] = net
-
-        if net > 0:
-            # Importing from grid
-            import_kwh[h] = net
-            export_kwh[h] = 0.0
-        else:
-            # Exporting surplus
-            import_kwh[h] = 0.0
-            export_kwh[h] = abs(net)
-
-        # Energy TOU period
-        period = get_energy_period(tariff, month_idx, hour_of_day, is_weekend)
-        energy_period[h] = period
-
-        # Energy charge (only on imports)
-        rate = get_energy_rate(tariff, month_idx, hour_of_day, is_weekend)
-        energy_rate[h] = rate
-        energy_cost[h] = import_kwh[h] * rate
-
-        # Export credit
-        export_credit[h] = export_kwh[h] * export_rates[h]
+    energy_period, energy_rate = _vectorized_period_and_rate(tariff, dt_index)
+    energy_cost = import_kwh * energy_rate
+    export_credit = export_kwh * export_rates
 
     # --- Optional battery dispatch ---
     batt_dispatch = None
@@ -269,8 +294,10 @@ def run_billing_simulation(
                 peak_period_idx = idx
 
     # --- Monthly aggregation (regime-dependent) ---
+    tou_annual_energy = 0.0
+    tou_annual_credit = 0.0
     if nem_regime in ("NEM-1", "NEM-2"):
-        monthly_rows = _build_monthly_nem12(
+        monthly_rows, tou_annual_energy, tou_annual_credit = _build_monthly_nem12(
             load, solar, import_kwh, export_kwh, energy_period, energy_rate,
             dt_index, tariff, demand_df, peak_period_idx,
             nem_regime, nbc_rate, nsc_rate, billing_option,
@@ -305,6 +332,12 @@ def run_billing_simulation(
     _nsc_col = monthly_summary.get("nsc_adjustment")
     annual_nsc_adj = float(_nsc_col.sum()) if _nsc_col is not None else 0.0
 
+    # Raw import energy cost: sum(import_kwh * energy_rate) from hourly arrays.
+    # This is always the gross import cost before any TOU netting or billing
+    # option adjustments.  The energy_cost column in hourly_detail holds these
+    # raw values (set at line 216 before NEM-1/2 export_credit override).
+    raw_annual_energy = float(hourly_detail["energy_cost"].sum())
+
     return BillingResult(
         hourly_detail=hourly_detail,
         monthly_summary=monthly_summary,
@@ -323,6 +356,9 @@ def run_billing_simulation(
         annual_nbc_cost=annual_nbc,
         annual_nsc_adjustment=annual_nsc_adj,
         nem_regime=nem_regime,
+        tou_annual_energy=tou_annual_energy,
+        tou_annual_credit=tou_annual_credit,
+        raw_annual_energy=raw_annual_energy,
         monthly_baseline_details=monthly_baseline_list,
     )
 
@@ -388,8 +424,12 @@ def _build_monthly_nem12(
     load, solar, import_kwh, export_kwh, energy_period, energy_rate,
     dt_index, tariff, demand_df, peak_period_idx,
     nem_regime, nbc_rate, nsc_rate, billing_option,
-) -> list[dict]:
-    """NEM-1 / NEM-2: TOU-period monthly netting with NBC and NSC true-up."""
+) -> tuple[list[dict], float, float]:
+    """NEM-1 / NEM-2: TOU-period monthly netting with NBC and NSC true-up.
+
+    Returns:
+        (monthly_rows, tou_annual_energy, tou_annual_credit)
+    """
     n_hours = len(dt_index)
 
     # Collect unique TOU period indices and their rates
@@ -402,6 +442,8 @@ def _build_monthly_nem12(
     monthly_rows = []
     credit_bank = 0.0        # MBO credit carryover
     deferred_energy = 0.0    # ABO deferred energy charges
+    tou_annual_energy = 0.0  # positive side of TOU netting (across all months)
+    tou_annual_credit = 0.0  # negative side of TOU netting (across all months)
 
     for month_num in range(1, 13):
         month_mask = dt_index.month == month_num
@@ -439,6 +481,12 @@ def _build_monthly_nem12(
             net_kwh_p = float(month_import[period_mask].sum() - month_export[period_mask].sum())
             energy_charge_p = net_kwh_p * rate
             monthly_energy_charge += energy_charge_p
+
+        # Accumulate TOU-netted energy/credit split for projection use
+        if monthly_energy_charge >= 0:
+            tou_annual_energy += monthly_energy_charge
+        else:
+            tou_annual_credit += abs(monthly_energy_charge)
 
         # Export energy split by TOU period (peak vs off-peak) — for reporting
         peak_mask_ep = month_periods == peak_period_idx
@@ -518,7 +566,7 @@ def _build_monthly_nem12(
         period_rates, nsc_rate,
     )
 
-    return monthly_rows
+    return monthly_rows, tou_annual_energy, tou_annual_credit
 
 
 def _apply_nsc_true_up(
@@ -582,15 +630,9 @@ def _calc_baseline_bill(load_8760: pd.Series, tariff: TariffSchedule) -> tuple[f
     load = load_8760.values
     n_hours = len(load)
 
-    # Hourly energy cost array
-    energy_by_hour = np.zeros(n_hours)
-    for h in range(n_hours):
-        dt = dt_index[h]
-        month_idx = dt.month - 1
-        hour_of_day = dt.hour
-        is_weekend = dt.weekday() >= 5
-        rate = get_energy_rate(tariff, month_idx, hour_of_day, is_weekend)
-        energy_by_hour[h] = load[h] * rate
+    # Vectorised hourly energy cost
+    _, rates = _vectorized_period_and_rate(tariff, dt_index)
+    energy_by_hour = load * rates
 
     # Demand charges (all load = import when no solar)
     demand_df = calculate_monthly_demand_charges(load_8760, tariff)

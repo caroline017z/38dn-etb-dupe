@@ -9,16 +9,12 @@ code (projections, charts, downloads) works unchanged.
 import pandas as pd
 import numpy as np
 
-import sys, os
-# Use vendored copy to avoid dependency conflicts on Streamlit Cloud
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "vendor"))
-
-from electricitycostcalculator.openei_tariff.openei_tariff_analyzer import (
+from vendor.electricitycostcalculator.openei_tariff.openei_tariff_analyzer import (
     OpenEI_tariff,
     tariff_struct_from_openei_data,
 )
-from electricitycostcalculator.cost_calculator.cost_calculator import CostCalculator
-from electricitycostcalculator.cost_calculator.rate_structure import ChargeType
+from vendor.electricitycostcalculator.cost_calculator.cost_calculator import CostCalculator
+from vendor.electricitycostcalculator.cost_calculator.rate_structure import ChargeType
 
 from .billing import BillingResult
 
@@ -163,7 +159,8 @@ def run_ecc_billing_simulation(
     solar = np.asarray(production_8760)
     export_rates = export_rates_8760.values
     n_hours = len(load)
-    assert n_hours == 8760, f"Expected 8760 hours, got {n_hours}"
+    if n_hours != 8760:
+        raise ValueError(f"Expected 8760 hours, got {n_hours}")
 
     # --- Hour-by-hour netting ---
     net_kwh = load - solar

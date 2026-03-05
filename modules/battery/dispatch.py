@@ -443,9 +443,12 @@ def dispatch_battery(
         Hourly arrays + solver metadata.
     """
     N = len(pv_kwh)
-    assert len(load_kwh) == N
-    assert len(import_price) == N
-    assert len(export_price) == N
+    if len(load_kwh) != N:
+        raise ValueError(f"load_kwh length {len(load_kwh)} != pv_kwh length {N}")
+    if len(import_price) != N:
+        raise ValueError(f"import_price length {len(import_price)} != pv_kwh length {N}")
+    if len(export_price) != N:
+        raise ValueError(f"export_price length {len(export_price)} != pv_kwh length {N}")
 
     cfg = battery_config
     min_soc = cfg.min_soc_pct / 100.0 * capacity_kwh

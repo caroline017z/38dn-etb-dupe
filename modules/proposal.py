@@ -591,7 +591,8 @@ def _slide_cover(prs, name, addr, acct, date_str, total):
 
 def _slide_exec_summary(prs, pg, total, name, result, tariff, utility,
                         sys_kw, batt_kwh, ppa_rate, esc_pct, term,
-                        customer_savings_pct=None):
+                        customer_savings_pct=None, customer_savings_pct_2=None,
+                        nem_regime_1=None, nem_regime_2=None):
     """Executive Summary — two-column financial + technical overview."""
     sl = prs.slides.add_slide(prs.slide_layouts[6])
     _accent_rule(sl)
@@ -621,8 +622,12 @@ def _slide_exec_summary(prs, pg, total, name, result, tariff, utility,
         ("Current Annual Utility Bill", _fd(bill)),
         ("Projected Year 1 Cost (w/ Solar)", _fd(result.annual_bill_with_solar)),
         ("Year 1 Net Savings", _fd(sav)),
-        ("Savings Rate", f"{pct:.1f}%"),
     ]
+    if customer_savings_pct_2 is not None and nem_regime_1 and nem_regime_2:
+        fin.append((f"{nem_regime_1} Savings Target", f"{pct:.1f}%"))
+        fin.append((f"{nem_regime_2} Savings Target", f"{customer_savings_pct_2:.1f}%"))
+    else:
+        fin.append(("Savings Rate", f"{pct:.1f}%"))
     if ppa_rate is not None:
         fin.append(("PPA Rate (Year 1)", f"${ppa_rate:.3f}/kWh"))
     if esc_pct is not None:
@@ -1261,6 +1266,7 @@ def generate_proposal_pptx(
     nem_regime_2: str | None = None,
     num_years_1: int | None = None,
     customer_savings_pct: float | None = None,
+    customer_savings_pct_2: float | None = None,
 ) -> bytes:
     """Generate an institutional-quality branded customer proposal PPTX."""
     prs = Presentation()
@@ -1286,7 +1292,10 @@ def generate_proposal_pptx(
         _slide_exec_summary(prs, pg, total, customer_name, result, tariff_name,
                             utility_name, system_size_kw, battery_kwh,
                             ppa_rate, ppa_escalator_pct, term_years,
-                            customer_savings_pct=customer_savings_pct)
+                            customer_savings_pct=customer_savings_pct,
+                            customer_savings_pct_2=customer_savings_pct_2,
+                            nem_regime_1=nem_regime_1,
+                            nem_regime_2=nem_regime_2)
 
     # Current Cost
     if has_r:

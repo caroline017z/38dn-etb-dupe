@@ -175,7 +175,7 @@ def compute_monthly_allocation(
 def value_allocation_at_retail_rates(
     allocation: AllocationResult,
     agg_meters: list[MeterConfig],
-) -> dict[str, float]:
+) -> dict[str, dict[int, float]]:
     """Value allocated kWh at each receiving meter's consumption-weighted average TOU rate.
 
     For each meter and month, compute the consumption-weighted average TOU rate,
@@ -186,19 +186,20 @@ def value_allocation_at_retail_rates(
         agg_meters: List of aggregated MeterConfig objects
 
     Returns:
-        dict mapping meter_name -> total annual credit value ($)
+        dict mapping meter_name -> {month (1-12) -> credit value ($)}
     """
-    credit_values: dict[str, float] = {}
+    monthly_credit_values: dict[str, dict[int, float]] = {}
 
     for m in agg_meters:
         dt_index = cast(pd.DatetimeIndex, m.load_8760.index)
         hourly_rates = _build_hourly_energy_rates(m.tariff, dt_index)
         load_arr = np.asarray(m.load_8760.values)
 
-        total_credit = 0.0
+        meter_monthly: dict[int, float] = {}
         for month in range(1, 13):
             alloc_kwh = allocation.monthly_allocation[month].get(m.name, 0.0)
             if alloc_kwh <= 0:
+                meter_monthly[month] = 0.0
                 continue
 
             month_mask = dt_index.month == month
@@ -212,11 +213,11 @@ def value_allocation_at_retail_rates(
             else:
                 avg_rate = float(month_rates.mean()) if len(month_rates) > 0 else 0.0
 
-            total_credit += alloc_kwh * avg_rate
+            meter_monthly[month] = alloc_kwh * avg_rate
 
-        credit_values[m.name] = total_credit
+        monthly_credit_values[m.name] = meter_monthly
 
-    return credit_values
+    return monthly_credit_values
 
 
 # ---------------------------------------------------------------------------
@@ -262,7 +263,7 @@ def _build_aggregate_result(
     gen_result: BillingResult,
     agg_results: dict[str, BillingResult],
     allocation: AllocationResult,
-    credit_values: dict[str, float],
+    monthly_credit_values: dict[str, dict[int, float]],
     nema_fees: dict,
     nem_regime: str,
 ) -> BillingResult:
@@ -276,7 +277,7 @@ def _build_aggregate_result(
         gen_result: BillingResult for the generating meter (with PV + optional battery)
         agg_results: {meter_name: BillingResult} for each aggregated meter (load-only)
         allocation: AllocationResult from compute_monthly_allocation()
-        credit_values: {meter_name: annual_credit_$} from value_allocation_at_retail_rates()
+        monthly_credit_values: {meter_name: {month: credit_$}} from value_allocation_at_retail_rates()
         nema_fees: Fee dict from compute_nema_fees()
         nem_regime: "NEM-1" or "NEM-2" (will be prefixed with "NEM-A")
 
@@ -313,12 +314,9 @@ def _build_aggregate_result(
 
         # Subtract allocated credits for this month (valued at receiving meter rates)
         month_credit = 0.0
-        for meter_name, alloc_kwh in allocation.monthly_allocation[month].items():
-            if alloc_kwh > 0 and meter_name in credit_values:
-                # Pro-rate the annual credit by the monthly allocation fraction
-                total_alloc = allocation.annual_allocated_kwh
-                if total_alloc > 0:
-                    month_credit += credit_values[meter_name] * (alloc_kwh / total_alloc)
+        for meter_name in allocation.monthly_allocation[month]:
+            if meter_name in monthly_credit_values:
+                month_credit += monthly_credit_values[meter_name].get(month, 0.0)
 
         row["export_credit"] = round(row.get("export_credit", 0.0) + month_credit, 2)
 
@@ -384,6 +382,27 @@ def _build_aggregate_result(
 
     regime_str = f"NEM-A ({nem_regime})"
 
+    # Aggregate TOU energy/credit across all meters for projection use.
+    # Generating meter has the solar TOU netting; aggregated meters are load-only
+    # (their tou_annual_energy = full energy cost, tou_annual_credit = 0).
+    # The allocated credits (from value_allocation_at_retail_rates) are added
+    # to the credit side since they represent TOU-valued export credits
+    # distributed to receiving meters.
+    agg_tou_energy = gen_result.tou_annual_energy
+    agg_tou_credit = gen_result.tou_annual_credit
+    for agg_res in agg_results.values():
+        agg_tou_energy += agg_res.tou_annual_energy
+        agg_tou_credit += agg_res.tou_annual_credit
+    # Add allocated credits (valued at retail TOU rates) to the credit side
+    for meter_credits in monthly_credit_values.values():
+        agg_tou_credit += sum(meter_credits.values())
+
+    # Aggregate raw import energy cost across all meters for NEM-3 regime-switch.
+    # Each meter's raw_annual_energy = sum(import_kwh * energy_rate) from hourly data.
+    agg_raw_energy = gen_result.raw_annual_energy
+    for agg_res in agg_results.values():
+        agg_raw_energy += agg_res.raw_annual_energy
+
     return BillingResult(
         hourly_detail=hourly_detail,
         monthly_summary=monthly_summary,
@@ -403,6 +422,9 @@ def _build_aggregate_result(
         annual_nsc_adjustment=annual_nsc_adj,
         nem_regime=regime_str,
         monthly_baseline_details=monthly_baseline,
+        tou_annual_energy=agg_tou_energy,
+        tou_annual_credit=agg_tou_credit,
+        raw_annual_energy=agg_raw_energy,
     )
 
 
@@ -502,15 +524,15 @@ def run_aggregation_simulation(
     fees = compute_nema_fees(profile.utility, len(agg_meters))
     allocation.annual_fees = fees["annual_admin"]
 
-    # Step 4: Value credits at receiving meter rates
-    credit_values = value_allocation_at_retail_rates(allocation, agg_meters)
+    # Step 4: Value credits at receiving meter rates (monthly breakdown per meter)
+    monthly_credit_values = value_allocation_at_retail_rates(allocation, agg_meters)
 
     # Step 5: Build aggregate result
     return _build_aggregate_result(
         gen_result=gen_result,
         agg_results=agg_results,
         allocation=allocation,
-        credit_values=credit_values,
+        monthly_credit_values=monthly_credit_values,
         nema_fees=fees,
         nem_regime=profile.nem_regime,
     )
