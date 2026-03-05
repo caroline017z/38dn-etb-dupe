@@ -55,6 +55,12 @@ from modules.billing_ecc import (
     load_ecc_tariff_from_json,
     run_ecc_billing_simulation,
 )
+from modules.rate_extractor import (
+    extract_text_from_pdf,
+    extract_tariff_from_text,
+    validate_tariff_structure,
+    save_custom_tariff,
+)
 from modules.load_adjustment import adjust_load_single_meter, adjust_loads_nema
 from modules.battery import BatteryConfig
 from modules.battery.sizing import optimize_capacity_kwh
@@ -265,6 +271,7 @@ def _load_nema_profile_into_session(profile_name: str):
     st.session_state["nema_meter_tariffs"] = tariffs
     st.session_state["existing_solar_nema_meters"] = data.get("existing_solar_meters", [])
     st.session_state["load_mode"] = "NEM-A Aggregation"
+    st.session_state["load_mode_radio"] = "NEM-A Aggregation"
     # Set generating meter load as the main load_8760
     for i, m in enumerate(meters):
         if m["is_generating"] and i in loads:
@@ -528,6 +535,8 @@ for key, default in {
     "existing_solar_enabled": False,
     "existing_solar_production_8760": None,
     "existing_solar_nema_meters": [],
+    "custom_rate_extracted": None,
+    "custom_rate_warnings": None,
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default
@@ -746,7 +755,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-_mgmt_btn_cols = st.columns([0.15, 1, 1, 1, 1, 1, 2])
+_mgmt_btn_cols = st.columns([0.15, 1, 1, 1, 1, 1, 1, 1.5])
 
 # --- Simulations popover ---
 with _mgmt_btn_cols[1]:
@@ -888,10 +897,46 @@ with _mgmt_btn_cols[4]:
             st.session_state["active_mgmt_tab"] = "Export Profiles"
             st.rerun()
 
+# --- Custom Rates popover ---
+with _mgmt_btn_cols[5]:
+    with st.popover("Custom Rates", width="stretch"):
+        _cr_saved = _list_saved(ECC_TARIFFS_DIR, ".json")
+        _cr_recent_3 = _cr_saved[:3]
+
+        if _cr_recent_3:
+            st.markdown("**Recent Custom Rates**")
+            for _cr_r in _cr_recent_3:
+                if st.button(
+                    _cr_r,
+                    key=f"popover_cr_{_cr_r}",
+                    width="stretch",
+                ):
+                    # Load the tariff JSON to preview on the Custom Rates tab
+                    try:
+                        _cr_r_path = os.path.join(ECC_TARIFFS_DIR, _cr_r + ".json")
+                        with open(_cr_r_path, "r") as _cr_f:
+                            _cr_r_data = json.load(_cr_f)
+                        # Unwrap array to single dict for preview
+                        if isinstance(_cr_r_data, list) and _cr_r_data:
+                            _cr_r_data = _cr_r_data[0]
+                        st.session_state["custom_rate_extracted"] = _cr_r_data
+                        st.session_state["custom_rate_warnings"] = None
+                        st.session_state["active_mgmt_tab"] = "Custom Rates"
+                    except Exception:
+                        st.session_state["active_mgmt_tab"] = "Custom Rates"
+                    st.rerun()
+            st.divider()
+        else:
+            st.caption("No custom rates yet.")
+
+        if st.button("Create Custom Rate", width="stretch", type="primary"):
+            st.session_state["active_mgmt_tab"] = "Custom Rates"
+            st.rerun()
+
 # --- Save popover ---
 save_btn = False
 sim_name = ""
-with _mgmt_btn_cols[5]:
+with _mgmt_btn_cols[6]:
     with st.popover("Save", width="stretch"):
         sim_name = st.text_input(
             "Simulation Name",
@@ -962,6 +1007,7 @@ if st.session_state["active_mgmt_tab"] == "Load Profiles":
                         st.session_state["load_8760"] = pd.Series(_al_vals, index=_al_dt, name="load_kwh")
                         st.session_state["_raw_load_8760"] = st.session_state["load_8760"].copy()
                         st.session_state["load_mode"] = "Single Meter"
+                        st.session_state["load_mode_radio"] = "Single Meter"
                         st.success(f"Loaded '{_sel_name}': {_al_vals.sum():,.0f} kWh/yr")
                     else:
                         _load_nema_profile_into_session(_sel_name)
@@ -1651,6 +1697,214 @@ if st.session_state["active_mgmt_tab"] == "System Profiles":
             st.rerun()
 
 
+# ---- CUSTOM RATES SECTION ----
+if st.session_state["active_mgmt_tab"] == "Custom Rates":
+    st.subheader("Custom Rates")
+
+    # ================================================================
+    # A. Saved Custom Rates
+    # ================================================================
+    _cr_all = _list_saved(ECC_TARIFFS_DIR, ".json")
+    if _cr_all:
+        st.markdown("**Saved Custom Rates**")
+        _cr_sel = st.selectbox(
+            "Select a saved rate", _cr_all, key="cr_sel", index=None,
+            placeholder="Choose a custom rate...",
+        )
+        if _cr_sel:
+            _cr_btn_c1, _cr_btn_c2 = st.columns(2)
+            with _cr_btn_c1:
+                _cr_load_btn = st.button(
+                    "Load into Simulator", key="cr_load", type="primary",
+                )
+            with _cr_btn_c2:
+                _cr_del_btn = st.button("Delete", key="cr_del")
+
+            if _cr_load_btn:
+                try:
+                    _cr_path = os.path.join(ECC_TARIFFS_DIR, _cr_sel + ".json")
+                    _cr_calc, _cr_data = load_ecc_tariff_from_json(_cr_path)
+                    st.session_state["ecc_cost_calculator"] = _cr_calc
+                    st.session_state["ecc_tariff_data"] = _cr_data
+                    st.session_state["ecc_tariff_metadata"] = {
+                        "source": f"Custom: {_cr_sel}",
+                        "num_tariffs": len(_cr_data) if isinstance(_cr_data, list) else 1,
+                        "tariff_names": [t.get("name", _cr_sel) for t in (_cr_data if isinstance(_cr_data, list) else [_cr_data])],
+                    }
+                    st.session_state["billing_engine_radio"] = "ECC"
+                    st.session_state["billing_engine"] = "ECC"
+                    st.session_state["active_mgmt_tab"] = None
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Failed to load tariff: {e}")
+
+            if _cr_del_btn:
+                _delete_file(ECC_TARIFFS_DIR, _cr_sel, ".json")
+                st.success(f"Deleted '{_cr_sel}'.")
+                st.rerun()
+    else:
+        st.caption("No saved custom rates yet.")
+
+    # ================================================================
+    # B. Create New Custom Rate
+    # ================================================================
+    st.markdown("---")
+    st.markdown("**Create New Custom Rate**")
+
+    _cr_up_c1, _cr_up_c2, _cr_up_c3 = st.columns([2, 1, 1])
+    with _cr_up_c1:
+        _cr_pdf = st.file_uploader("Upload Tariff PDF", type=["pdf"], key="cr_pdf_upload")
+    with _cr_up_c2:
+        _cr_utility = st.text_input("Utility", placeholder="e.g., PG&E", key="cr_utility")
+    with _cr_up_c3:
+        _cr_rate_name = st.text_input("Rate Name", placeholder="e.g., AG-C", key="cr_rate_name")
+
+    _cr_extract_btn = st.button(
+        "Extract Rate Data",
+        disabled=(_cr_pdf is None),
+        type="primary",
+    )
+
+    if _cr_extract_btn and _cr_pdf is not None:
+        with st.spinner("Extracting text from PDF..."):
+            try:
+                _cr_text = extract_text_from_pdf(_cr_pdf)
+            except Exception as e:
+                st.error(f"PDF extraction failed: {e}")
+                _cr_text = None
+
+        if _cr_text:
+            with st.spinner("Analyzing tariff with Claude AI..."):
+                try:
+                    _cr_result = extract_tariff_from_text(
+                        _cr_text, utility=_cr_utility, rate_name=_cr_rate_name,
+                    )
+                    st.session_state["custom_rate_extracted"] = _cr_result
+                    st.session_state["custom_rate_warnings"] = validate_tariff_structure(_cr_result)
+                    st.success("Rate data extracted successfully!")
+                except Exception as e:
+                    st.error(f"Claude API extraction failed: {e}")
+
+    # ---- Preview extracted data ----
+    _cr_extracted = st.session_state.get("custom_rate_extracted")
+    if _cr_extracted:
+        st.markdown("---")
+        st.markdown("**Extracted Data Preview**")
+
+        _cr_warnings = st.session_state.get("custom_rate_warnings", [])
+        if _cr_warnings:
+            for _cw in _cr_warnings:
+                st.warning(_cw)
+
+        # Tariff name / description
+        st.caption(f"**{_cr_extracted.get('name', 'Unnamed')}** — {_cr_extracted.get('utility', 'N/A')}")
+        if _cr_extracted.get("description"):
+            st.caption(_cr_extracted["description"])
+
+        # Energy rates table
+        _cr_energy = _cr_extracted.get("energyratestructure", [])
+        if _cr_energy:
+            with st.expander("Energy Rates ($/kWh)", expanded=True):
+                # Parse period labels from energycomments
+                import re as _re
+                _cr_period_labels: dict[int, str] = {}
+                _cr_comments = _cr_extracted.get("energycomments", "")
+                if _cr_comments:
+                    for _m in _re.finditer(r"Period\s+(\d+)\s*:\s*([^.]+)", _cr_comments):
+                        _cr_period_labels[int(_m.group(1))] = _m.group(2).strip()
+                _cr_erows = []
+                for i, period in enumerate(_cr_energy):
+                    rate = period[0].get("rate", 0) if period else 0
+                    label = _cr_period_labels.get(i, "—")
+                    _cr_erows.append({"Period": i, "Type": label, "Rate ($/kWh)": f"${rate:.5f}"})
+                st.table(pd.DataFrame(_cr_erows))
+
+        # TOU schedule heatmap
+        _cr_wk_sched = _cr_extracted.get("energyweekdayschedule")
+        if _cr_wk_sched:
+            with st.expander("TOU Schedule (Weekday)", expanded=False):
+                import plotly.graph_objects as go
+                _cr_months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                              "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+                _cr_hours = [f"{h}:00" for h in range(24)]
+                fig = go.Figure(data=go.Heatmap(
+                    z=_cr_wk_sched,
+                    x=_cr_hours,
+                    y=_cr_months,
+                    colorscale="Viridis",
+                    showscale=True,
+                    colorbar=dict(title="Period"),
+                ))
+                fig.update_layout(
+                    height=350,
+                    margin=dict(l=60, r=20, t=30, b=40),
+                    xaxis_title="Hour",
+                    yaxis_title="Month",
+                )
+                st.plotly_chart(fig, use_container_width=True)
+
+        # Demand charges
+        _cr_demand = _cr_extracted.get("demandratestructure", [])
+        if _cr_demand:
+            with st.expander("Demand Charges ($/kW)", expanded=True):
+                _cr_demand_labels: dict[int, str] = {}
+                _cr_dcomments = _cr_extracted.get("demandcomments", "")
+                if _cr_dcomments:
+                    for _dm in _re.finditer(r"Period\s+(\d+)\s*:\s*([^.]+)", _cr_dcomments):
+                        _cr_demand_labels[int(_dm.group(1))] = _dm.group(2).strip()
+                _cr_drows = []
+                for i, period in enumerate(_cr_demand):
+                    rate = period[0].get("rate", 0) if period else 0
+                    label = _cr_demand_labels.get(i, "—")
+                    _cr_drows.append({"Period": i, "Type": label, "Rate ($/kW)": f"${rate:.2f}"})
+                st.table(pd.DataFrame(_cr_drows))
+
+        # Flat demand
+        _cr_flat = _cr_extracted.get("flatdemandstructure")
+        if _cr_flat:
+            _cr_flat_rate = _cr_flat[0][0].get("rate", 0) if _cr_flat and _cr_flat[0] else 0
+            st.caption(f"**Flat Demand Charge:** ${_cr_flat_rate:.2f}/kW")
+
+        # Fixed charges
+        _cr_fixed = _cr_extracted.get("fixedchargefirstmeter")
+        if _cr_fixed:
+            st.caption(f"**Fixed Charge:** ${_cr_fixed:.5f}/{_cr_extracted.get('fixedchargeunits', '$/day')}")
+
+        # Energy comments
+        if _cr_extracted.get("energycomments"):
+            with st.expander("AI Period Descriptions"):
+                st.write(_cr_extracted["energycomments"])
+
+        # ---- Save ----
+        st.markdown("---")
+        _cr_save_c1, _cr_save_c2 = st.columns([2, 1])
+        with _cr_save_c1:
+            _cr_save_name = st.text_input(
+                "Save Name",
+                value=_cr_extracted.get("label", ""),
+                placeholder="e.g., PGE_AG-C_2026",
+                key="cr_save_name",
+            )
+        with _cr_save_c2:
+            _cr_save_btn = st.button(
+                "Save Custom Rate",
+                disabled=(not _cr_save_name),
+                type="primary",
+            )
+
+        if _cr_save_btn and _cr_save_name:
+            try:
+                _cr_saved_path = save_custom_tariff(
+                    _cr_save_name, _cr_extracted, ECC_TARIFFS_DIR,
+                )
+                st.success(f"Saved as '{os.path.basename(_cr_saved_path)}'")
+                st.session_state["custom_rate_extracted"] = None
+                st.session_state["custom_rate_warnings"] = None
+                st.rerun()
+            except Exception as e:
+                st.error(f"Save failed: {e}")
+
+
 st.title("PV Solar Rate Simulator")
 st.markdown(
     '<p style="font-size: 12px; color: rgba(150,150,150,0.9); margin-top: -10px;">'
@@ -1792,12 +2046,14 @@ with st.sidebar:
     # --- 3. Load Profile ---
     st.subheader("3. Load Profile")
 
+    # Initialize radio key from load_mode if not yet set
+    if "load_mode_radio" not in st.session_state:
+        st.session_state["load_mode_radio"] = st.session_state.get("load_mode", "Single Meter")
     load_mode = st.radio(
         "Configuration",
         ["Single Meter", "NEM-A Aggregation"],
         horizontal=True,
         key="load_mode_radio",
-        index=0 if st.session_state.get("load_mode", "Single Meter") == "Single Meter" else 1,
     )
     st.session_state["load_mode"] = load_mode
 
@@ -1828,6 +2084,7 @@ with st.sidebar:
                     st.session_state["load_8760"] = pd.Series(_sb_vals, index=_sb_dt, name="load_kwh")
                     st.session_state["_raw_load_8760"] = st.session_state["load_8760"].copy()
                     st.session_state["load_mode"] = "Single Meter"
+                    st.session_state["load_mode_radio"] = "Single Meter"
                     st.sidebar.success(
                         f"Loaded '{_sb_sel_name}': {_sb_vals.sum():,.0f} kWh/yr, "
                         f"Peak: {_sb_vals.max():,.1f} kW"
@@ -2148,6 +2405,12 @@ with st.sidebar:
     if not nem_switch:
         # Single export section
         nem_regime_1 = st.selectbox("NEM Regime", nem_options, index=2, key="sb_nem_regime_1")
+        if billing_engine == "ECC" and nem_regime_1 in ("NEM-1", "NEM-2"):
+            st.warning(
+                "The ECC engine does not support TOU netting or credit carryover used by "
+                f"{nem_regime_1}. Annual projections may be inaccurate. "
+                "Use the Custom billing engine for full NEM-1/NEM-2 support."
+            )
         if nem_regime_1 in ("NEM-1", "NEM-2"):
             nsc_rate, nbc_rate, billing_option = _render_nem12_widgets("", nem_regime_1)
             st.session_state["nsc_rate"] = nsc_rate
@@ -2170,6 +2433,12 @@ with st.sidebar:
         st.markdown("---")
         st.markdown("**Section 1 — Export Rates**")
         nem_regime_1 = st.selectbox("NEM Regime", nem_options, index=0, key="sb_nem_regime_1")
+        if billing_engine == "ECC" and nem_regime_1 in ("NEM-1", "NEM-2"):
+            st.warning(
+                "The ECC engine does not support TOU netting or credit carryover used by "
+                f"{nem_regime_1}. Annual projections may be inaccurate. "
+                "Use the Custom billing engine for full NEM-1/NEM-2 support."
+            )
         num_years_1 = st.number_input(
             "Tenor (years)", min_value=1,
             max_value=max(1, system_life_years - 1),
@@ -2210,13 +2479,10 @@ with st.sidebar:
 
     # --- 6. Battery (BESS) ---
     st.subheader("6. BESS")
-    if billing_engine == "ECC":
-        st.info("Battery optimization is not yet available with the ECC billing engine.")
     battery_enabled = st.toggle(
         "Enable Battery Storage", value=False, key="bess_toggle",
-        disabled=(billing_engine == "ECC"),
     )
-    st.session_state["battery_enabled"] = battery_enabled if billing_engine != "ECC" else False
+    st.session_state["battery_enabled"] = battery_enabled
 
     battery_hours = st.number_input(
         "Battery Duration (hours)",
@@ -2401,6 +2667,12 @@ with st.sidebar:
         help="Applied annually to load profile (increases consumption & peak demand)",
         key="sb_load_escalator",
     )
+    compound_escalation = st.toggle(
+        "Compound Escalation",
+        value=True,
+        key="sb_compound_escalation",
+        help="Compound: (1 + rate%)^yr. Linear: 1 + rate% × yr. Compound is more realistic.",
+    )
 
     # --- 8. System Cost ---
     st.subheader("8. System Cost (for Payback)")
@@ -2448,6 +2720,7 @@ if save_btn and sim_name and st.session_state.get("billing_result") is not None:
         degradation_pct=annual_degradation_pct,
         nbc_rate_2=st.session_state.get("nbc_rate_2", 0.0) if nem_switch else 0.0,
         nsc_rate_2=st.session_state.get("nsc_rate_2", 0.0) if nem_switch else 0.0,
+        compound_escalation=compound_escalation,
     )
 
     # Build extra battery data for saved view parity
@@ -2473,6 +2746,7 @@ if save_btn and sim_name and st.session_state.get("billing_result") is not None:
             degradation_pct=annual_degradation_pct,
             nbc_rate_2=st.session_state.get("nbc_rate_2", 0.0) if nem_switch else 0.0,
             nsc_rate_2=st.session_state.get("nsc_rate_2", 0.0) if nem_switch else 0.0,
+            compound_escalation=compound_escalation,
         ).to_dict(orient="records")
         extra_save["projection_batt"] = build_annual_projection(
             result=batt_res, system_cost=system_cost,
@@ -2488,6 +2762,7 @@ if save_btn and sim_name and st.session_state.get("billing_result") is not None:
             degradation_pct=annual_degradation_pct,
             nbc_rate_2=st.session_state.get("nbc_rate_2", 0.0) if nem_switch else 0.0,
             nsc_rate_2=st.session_state.get("nsc_rate_2", 0.0) if nem_switch else 0.0,
+            compound_escalation=compound_escalation,
         ).to_dict(orient="records")
 
         batt_cap = st.session_state.get("battery_capacity_kwh", 0)
@@ -3149,6 +3424,7 @@ if run_sim:
             if _ecc_export is None:
                 _ecc_dt = pd.date_range(start=f"{cod_year}-01-01 00:00", periods=8760, freq="h")
                 _ecc_export = pd.Series(np.zeros(8760), index=_ecc_dt, name="export_rate_per_kwh")
+                st.warning("No export rates loaded — export credits will be $0. Load ACC/avoided cost rates in Section 5 for accurate NEM-3/NVBT results.")
             result_pv_only = run_ecc_billing_simulation(
                 load_8760=st.session_state["load_8760"],
                 production_8760=st.session_state["production_8760"],
@@ -3160,6 +3436,27 @@ if run_sim:
             st.session_state["billing_result"] = result_pv_only
             st.session_state["billing_result_batt"] = None
             st.session_state["sizing_result"] = None
+
+            # ECC battery dispatch
+            if st.session_state.get("battery_enabled") and st.session_state.get("battery_config"):
+                batt_cap = st.session_state.get("battery_capacity_kwh", 0)
+                if batt_cap > 0:
+                    _overlay.markdown(
+                        _progress_overlay_html(50, "Running ECC + Battery dispatch..."),
+                        unsafe_allow_html=True,
+                    )
+                    result_batt = run_ecc_billing_simulation(
+                        load_8760=st.session_state["load_8760"],
+                        production_8760=st.session_state["production_8760"],
+                        cost_calculator=st.session_state["ecc_cost_calculator"],
+                        export_rates_8760=_ecc_export,
+                        tariff_data=st.session_state.get("ecc_tariff_data"),
+                        battery_config=st.session_state["battery_config"],
+                        capacity_kwh=batt_cap,
+                        monthly_dispatch=st.session_state.get("battery_fast_dispatch", True),
+                    )
+                    st.session_state["billing_result"] = result_batt
+                    st.session_state["billing_result_batt"] = result_batt
 
             _overlay.markdown(
                 _progress_overlay_html(50, "ECC simulation complete."),
@@ -3569,6 +3866,7 @@ if st.session_state["billing_result"] is not None:
         years=system_life_years,
         export_rates_multiyear=st.session_state.get("export_rates_multiyear"),
         result_pv_only=pv_only_for_display,
+        compound_escalation=compound_escalation,
         **_common_nem_kw,
     )
 
@@ -3607,7 +3905,7 @@ if st.session_state["billing_result"] is not None:
         totals_row = pd.DataFrame([totals])
         display_with_totals = pd.concat([display_df, totals_row], ignore_index=True)
 
-        st.markdown(render_styled_table(display_with_totals, bold_last_row=True), unsafe_allow_html=True)
+        st.markdown(render_styled_table(display_with_totals, bold_last_row=True, bold_cols=["Month"]), unsafe_allow_html=True)
 
         # Show NSC adjustment info if applicable
         if hasattr(result, 'annual_nsc_adjustment') and result.annual_nsc_adjustment > 0:
@@ -3629,29 +3927,58 @@ if st.session_state["billing_result"] is not None:
         st.subheader(f"Annual Summary ({system_life_years}-Year)")
         projection_df = _main_projection
 
-        # Format for display — negate cost outflow columns so they show as (red)
-        display_proj = projection_df.copy()
-        outflow_dollar_cols = [
-            "Bill w/o Solar ($)", "Energy ($)", "Demand ($)",
-            "Fixed ($)", "Bill w/ Solar ($)",
-        ]
-        for col in outflow_dollar_cols:
-            if col in display_proj.columns:
-                display_proj[col] = display_proj[col].apply(lambda x: -x)
-        if "Export (kWh)" in display_proj.columns:
-            display_proj["Export (kWh)"] = display_proj["Export (kWh)"].apply(lambda x: -x)
+        # Store projection for fragment access
+        st.session_state["_proj_display_df"] = projection_df.copy()
 
-        kwh_proj_cols = [c for c in display_proj.columns if "(kWh)" in c]
-        for col in kwh_proj_cols:
-            display_proj[col] = display_proj[col].apply(fmt_num)
-        kw_proj_cols = [c for c in display_proj.columns if "kW" in c and "(kWh)" not in c]
-        for col in kw_proj_cols:
-            display_proj[col] = display_proj[col].apply(fmt_num)
-        dollar_proj_cols = [c for c in display_proj.columns if "($)" in c]
-        for col in dollar_proj_cols:
-            display_proj[col] = display_proj[col].apply(fmt_dollar)
+        @st.fragment
+        def _render_projection_table():
+            _proj_detail = st.radio(
+                "View", ["Simple", "Detailed"], horizontal=True,
+                key="proj_view_toggle", label_visibility="collapsed",
+            )
 
-        st.markdown(render_styled_table(display_proj), unsafe_allow_html=True)
+            display_proj = st.session_state["_proj_display_df"].copy()
+            outflow_dollar_cols = [
+                "Bill w/o Solar ($)", "Energy ($)", "Demand ($)",
+                "Fixed ($)", "Bill w/ Solar ($)",
+            ]
+            for col in outflow_dollar_cols:
+                if col in display_proj.columns:
+                    display_proj[col] = display_proj[col].apply(lambda x: -x)
+            if "Export (kWh)" in display_proj.columns:
+                display_proj["Export (kWh)"] = display_proj["Export (kWh)"].apply(lambda x: -x)
+
+            kwh_proj_cols = [c for c in display_proj.columns if "(kWh)" in c]
+            for col in kwh_proj_cols:
+                display_proj[col] = display_proj[col].apply(fmt_num)
+            kw_proj_cols = [c for c in display_proj.columns if "kW" in c and "(kWh)" not in c]
+            for col in kw_proj_cols:
+                display_proj[col] = display_proj[col].apply(fmt_num)
+            dollar_proj_cols = [c for c in display_proj.columns if "($)" in c]
+            for col in dollar_proj_cols:
+                display_proj[col] = display_proj[col].apply(fmt_dollar)
+
+            if _proj_detail == "Simple":
+                _drop_cols = [
+                    "Load (kWh)", "Customer Load (kWh)", "Solar (kWh)",
+                    "Solar Offset (kWh)", "Import (kWh)", "Export (kWh)",
+                    "Export Peak (kWh)", "Export Off-Peak (kWh)",
+                    "Demand kW (PV)", "Demand kW (PV+BESS)",
+                    "Energy ($)", "Demand ($)", "Fixed ($)",
+                    "NBC ($)", "NSC Adj ($)",
+                ]
+                display_proj = display_proj.drop(
+                    columns=[c for c in _drop_cols if c in display_proj.columns]
+                )
+
+            _proj_bold = ["Calendar Year"] if "Calendar Year" in display_proj.columns else ["Year"]
+            st.markdown(render_styled_table(
+                display_proj,
+                bold_cols=_proj_bold,
+                highlight_cols=["Cumulative Savings ($)"],
+            ), unsafe_allow_html=True)
+
+        _render_projection_table()
 
         # Cumulative savings chart
         import plotly.graph_objects as go
@@ -3975,6 +4302,7 @@ if st.session_state["billing_result"] is not None:
                 export_rates_multiyear_2=st.session_state.get("export_rates_multiyear_2") if nem_switch else None,
                 cod_date=cod_date,
                 degradation_pct=annual_degradation_pct,
+                compound_escalation=compound_escalation,
             )
             it_df = build_indexed_tariff_monthly(
                 it_monthly,
@@ -4038,6 +4366,7 @@ if st.session_state["billing_result"] is not None:
             years=dl_monthly_years,
             export_rates_multiyear=st.session_state.get("export_rates_multiyear"),
             result_pv_only=pv_only_for_display,
+            compound_escalation=compound_escalation,
             **_common_nem_kw,
         )
 
@@ -4056,6 +4385,7 @@ if st.session_state["billing_result"] is not None:
                 export_rates_multiyear_2=st.session_state.get("export_rates_multiyear_2") if nem_switch else None,
                 cod_date=cod_date,
                 degradation_pct=annual_degradation_pct,
+                compound_escalation=compound_escalation,
             )
             _monthly_label = (
                 "Download Monthly Summary CSV"
@@ -4247,6 +4577,7 @@ if st.session_state["billing_result"] is not None:
                             years=prop_term,
                             export_rates_multiyear=st.session_state.get("export_rates_multiyear"),
                             result_pv_only=pv_only_for_display,
+                            compound_escalation=compound_escalation,
                             **_common_nem_kw,
                         )
 
