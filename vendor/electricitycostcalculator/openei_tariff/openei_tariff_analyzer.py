@@ -1,8 +1,8 @@
 __author__ = 'Olivier Van Cutsem'
 
 # Import COST CALCULATOR LIB
-from electricitycostcalculator.cost_calculator.tariff_structure import *
-from electricitycostcalculator.cost_calculator.rate_structure import *
+from vendor.electricitycostcalculator.cost_calculator.tariff_structure import *
+from vendor.electricitycostcalculator.cost_calculator.rate_structure import *
 
 import time
 from datetime import datetime
