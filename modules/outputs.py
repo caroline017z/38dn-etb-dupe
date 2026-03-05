@@ -243,6 +243,11 @@ def _compute_tou_netted_monthly(hourly_detail: pd.DataFrame) -> tuple[
 ]:
     """Compute TOU-netted energy cost and export credit from hourly data.
 
+    .. deprecated::
+        Annual totals are now pre-computed in BillingResult.tou_annual_energy
+        and BillingResult.tou_annual_credit.  This function is retained only
+        for callers that need the per-month breakdown dicts.
+
     Returns:
         (annual_tou_energy, annual_tou_credit,
          per_month_tou_energy, per_month_tou_credit)
@@ -306,6 +311,8 @@ def build_annual_projection(
     export_rates_multiyear_2: dict[int, "pd.Series"] | None = None,
     cod_year: int | None = None,
     degradation_pct: float = 0.0,
+    nbc_rate_2: float = 0.0,
+    nsc_rate_2: float = 0.0,
 ) -> pd.DataFrame:
     """
     Build a multi-year annual projection table.
@@ -365,20 +372,36 @@ def build_annual_projection(
     load_mult = load_escalator_pct / 100.0
     degrad_rate = degradation_pct / 100.0
 
-    # Precompute BOTH energy baselines from hourly data so regime-shift years
-    # use the correct energy cost:
-    #   raw_energy = sum(import_kwh * energy_rate) — NEM-3/NVBT (no netting)
+    # Precompute BOTH energy baselines so regime-shift years use the correct
+    # energy cost:
+    #   raw_energy = sum(import_kwh * energy_rate) across ALL meters — NEM-3/NVBT
     #   tou_energy = positive side of TOU per-period netting — NEM-1/2
     #   tou_credit = negative side of TOU per-period netting — NEM-1/2
-    raw_year1_energy = float(result.hourly_detail["energy_cost"].sum())
-    tou_year1_energy, year1_tou_credit, _, _ = _compute_tou_netted_monthly(
-        result.hourly_detail,
+    # NOTE: result.raw_annual_energy aggregates ALL meters (including NEM-A
+    # aggregated meters), unlike result.hourly_detail which only has the
+    # generating meter.
+    raw_year1_energy = result.raw_annual_energy
+    tou_year1_energy = result.tou_annual_energy
+    year1_tou_credit = result.tou_annual_credit
+
+    # Split raw energy into generating-meter vs aggregated-meter portions.
+    # For NEM-A, hourly_detail only has the generating meter; the difference
+    # is the aggregated meters' raw energy (load-only, no solar).
+    # For single-meter, _agg_raw_energy = 0.
+    _gen_raw_energy = float(result.hourly_detail["energy_cost"].sum())
+    _agg_raw_energy = raw_year1_energy - _gen_raw_energy
+
+    # Blended import rate ($/kWh) for valuing kWh that shift from export→import
+    # as solar degrades.  Uses the generating meter's hourly data since only the
+    # generating meter has solar (and thus exports that shift to imports).
+    blended_import_rate = (
+        _gen_raw_energy / year1_import_kwh if year1_import_kwh > 0 else 0.0
     )
 
     rows = []
     cumulative_savings = 0.0
     # Multi-year export rates: keyed by calendar year (e.g. {2026: Series, 2027: ...})
-    if export_rates_multiyear and len(export_rates_multiyear) > 1:
+    if export_rates_multiyear and len(export_rates_multiyear) >= 1:
         _my_keys = sorted(export_rates_multiyear.keys())
         multiyear_start = _my_keys[0]   # first calendar year in CSV
         multiyear_max = _my_keys[-1]     # last calendar year in CSV
@@ -387,7 +410,7 @@ def build_annual_projection(
         multiyear_max = 0
 
     # Multi-year export rates for regime 2
-    if export_rates_multiyear_2 and len(export_rates_multiyear_2) > 1:
+    if export_rates_multiyear_2 and len(export_rates_multiyear_2) >= 1:
         _my2_keys = sorted(export_rates_multiyear_2.keys())
         multiyear_start_2 = _my2_keys[0]
         multiyear_max_2 = _my2_keys[-1]
@@ -405,12 +428,31 @@ def build_annual_projection(
         # Load grows → more import, higher peaks; solar declines → less export
         yr_load_kwh = year1_load_kwh * load_factor
         yr_solar_kwh = year1_solar_kwh * solar_factor
-        # Net increase in demand from load growth + solar decline
-        net_delta = year1_load_kwh * (load_factor - 1) + year1_solar_kwh * (1.0 - solar_factor)
-        # Extra demand first absorbs exports, remainder increases import
-        yr_export_kwh = max(0, year1_export_kwh - net_delta)
+
+        # Solar degradation splits proportionally between reduced self-consumption
+        # and reduced exports, based on Year 1 ratios.
+        year1_self_consumption = year1_solar_kwh - year1_export_kwh
+        if year1_solar_kwh > 0:
+            self_consumption_frac = year1_self_consumption / year1_solar_kwh
+            export_frac = year1_export_kwh / year1_solar_kwh
+        else:
+            self_consumption_frac = 1.0
+            export_frac = 0.0
+
+        # Lost solar kWh from degradation
+        lost_solar = year1_solar_kwh * (1.0 - solar_factor)
+        # Lost solar kWh from load growth (more self-consumption absorbs exports)
+        extra_load = year1_load_kwh * (load_factor - 1)
+        # Degradation splits proportionally; load growth absorbs exports first
+        lost_export_from_degrad = lost_solar * export_frac
+        lost_self_from_degrad = lost_solar * self_consumption_frac
+        lost_export_from_load = min(extra_load, max(0, year1_export_kwh - lost_export_from_degrad))
+
+        yr_export_kwh = max(0, year1_export_kwh - lost_export_from_degrad - lost_export_from_load)
         absorbed = year1_export_kwh - yr_export_kwh
-        yr_import_kwh = year1_import_kwh + (net_delta - absorbed)
+        # Import increases from: (a) lost self-consumption from degradation,
+        # (b) load growth not absorbed by exports
+        yr_import_kwh = year1_import_kwh + lost_self_from_degrad + max(0, extra_load - lost_export_from_load)
 
         # Export TOU volumes scale proportionally to total export
         export_volume_ratio = yr_export_kwh / year1_export_kwh if year1_export_kwh > 0 else 1.0
@@ -446,16 +488,30 @@ def build_annual_projection(
         #   NEM-3/NVBT: raw import energy cost (no netting, exports valued separately)
         _is_tou_netted = active_regime in ("NEM-1", "NEM-2") or active_regime.startswith("NEM-A")
         if _is_tou_netted:
-            yr_energy = tou_year1_energy * load_factor * rate_factor
+            # Base TOU energy scales with load growth and rate escalation.
+            # Solar degradation reduces the TOU netting benefit: kWh that were
+            # exported (offsetting imports within each TOU period) now stay on-site
+            # as load.  The 'absorbed' kWh represent this shift — they were
+            # previously netted against imports, saving $ at the blended TOU rate.
+            # That savings is now lost, so add it back as additional energy cost.
+            degradation_energy_adj = absorbed * blended_import_rate * rate_factor
+            yr_energy = tou_year1_energy * load_factor * rate_factor + degradation_energy_adj
         else:
-            yr_energy = raw_year1_energy * import_ratio * rate_factor
+            # NEM-3/NVBT: raw import energy cost (no TOU netting).
+            # For NEM-A, generating meter imports scale with import_ratio
+            # (affected by solar degradation + load growth), while aggregated
+            # meters' imports scale with load_factor only (no solar offset).
+            yr_energy = (
+                _gen_raw_energy * import_ratio * rate_factor
+                + _agg_raw_energy * load_factor * rate_factor
+            )
 
         # Compute export credit based on active regime
         if _is_tou_netted:
             # TOU-netted credit scaled by rate escalation and volume change
             yr_export = year1_tou_credit * rate_factor * volume_ratio
         elif active_my_max > 0 and active_multiyear:
-            # NEM-3/NVBT with multi-year CSV: look up by actual calendar year
+            # NEM-3/NVBT with export rate CSV: look up by actual calendar year
             calendar_year = (cod_year if cod_year is not None else active_my_start) + (yr - 1)
             rate_year = max(active_my_start, min(calendar_year, active_my_max))
             yr_export_rates = active_multiyear[rate_year].values  # 8760 array
@@ -468,17 +524,33 @@ def build_annual_projection(
             else:
                 export_esc = 1.0
             yr_export = base_credit * volume_ratio * export_esc
+        elif nem_regime_2 and num_years_1 and yr > num_years_1:
+            # Regime has switched but no export CSV for regime 2 —
+            # year1_export is from regime 1 (e.g., NEM-1 retail credit)
+            # and cannot be used for regime 2 (e.g., NEM-3 avoided cost).
+            # Default to 0; user should upload regime 2 export rates.
+            yr_export = 0.0
         else:
-            # Single-year / flat / auto: existing rate escalation
+            # Same regime, no CSV: scale Year 1 export credit
             yr_export = year1_export * rate_factor * volume_ratio
 
         # NBC: only applies during NEM-2 regime years (including NEM-A (NEM-2))
         if active_regime == "NEM-2" or active_regime == "NEM-A (NEM-2)":
-            yr_nbc = year1_nbc * rate_factor if year1_nbc > 0 else 0.0
+            if nem_regime_2 and num_years_1 and yr > num_years_1 and nbc_rate_2 > 0:
+                # Regime switched TO NEM-2: use nbc_rate_2 * import kWh
+                yr_nbc = nbc_rate_2 * yr_import_kwh * rate_factor
+            else:
+                yr_nbc = year1_nbc * rate_factor if year1_nbc > 0 else 0.0
         else:
             yr_nbc = 0.0
 
-        yr_bill_solar = yr_energy + yr_demand + yr_fixed + yr_nbc - yr_export
+        # NSC adjustment: applies when regime-2 is NEM-1 or NEM-2
+        yr_nsc = 0.0
+        if nem_regime_2 and num_years_1 and yr > num_years_1 and nsc_rate_2 > 0:
+            if active_regime in ("NEM-1", "NEM-2", "NEM-A (NEM-1)", "NEM-A (NEM-2)"):
+                yr_nsc = nsc_rate_2 * yr_export_kwh * rate_factor
+
+        yr_bill_solar = yr_energy + yr_demand + yr_fixed + yr_nbc + yr_nsc - yr_export
         yr_export_display = -yr_export  # negative for display
 
         # Baseline (no solar): load grows and rates increase
@@ -494,9 +566,15 @@ def build_annual_projection(
         }
         if cod_year is not None:
             row["Calendar Year"] = cod_year + yr - 1
+        # Self-consumed solar = total generation - exports
+        yr_self_consumed = yr_solar_kwh - max(yr_export_kwh, 0)
+        # Net grid load = import - export (what flows through the meter from grid)
+        yr_net_grid = yr_import_kwh - max(yr_export_kwh, 0)
         row.update({
-            "Load (kWh)": round(yr_load_kwh),
+            "Load (kWh)": round(yr_net_grid),
+            "Customer Load (kWh)": round(yr_load_kwh),
             "Solar (kWh)": round(yr_solar_kwh),
+            "Solar Offset (kWh)": round(yr_self_consumed),
             "Import (kWh)": round(yr_import_kwh),
             "Export (kWh)": round(max(yr_export_kwh, 0)),
             "Export Peak (kWh)": round(yr_export_peak_kwh),
@@ -514,6 +592,8 @@ def build_annual_projection(
         _any_nem2 = (nem_regime_1 == "NEM-2") or (nem_regime_2 == "NEM-2")
         if _any_nem2 or year1_nbc > 0:
             row["NBC ($)"] = round(yr_nbc)
+        if yr_nsc > 0:
+            row["NSC Adj ($)"] = round(yr_nsc)
         row.update({
             "Export Credit ($)": round(yr_export_display),
             "Bill w/ Solar ($)": round(yr_bill_solar),
@@ -846,7 +926,10 @@ def build_indexed_tariff_annual(
 ) -> pd.DataFrame:
     """Build an annual Indexed Tariff table solving for PPA rate per year.
 
-    PPA Rate = [(1 - savings_frac) × Bill w/o Solar - Bill w/ Solar] / Solar kWh
+    Utility Savings = Bill w/o Solar - Bill w/ Solar
+    PPA Cost  = Utility Savings × (1 - savings_frac)
+    PPA Rate  = PPA Cost / Solar kWh
+    Customer Savings = Utility Savings × savings_frac
     """
     rows = []
     for _, row in annual_proj_df.iterrows():
@@ -860,19 +943,21 @@ def build_indexed_tariff_annual(
         bill_no_solar = row["Bill w/o Solar ($)"]
         bill_solar = row["Bill w/ Solar ($)"]
         solar_kwh = row["Solar (kWh)"]
+        utility_savings = bill_no_solar - bill_solar
 
         if solar_kwh > 0:
-            ppa_rate = ((1.0 - savings_frac) * bill_no_solar - bill_solar) / solar_kwh
+            ppa_rate = utility_savings * (1.0 - savings_frac) / solar_kwh
         else:
             ppa_rate = 0.0
 
+        customer_savings = utility_savings * savings_frac
         r = {"Year": yr}
         if "Calendar Year" in row.index:
             r["Calendar Year"] = int(row["Calendar Year"])
-        customer_savings = bill_no_solar - bill_solar
         r.update({
             "Bill w/o Solar ($)": round(bill_no_solar, 2),
             "Bill w/ Solar ($)": round(bill_solar, 2),
+            "Utility Savings ($)": round(utility_savings, 2),
             "Customer Savings ($)": round(customer_savings, 2),
             "Solar (kWh)": round(solar_kwh, 0),
             "Savings Target (%)": round(savings_target, 1),
@@ -894,7 +979,10 @@ def build_indexed_tariff_monthly(
 ) -> pd.DataFrame:
     """Build a monthly Indexed Tariff table solving for PPA rate per month.
 
-    PPA Rate = [(1 - savings_frac) × Baseline Bill - Net Bill] / Solar kWh
+    Utility Savings = Baseline Bill - Net Bill
+    PPA Cost  = Utility Savings × (1 - savings_frac)
+    PPA Rate  = PPA Cost / Solar kWh
+    Customer Savings = Utility Savings × savings_frac
     """
     rows = []
     for _, row in multiyear_monthly_df.iterrows():
@@ -911,20 +999,22 @@ def build_indexed_tariff_monthly(
             baseline_bill = 0.0
         net_bill = row["Net Bill ($)"]
         solar_kwh = row["Solar (kWh)"]
+        utility_savings = baseline_bill - net_bill
 
         if solar_kwh > 0:
-            ppa_rate = ((1.0 - savings_frac) * baseline_bill - net_bill) / solar_kwh
+            ppa_rate = utility_savings * (1.0 - savings_frac) / solar_kwh
         else:
             ppa_rate = 0.0
 
+        customer_savings = utility_savings * savings_frac
         r = {"Year": yr}
         if "Calendar Year" in row.index:
             r["Calendar Year"] = int(row["Calendar Year"])
-        customer_savings = baseline_bill - net_bill
         r.update({
             "Month": row["Month"],
             "Bill w/o Solar ($)": round(baseline_bill, 2),
             "Net Bill ($)": round(net_bill, 2),
+            "Utility Savings ($)": round(utility_savings, 2),
             "Customer Savings ($)": round(customer_savings, 2),
             "Solar (kWh)": round(solar_kwh, 0),
             "Savings Target (%)": round(savings_target, 1),

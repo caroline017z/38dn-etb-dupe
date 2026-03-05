@@ -121,7 +121,8 @@ def optimize_capacity_kwh(
             best_dr = dr
 
     table = pd.DataFrame(rows)
-    assert best_dr is not None
+    if best_dr is None:
+        raise ValueError("No valid dispatch result found during sizing sweep")
     return SizingResult(
         best_size_kwh=best_size,
         best_dispatch=best_dr,

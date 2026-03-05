@@ -9,5 +9,4 @@ cvxpy==1.8.1
 openpyxl==3.1.5
 lxml==6.0.2
 holidays==0.90
-matplotlib==3.10.8
 python-pptx==1.0.2

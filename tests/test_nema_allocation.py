@@ -292,10 +292,14 @@ class TestCreditValuation:
             annual_unallocated_kwh=0.0,
         )
 
-        credit_values = value_allocation_at_retail_rates(allocation, [agg_meter])
+        monthly_credits = value_allocation_at_retail_rates(allocation, [agg_meter])
 
-        # 6000 kWh * $0.20/kWh = $1200
-        assert credit_values["Agg"] == pytest.approx(1200.0, rel=0.01)
+        # 6000 kWh * $0.20/kWh = $1200 total across all months
+        annual_credit = sum(monthly_credits["Agg"].values())
+        assert annual_credit == pytest.approx(1200.0, rel=0.01)
+        # Each month: 500 kWh * $0.20 = $100
+        for month in range(1, 13):
+            assert monthly_credits["Agg"][month] == pytest.approx(100.0, rel=0.01)
 
 
 # ---------------------------------------------------------------------------
