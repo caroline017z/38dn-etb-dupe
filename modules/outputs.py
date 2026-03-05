@@ -12,6 +12,31 @@ from io import StringIO, BytesIO
 from .billing import BillingResult
 
 
+def _compute_export_cagr(multiyear: dict[int, "pd.Series"], n_trailing: int = 10) -> float:
+    """Compute the CAGR of average export rates over the last n_trailing years of a CSV.
+
+    Returns the annual growth rate (e.g. 0.02 for 2%/yr). Returns 0.0 if
+    fewer than 2 years of data are available.
+    """
+    keys = sorted(multiyear.keys())
+    if len(keys) < 2:
+        return 0.0
+    # Use the last n_trailing years (or all years if fewer available)
+    tail_keys = keys[-n_trailing:] if len(keys) >= n_trailing else keys
+    if len(tail_keys) < 2:
+        return 0.0
+    first_yr = tail_keys[0]
+    last_yr = tail_keys[-1]
+    avg_first = float(multiyear[first_yr].mean())
+    avg_last = float(multiyear[last_yr].mean())
+    if avg_first <= 0:
+        return 0.0
+    span = last_yr - first_yr
+    if span <= 0:
+        return 0.0
+    return (avg_last / avg_first) ** (1.0 / span) - 1.0
+
+
 MONTH_NAMES = [
     "Jan", "Feb", "Mar", "Apr", "May", "Jun",
     "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
@@ -61,6 +86,7 @@ def render_styled_table(
     df: pd.DataFrame,
     bold_last_row: bool = False,
     bold_cols: list[str] | None = None,
+    highlight_cols: list[str] | None = None,
 ) -> str:
     """Render a DataFrame as an HTML table string with red-negative styling.
 
@@ -71,11 +97,13 @@ def render_styled_table(
         df: Pre-formatted DataFrame (all values already strings).
         bold_last_row: If True, bold the last row (TOTAL).
         bold_cols: Column names whose headers and values should be bold.
+        highlight_cols: Column names to highlight with a light blue background.
 
     Returns:
         HTML string suitable for st.markdown(..., unsafe_allow_html=True).
     """
     bold_set = set(bold_cols) if bold_cols else set()
+    highlight_set = set(highlight_cols) if highlight_cols else set()
     col_list = list(df.columns)
 
     html = [
@@ -103,7 +131,9 @@ def render_styled_table(
             cell_style = f"text-align:right; padding:4px 8px; white-space:nowrap; {col_bold}"
             if j == 0:
                 cell_style = f"text-align:left; padding:4px 8px; white-space:nowrap; {col_bold}"
-            if "(" in s:
+            if col_list[j] in highlight_set:
+                cell_style += " background-color:#e3f2fd;"
+            elif "(" in s:
                 cell_style += " color:#cc0000; background-color:#ffe0e0;"
             html.append(f"<td style='{cell_style}'>{_esc(s)}</td>")
         html.append("</tr>")
@@ -186,11 +216,6 @@ def build_monthly_summary_display(
         "export_credit": "Export Credit ($)",
         "net_bill": "Net Bill ($)",
     })
-
-    # Negate export_credit so it displays as a negative value in the table,
-    # making the equation visible: Energy + Demand + Fixed + Export Credit = Net Bill
-    if "export_credit" in df.columns:
-        df["export_credit"] = -df["export_credit"]
 
     # Only include columns that exist
     display_cols = [c for c in display_cols if c in df.columns]
@@ -307,15 +332,18 @@ def build_annual_projection(
     degradation_pct: float = 0.0,
     nbc_rate_2: float = 0.0,
     nsc_rate_2: float = 0.0,
+    compound_escalation: bool = True,
 ) -> pd.DataFrame:
     """
     Build a multi-year annual projection table.
 
     Escalators:
-      - rate_escalator_pct: applied linearly to TOU energy rates each year
-      - load_escalator_pct: applied linearly to load profile each year
+      - rate_escalator_pct: applied to TOU energy rates each year
+      - load_escalator_pct: applied to load profile each year
         (increases energy consumption AND peak demand)
       - degradation_pct: annual solar production decline (e.g. 0.5 for 0.5%/yr)
+      - compound_escalation: if True, use compound formula (1+r)^n;
+        if False, use linear formula 1 + r*n
 
     Args:
         result: Year-1 BillingResult
@@ -328,6 +356,7 @@ def build_annual_projection(
         nem_regime_2: NEM regime for the second period (None if no switch)
         num_years_1: Number of years under regime 1 (None if no switch)
         export_rates_multiyear_2: Multi-year export rates for regime 2
+        compound_escalation: Use compound (True) or linear (False) escalation
     """
     year1_energy = float(result.monthly_summary["energy_cost"].sum())
     year1_demand = float(result.monthly_summary["total_demand_charge"].sum())
@@ -411,22 +440,30 @@ def build_annual_projection(
         _my_keys = sorted(export_rates_multiyear.keys())
         multiyear_start = _my_keys[0]   # first calendar year in CSV
         multiyear_max = _my_keys[-1]     # last calendar year in CSV
+        _export_cagr = _compute_export_cagr(export_rates_multiyear)
     else:
         multiyear_start = 0
         multiyear_max = 0
+        _export_cagr = 0.0
 
     # Multi-year export rates for regime 2
     if export_rates_multiyear_2 and len(export_rates_multiyear_2) >= 1:
         _my2_keys = sorted(export_rates_multiyear_2.keys())
         multiyear_start_2 = _my2_keys[0]
         multiyear_max_2 = _my2_keys[-1]
+        _export_cagr_2 = _compute_export_cagr(export_rates_multiyear_2)
     else:
         multiyear_start_2 = 0
         multiyear_max_2 = 0
+        _export_cagr_2 = 0.0
 
     for yr in range(1, years + 1):
-        rate_factor = 1.0 + rate_mult * (yr - 1)
-        load_factor = 1.0 + load_mult * (yr - 1)
+        if compound_escalation:
+            rate_factor = (1.0 + rate_mult) ** (yr - 1)
+            load_factor = (1.0 + load_mult) ** (yr - 1)
+        else:
+            rate_factor = 1.0 + rate_mult * (yr - 1)
+            load_factor = 1.0 + load_mult * (yr - 1)
 
         # Solar degrades compounding each year (year 1 = full output)
         solar_factor = (1.0 - degrad_rate) ** (yr - 1)
@@ -483,11 +520,13 @@ def build_annual_projection(
             active_multiyear = export_rates_multiyear_2
             active_my_start = multiyear_start_2
             active_my_max = multiyear_max_2
+            active_cagr = _export_cagr_2
         else:
             active_regime = nem_regime_1
             active_multiyear = export_rates_multiyear
             active_my_start = multiyear_start
             active_my_max = multiyear_max
+            active_cagr = _export_cagr
 
         # Energy cost depends on active regime:
         #   NEM-1/2 (and NEM-A): TOU-netted energy (lower because exports offset imports within each period)
@@ -495,12 +534,14 @@ def build_annual_projection(
         _is_tou_netted = active_regime in ("NEM-1", "NEM-2") or active_regime.startswith("NEM-A")
         if _is_tou_netted:
             # Base TOU energy scales with load growth and rate escalation.
-            # Solar degradation reduces the TOU netting benefit: kWh that were
-            # exported (offsetting imports within each TOU period) now stay on-site
-            # as load.  The 'absorbed' kWh represent this shift — they were
-            # previously netted against imports, saving $ at the blended TOU rate.
-            # That savings is now lost, so add it back as additional energy cost.
-            degradation_energy_adj = absorbed * blended_import_rate * rate_factor
+            # Solar degradation also increases energy cost: kWh that were
+            # self-consumed (offsetting grid imports) are now lost, forcing
+            # the customer to import those kWh at grid rates.
+            # NOTE: Only lost SELF-CONSUMPTION is added here.  Lost EXPORTS
+            # are already captured by the volume_ratio reduction on the TOU
+            # credit (yr_export below).  Using 'absorbed' (total export loss)
+            # would double-count with the credit reduction.
+            degradation_energy_adj = lost_self_from_degrad * blended_import_rate * rate_factor
             yr_energy = tou_year1_energy * load_factor * rate_factor + degradation_energy_adj
         else:
             # NEM-3/NVBT: raw import energy cost (no TOU netting).
@@ -523,13 +564,13 @@ def build_annual_projection(
             yr_export_rates = active_multiyear[rate_year].values  # 8760 array
             hourly_export = result.hourly_detail["export_kwh"].values  # 8760 array
             base_credit = float(np.sum(hourly_export * yr_export_rates))
-            # Apply rate escalation for projection years beyond the CSV range
-            if calendar_year > active_my_max:
+            # NEM-3 export rates come from the CSV — do NOT apply utility
+            # rate escalation.  Beyond the CSV range, extrapolate using
+            # the 10-year CAGR of the CSV's trailing years.
+            if calendar_year > active_my_max and active_cagr != 0.0:
                 overshoot = calendar_year - active_my_max
-                export_esc = 1.0 + rate_mult * overshoot
-            else:
-                export_esc = 1.0
-            yr_export = base_credit * volume_ratio * export_esc
+                base_credit *= (1.0 + active_cagr) ** overshoot
+            yr_export = base_credit * volume_ratio
         elif nem_regime_2 and num_years_1 and yr > num_years_1:
             # Regime has switched but no export CSV for regime 2 —
             # year1_export is from regime 1 (e.g., NEM-1 retail credit)
@@ -537,8 +578,13 @@ def build_annual_projection(
             # Default to 0; user should upload regime 2 export rates.
             yr_export = 0.0
         else:
-            # Same regime, no CSV: scale Year 1 export credit
-            yr_export = year1_export * rate_factor * volume_ratio
+            # Same regime, no CSV: scale Year 1 export credit.
+            # NEM-1/2 exports are retail-rate credits → escalate with utility rates.
+            # NEM-3 exports are avoided-cost credits → do NOT escalate.
+            if _is_tou_netted:
+                yr_export = year1_export * rate_factor * volume_ratio
+            else:
+                yr_export = year1_export * volume_ratio
 
         # NBC: only applies during NEM-2 regime years (including NEM-A (NEM-2))
         if active_regime == "NEM-2" or active_regime == "NEM-A (NEM-2)":
@@ -557,7 +603,6 @@ def build_annual_projection(
                 yr_nsc = nsc_rate_2 * yr_export_kwh * rate_factor
 
         yr_bill_solar = yr_energy + yr_demand + yr_fixed + yr_nbc + yr_nsc - yr_export
-        yr_export_display = -yr_export  # negative for display
 
         # Baseline (no solar): load grows and rates increase
         yr_baseline_energy = year1_baseline_energy * load_factor * rate_factor
@@ -601,7 +646,7 @@ def build_annual_projection(
         if yr_nsc > 0:
             row["NSC Adj ($)"] = round(yr_nsc)
         row.update({
-            "Export Credit ($)": round(yr_export_display),
+            "Export Credit ($)": round(yr_export),
             "Bill w/ Solar ($)": round(yr_bill_solar),
             "Annual Savings ($)": round(yr_savings),
             "Cumulative Savings ($)": round(cumulative_savings),
@@ -666,6 +711,7 @@ def _build_multiyear_monthly_df(
     export_rates_multiyear_2: dict[int, "pd.Series"] | None = None,
     cod_date=None,
     degradation_pct: float = 0.0,
+    compound_escalation: bool = True,
 ) -> pd.DataFrame:
     """Build a multi-year monthly DataFrame (12 × years rows).
 
@@ -698,6 +744,16 @@ def _build_multiyear_monthly_df(
     else:
         my_start_2 = 0
         my_max_2 = 0
+
+    # Precompute CAGR for extrapolating export rates beyond CSV range
+    if export_rates_multiyear and len(export_rates_multiyear) > 1:
+        _my_cagr = _compute_export_cagr(export_rates_multiyear)
+    else:
+        _my_cagr = 0.0
+    if export_rates_multiyear_2 and len(export_rates_multiyear_2) > 1:
+        _my_cagr_2 = _compute_export_cagr(export_rates_multiyear_2)
+    else:
+        _my_cagr_2 = 0.0
 
     year1_load = float(ms["load_kwh"].sum())
     year1_solar = float(ms["solar_kwh"].sum())
@@ -736,8 +792,12 @@ def _build_multiyear_monthly_df(
 
     rows = []
     for yr in range(1, years + 1):
-        rate_factor = 1.0 + rate_mult * (yr - 1)
-        load_factor = 1.0 + load_mult * (yr - 1)
+        if compound_escalation:
+            rate_factor = (1.0 + rate_mult) ** (yr - 1)
+            load_factor = (1.0 + load_mult) ** (yr - 1)
+        else:
+            rate_factor = 1.0 + rate_mult * (yr - 1)
+            load_factor = 1.0 + load_mult * (yr - 1)
         solar_factor = (1.0 - degrad_rate) ** (yr - 1)
         net_delta = year1_load * (load_factor - 1) + year1_solar * (1.0 - solar_factor)
         yr_export_total = max(0, year1_export - net_delta)
@@ -754,11 +814,13 @@ def _build_multiyear_monthly_df(
             active_multiyear = export_rates_multiyear_2
             active_my_start = my_start_2
             active_my_max = my_max_2
+            active_cagr = _my_cagr_2
         else:
             active_regime = nem_regime_1
             active_multiyear = export_rates_multiyear
             active_my_start = my_start
             active_my_max = my_max
+            active_cagr = _my_cagr
 
         # Per-month export credit recompute based on active regime
         month_export_credit_override = None
@@ -774,17 +836,17 @@ def _build_multiyear_monthly_df(
             hourly_export = hd["export_kwh"].values
             dt_index = hd.index
             month_idx = dt_index.month
-            # Apply rate escalation for projection years beyond the CSV range
-            if calendar_year > active_my_max:
-                overshoot = calendar_year - active_my_max
-                export_esc = 1.0 + rate_mult * overshoot
-            else:
-                export_esc = 1.0
+            # NEM-3 export rates come from the CSV — do NOT apply utility
+            # rate escalation.  Beyond the CSV range, extrapolate using
+            # the 10-year CAGR of the CSV's trailing years.
+            _cagr_mult = 1.0
+            if calendar_year > active_my_max and active_cagr != 0.0:
+                _cagr_mult = (1.0 + active_cagr) ** (calendar_year - active_my_max)
             month_export_credit_override = {}
             for m in range(1, 13):
                 mask = month_idx == m
                 base = float(np.sum(hourly_export[mask] * yr_rates[mask]))
-                month_export_credit_override[m] = base * volume_ratio * export_esc
+                month_export_credit_override[m] = base * _cagr_mult * volume_ratio
 
         for _, mrow in ms.iterrows():
             m = int(mrow["month"])
@@ -875,6 +937,7 @@ def generate_monthly_csv(
     export_rates_multiyear_2: dict[int, "pd.Series"] | None = None,
     cod_date=None,
     degradation_pct: float = 0.0,
+    compound_escalation: bool = True,
 ) -> str:
     """Generate CSV string of monthly summary data for download.
 
@@ -894,6 +957,7 @@ def generate_monthly_csv(
         export_rates_multiyear_2=export_rates_multiyear_2,
         cod_date=cod_date,
         degradation_pct=degradation_pct,
+        compound_escalation=compound_escalation,
     )
     buf = StringIO()
     df.to_csv(buf, index=False)
