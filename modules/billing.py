@@ -50,6 +50,10 @@ class BillingResult:
     tou_annual_energy: float = 0.0   # positive side of TOU per-period netting
     tou_annual_credit: float = 0.0   # negative side of TOU per-period netting
 
+    # Per-month TOU-netted breakdowns (NEM-1/2 only; empty for NEM-3)
+    tou_monthly_energy: dict[int, float] | None = None  # month -> positive energy $
+    tou_monthly_credit: dict[int, float] | None = None  # month -> credit $
+
     # Raw import energy cost: sum(import_kwh * energy_rate) across all hours.
     # Always represents gross import cost regardless of TOU netting or billing option.
     # Used by projection for NEM-3 regime-switch energy cost baseline.
@@ -296,8 +300,10 @@ def run_billing_simulation(
     # --- Monthly aggregation (regime-dependent) ---
     tou_annual_energy = 0.0
     tou_annual_credit = 0.0
+    tou_monthly_energy: dict[int, float] | None = None
+    tou_monthly_credit: dict[int, float] | None = None
     if nem_regime in ("NEM-1", "NEM-2"):
-        monthly_rows, tou_annual_energy, tou_annual_credit = _build_monthly_nem12(
+        monthly_rows, tou_annual_energy, tou_annual_credit, tou_monthly_energy, tou_monthly_credit = _build_monthly_nem12(
             load, solar, import_kwh, export_kwh, energy_period, energy_rate,
             dt_index, tariff, demand_df, peak_period_idx,
             nem_regime, nbc_rate, nsc_rate, billing_option,
@@ -358,6 +364,8 @@ def run_billing_simulation(
         nem_regime=nem_regime,
         tou_annual_energy=tou_annual_energy,
         tou_annual_credit=tou_annual_credit,
+        tou_monthly_energy=tou_monthly_energy,
+        tou_monthly_credit=tou_monthly_credit,
         raw_annual_energy=raw_annual_energy,
         monthly_baseline_details=monthly_baseline_list,
     )
@@ -424,11 +432,12 @@ def _build_monthly_nem12(
     load, solar, import_kwh, export_kwh, energy_period, energy_rate,
     dt_index, tariff, demand_df, peak_period_idx,
     nem_regime, nbc_rate, nsc_rate, billing_option,
-) -> tuple[list[dict], float, float]:
+) -> tuple[list[dict], float, float, dict[int, float], dict[int, float]]:
     """NEM-1 / NEM-2: TOU-period monthly netting with NBC and NSC true-up.
 
     Returns:
-        (monthly_rows, tou_annual_energy, tou_annual_credit)
+        (monthly_rows, tou_annual_energy, tou_annual_credit,
+         tou_monthly_energy, tou_monthly_credit)
     """
     n_hours = len(dt_index)
 
@@ -444,6 +453,8 @@ def _build_monthly_nem12(
     deferred_energy = 0.0    # ABO deferred energy charges
     tou_annual_energy = 0.0  # positive side of TOU netting (across all months)
     tou_annual_credit = 0.0  # negative side of TOU netting (across all months)
+    tou_monthly_energy: dict[int, float] = {}  # per-month positive energy $
+    tou_monthly_credit: dict[int, float] = {}  # per-month credit $
 
     for month_num in range(1, 13):
         month_mask = dt_index.month == month_num
@@ -484,8 +495,12 @@ def _build_monthly_nem12(
 
         # Accumulate TOU-netted energy/credit split for projection use
         if monthly_energy_charge >= 0:
+            tou_monthly_energy[month_num] = monthly_energy_charge
+            tou_monthly_credit[month_num] = 0.0
             tou_annual_energy += monthly_energy_charge
         else:
+            tou_monthly_energy[month_num] = 0.0
+            tou_monthly_credit[month_num] = abs(monthly_energy_charge)
             tou_annual_credit += abs(monthly_energy_charge)
 
         # Export energy split by TOU period (peak vs off-peak) — for reporting
@@ -563,10 +578,10 @@ def _build_monthly_nem12(
     # --- NSC true-up ---
     _apply_nsc_true_up(
         monthly_rows, import_kwh, export_kwh, energy_rate, energy_period,
-        period_rates, nsc_rate,
+        period_rates, nsc_rate, tariff.min_monthly_charge,
     )
 
-    return monthly_rows, tou_annual_energy, tou_annual_credit
+    return monthly_rows, tou_annual_energy, tou_annual_credit, tou_monthly_energy, tou_monthly_credit
 
 
 def _apply_nsc_true_up(
@@ -577,6 +592,7 @@ def _apply_nsc_true_up(
     energy_period: np.ndarray,
     period_rates: dict,
     nsc_rate: float,
+    min_monthly_charge: float = 0.0,
 ) -> None:
     """Apply Net Surplus Compensation true-up to month 12 if annual net surplus.
 
@@ -610,12 +626,24 @@ def _apply_nsc_true_up(
     if nsc_adjustment <= 0:
         return
 
-    # Apply adjustment to month 12 (true-up month)
+    # Cap adjustment at total annual export credit to prevent over-adjustment
+    # when the surplus TOU credit exceeds what was actually credited across all months.
+    total_annual_export_credit = sum(row["export_credit"] for row in monthly_rows)
+    nsc_adjustment = min(nsc_adjustment, total_annual_export_credit)
+
+    if nsc_adjustment <= 0:
+        return
+
+    # Apply adjustment to month 12 (true-up month).
+    # NSC modifies the bill BEFORE the min_monthly_charge floor, so we
+    # recompute the floor after adding the adjustment.
     row_12 = monthly_rows[11]
     row_12["nsc_adjustment"] = round(nsc_adjustment, 2)
     # Reduce export credit and increase net bill
     row_12["export_credit"] = round(max(row_12["export_credit"] - nsc_adjustment, 0), 2)
-    row_12["net_bill"] = round(row_12["net_bill"] + nsc_adjustment, 2)
+    # Remove the previous min_monthly_charge clamp, add NSC, then re-clamp
+    raw_bill = row_12["net_bill"] + nsc_adjustment
+    row_12["net_bill"] = round(max(raw_bill, min_monthly_charge), 2)
 
 
 def _calc_baseline_bill(load_8760: pd.Series, tariff: TariffSchedule) -> tuple[float, list[dict]]:

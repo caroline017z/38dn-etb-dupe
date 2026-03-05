@@ -67,6 +67,8 @@ def _build_optimized_discharge_mask(
     For each day, evaluate all possible starting positions for a
     ``window_hours``-length consecutive block and pick the one with the
     highest total export price.  Returns a float mask (0/1).
+
+    Uses cumsum-based sliding window for O(n) per-day instead of O(n*w).
     """
     N = len(export_price)
     mask = np.zeros(N, dtype=float)
@@ -80,16 +82,13 @@ def _build_optimized_discharge_mask(
         if n_hours < window_hours:
             continue
 
-        best_start = 0
-        best_sum = -np.inf
-        for s in range(n_hours - window_hours + 1):
-            w_sum = day_prices[s : s + window_hours].sum()
-            if w_sum > best_sum:
-                best_sum = w_sum
-                best_start = s
+        # Sliding window sum via cumsum — O(n) instead of O(n*w)
+        cs = np.cumsum(day_prices)
+        padded = np.concatenate([[0.0], cs])
+        window_sums = padded[window_hours:] - padded[:n_hours - window_hours + 1]
+        best_start = int(np.argmax(window_sums))
 
-        for i in range(best_start, best_start + window_hours):
-            mask[day_idx[i]] = 1.0
+        mask[day_idx[best_start:best_start + window_hours]] = 1.0
 
     return mask
 
