@@ -158,6 +158,18 @@ def _delete_file(directory, name, ext):
 # =============================================================================
 # HELPER — Simulation Progress Overlay
 # =============================================================================
+def _check_battery_solver(result: "BillingResult"):
+    """Warn the user if the battery dispatch solver failed."""
+    hd = result.hourly_detail
+    if "batt_to_load_kwh" in hd.columns:
+        total_discharge = hd["batt_to_load_kwh"].sum() + hd.get("batt_to_grid_kwh", pd.Series([0])).sum()
+        if total_discharge < 0.1:
+            st.warning(
+                "Battery dispatch produced near-zero discharge. "
+                "Check that export rates are loaded and charge/discharge windows are configured correctly."
+            )
+
+
 def _progress_overlay_html(pct: int, step_text: str) -> str:
     """Return HTML for a translucent overlay with circular progress indicator."""
     deg = int(pct * 3.6)  # 0-360 degrees
@@ -3457,6 +3469,7 @@ if run_sim:
                     )
                     st.session_state["billing_result"] = result_batt
                     st.session_state["billing_result_batt"] = result_batt
+                    _check_battery_solver(result_batt)
 
             _overlay.markdown(
                 _progress_overlay_html(50, "ECC simulation complete."),
@@ -3578,6 +3591,7 @@ if run_sim:
                         )
                         st.session_state["billing_result"] = result_batt
                         st.session_state["billing_result_batt"] = result_batt
+                        _check_battery_solver(result_batt)
                     else:
                         st.session_state["billing_result"] = result_pv_only
                         st.session_state["billing_result_batt"] = None
@@ -3687,6 +3701,7 @@ if run_sim:
                             )
                             st.session_state["billing_result"] = result_batt
                             st.session_state["billing_result_batt"] = result_batt
+                            _check_battery_solver(result_batt)
                             st.session_state["battery_capacity_kwh"] = sizing_res.best_size_kwh
 
                             _overlay.markdown(
@@ -3729,6 +3744,7 @@ if run_sim:
                             )
                             st.session_state["billing_result"] = result_batt
                             st.session_state["billing_result_batt"] = result_batt
+                            _check_battery_solver(result_batt)
 
                             _overlay.markdown(
                                 _progress_overlay_html(75, "Building results..."),
