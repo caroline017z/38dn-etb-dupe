@@ -232,11 +232,22 @@ def run_billing_simulation(
 
         demand_masks, demand_prices = _build_demand_lp_inputs(tariff, dt_index)
 
+        # For NEM-1/NEM-2, exports are valued at retail TOU rates.  If the
+        # caller passed zeros (placeholder), use the energy_rate array so the
+        # LP has proper incentive to discharge.  When the caller provides real
+        # export prices (e.g. NEM-A effective export), respect those.
+        _export_all_zero = not np.any(export_rates > 0)
+        _lp_export_price = (
+            energy_rate
+            if nem_regime in ("NEM-1", "NEM-2") and _export_all_zero
+            else export_rates
+        )
+
         batt_dispatch = dispatch_battery(
             pv_kwh=solar,
             load_kwh=load,
             import_price=energy_rate,
-            export_price=export_rates,
+            export_price=_lp_export_price,
             demand_window_masks=demand_masks,
             demand_prices=demand_prices,
             battery_config=battery_config,

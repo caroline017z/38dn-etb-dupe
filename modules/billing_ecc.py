@@ -243,11 +243,16 @@ def run_ecc_billing_simulation(
                             demand_masks[f"tou_{pidx}"] = mask
                             demand_prices[f"tou_{pidx}"] = tiers[0]["rate"]
 
+        # If export rates are all zeros (no ACC rates loaded), fall back to
+        # energy_rate so the LP has proper incentive to discharge.
+        _export_all_zero = not np.any(export_rates > 0)
+        _lp_export_price = energy_rate if _export_all_zero else export_rates
+
         batt_dispatch = dispatch_battery(
             pv_kwh=solar,
             load_kwh=load,
             import_price=energy_rate,
-            export_price=export_rates,
+            export_price=_lp_export_price,
             demand_window_masks=demand_masks,
             demand_prices=demand_prices,
             battery_config=battery_config,
