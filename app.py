@@ -40,7 +40,7 @@ from modules.export_value import (
     create_flat_export_rates,
     parse_multiyear_export_rates,
 )
-from modules.billing import run_billing_simulation, BillingResult
+from modules.billing import run_billing_simulation, BillingResult, compute_old_rate_baseline
 from modules.billing_aggregation import (
     MeterConfig,
     NemAProfile,
@@ -54,6 +54,7 @@ from modules.billing_ecc import (
     fetch_and_populate_ecc_tariff,
     load_ecc_tariff_from_json,
     run_ecc_billing_simulation,
+    compute_old_rate_baseline_ecc,
 )
 from modules.rate_extractor import (
     extract_text_from_pdf,
@@ -549,6 +550,9 @@ for key, default in {
     "existing_solar_nema_meters": [],
     "custom_rate_extracted": None,
     "custom_rate_warnings": None,
+    "rate_shift_enabled": False,
+    "rate_shift_old_tariff": None,
+    "nema_rate_shift_tariffs": {},
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default
@@ -2334,6 +2338,71 @@ with st.sidebar:
                     else:
                         st.warning("No tariff loaded for this meter.")
 
+    # --- Rate Shift Analysis ---
+    st.markdown("---")
+    rate_shift_enabled = st.checkbox(
+        "Enable Rate Shift Analysis",
+        key="rate_shift_toggle",
+        value=st.session_state.get("rate_shift_enabled", False),
+        help="Compare savings from switching tariffs (e.g., TOU-C to TOU-D). "
+             "Shows what you would pay on the old rate as a separate baseline.",
+    )
+    st.session_state["rate_shift_enabled"] = rate_shift_enabled
+
+    if rate_shift_enabled and billing_engine == "Custom":
+        if st.session_state["available_rates"]:
+            _rs_rate_options = {f"{r['name']}": r["label"] for r in st.session_state["available_rates"]}
+            _rs_selected = st.selectbox(
+                "Old Rate (pre-switch)",
+                list(_rs_rate_options.keys()),
+                key="rate_shift_old_rate_sel",
+                help="Select the tariff the customer was on before switching.",
+            )
+            _rs_label = _rs_rate_options[_rs_selected]
+            if st.button("Load Old Tariff", key="rate_shift_load_btn"):
+                st.session_state["_pending_rate_shift_load"] = _rs_label
+        else:
+            st.caption("Fetch rates above first to select an old tariff.")
+
+        # Show current old tariff status
+        _rs_current = st.session_state.get("rate_shift_old_tariff")
+        if _rs_current is not None:
+            st.success(f"Old tariff loaded: {_rs_current.name}")
+
+        # Per-meter old tariff selection for NEM-A
+        if st.session_state.get("load_mode") == "NEM-A Aggregation":
+            _rs_meters = st.session_state.get("nema_meters", [])
+            if _rs_meters and st.session_state["available_rates"]:
+                st.markdown("**Per-Meter Old Tariffs (NEM-A)**")
+                _rs_nema_tariffs = st.session_state.get("nema_rate_shift_tariffs", {})
+                for _rs_i, _rs_m in enumerate(_rs_meters):
+                    with st.expander(f"Old tariff for: {_rs_m['name']}", expanded=False):
+                        _rs_pmt_options = {f"{r['name']}": r["label"] for r in st.session_state["available_rates"]}
+                        _rs_pmt_sel = st.selectbox(
+                            "Old Rate", list(_rs_pmt_options.keys()),
+                            key=f"nema_rs_tariff_sel_{_rs_i}",
+                        )
+                        _rs_pmt_label = _rs_pmt_options[_rs_pmt_sel]
+                        if st.button("Load", key=f"nema_rs_tariff_load_{_rs_i}"):
+                            st.session_state[f"_pending_nema_rs_tariff_{_rs_i}"] = _rs_pmt_label
+                        _rs_pmt_current = _rs_nema_tariffs.get(_rs_i)
+                        if _rs_pmt_current is not None:
+                            st.success(f"Loaded: {_rs_pmt_current.name}")
+
+    elif rate_shift_enabled and billing_engine == "ECC":
+        st.caption("Rate shift with ECC engine: upload a second ECC tariff JSON for the old rate.")
+        ecc_rs_upload = st.file_uploader(
+            "Old Rate Tariff JSON (ECC)", type=["json"], key="ecc_rs_json_upload",
+        )
+        if st.button("Load Old ECC Tariff", key="ecc_rs_load_btn") and ecc_rs_upload:
+            st.session_state["_pending_ecc_rs_load"] = ecc_rs_upload
+
+        _rs_ecc_current = st.session_state.get("rate_shift_old_ecc_calculator")
+        if _rs_ecc_current is not None:
+            st.success("Old ECC tariff loaded.")
+
+    st.markdown("---")
+
     # --- 5. Export Compensation ---
     st.subheader("5. Export Compensation")
     nem_options = ["NEM-1", "NEM-2", "NEM-3 / NVBT"]
@@ -2717,6 +2786,7 @@ if st.session_state.get("_pending_save_name"):
 if save_btn and sim_name and st.session_state.get("billing_result") is not None:
     result_to_save = st.session_state["billing_result"]
     summary_to_save = build_savings_summary(result_to_save, system_cost)
+    _save_rs_old_baseline = result_to_save.old_rate_annual_baseline if result_to_save.old_rate_annual_baseline is not None else None
     proj_to_save = build_annual_projection(
         result=result_to_save,
         system_cost=system_cost,
@@ -2733,6 +2803,7 @@ if save_btn and sim_name and st.session_state.get("billing_result") is not None:
         nbc_rate_2=st.session_state.get("nbc_rate_2", 0.0) if nem_switch else 0.0,
         nsc_rate_2=st.session_state.get("nsc_rate_2", 0.0) if nem_switch else 0.0,
         compound_escalation=compound_escalation,
+        rate_shift_old_baseline=_save_rs_old_baseline,
     )
 
     # Build extra battery data for saved view parity
@@ -2759,6 +2830,7 @@ if save_btn and sim_name and st.session_state.get("billing_result") is not None:
             nbc_rate_2=st.session_state.get("nbc_rate_2", 0.0) if nem_switch else 0.0,
             nsc_rate_2=st.session_state.get("nsc_rate_2", 0.0) if nem_switch else 0.0,
             compound_escalation=compound_escalation,
+            rate_shift_old_baseline=_save_rs_old_baseline,
         ).to_dict(orient="records")
         extra_save["projection_batt"] = build_annual_projection(
             result=batt_res, system_cost=system_cost,
@@ -2775,6 +2847,7 @@ if save_btn and sim_name and st.session_state.get("billing_result") is not None:
             nbc_rate_2=st.session_state.get("nbc_rate_2", 0.0) if nem_switch else 0.0,
             nsc_rate_2=st.session_state.get("nsc_rate_2", 0.0) if nem_switch else 0.0,
             compound_escalation=compound_escalation,
+            rate_shift_old_baseline=_save_rs_old_baseline,
         ).to_dict(orient="records")
 
         batt_cap = st.session_state.get("battery_capacity_kwh", 0)
@@ -2798,6 +2871,11 @@ if save_btn and sim_name and st.session_state.get("billing_result") is not None:
             "batt_savings": round(batt_res.annual_savings, 0),
             "battery_value": round(pv_only_res.annual_bill_with_solar - batt_res.annual_bill_with_solar, 0),
         }
+        if st.session_state.get("rate_shift_enabled") and pv_only_res.rate_shift_annual_savings is not None:
+            extra_save["scenario_comparison"]["pv_only_rate_shift_savings"] = round(pv_only_res.rate_shift_annual_savings, 0)
+            extra_save["scenario_comparison"]["batt_rate_shift_savings"] = round(batt_res.rate_shift_annual_savings, 0)
+            extra_save["scenario_comparison"]["pv_only_total_savings"] = round(pv_only_res.annual_savings + pv_only_res.rate_shift_annual_savings, 0)
+            extra_save["scenario_comparison"]["batt_total_savings"] = round(batt_res.annual_savings + batt_res.rate_shift_annual_savings, 0)
 
         sizing_res = st.session_state.get("sizing_result")
         if sizing_res is not None:
@@ -2906,6 +2984,7 @@ if save_btn and sim_name and st.session_state.get("billing_result") is not None:
             "existing_solar_age": st.session_state.get("sb_existing_solar_age", 10),
             "existing_solar_degradation_pct": st.session_state.get("sb_existing_solar_degradation", 0.5),
             "existing_solar_nema_meters": st.session_state.get("existing_solar_nema_meters", []),
+            "rate_shift_enabled": st.session_state.get("rate_shift_enabled", False),
         },
         production_8760=_prod_list,
         load_8760=_load_list,
@@ -3145,6 +3224,49 @@ for _pmt_load_i in range(len(st.session_state.get("nema_meters", []))):
                 st.sidebar.success(f"Tariff loaded for {_pmt_meter_name}: {_pmt_tariff.name}")
             except Exception as e:
                 st.error(f"Error loading per-meter tariff: {e}")
+
+# --- Rate Shift tariff load handlers ---
+if st.session_state.get("_pending_rate_shift_load"):
+    _rs_load_label = st.session_state.pop("_pending_rate_shift_load")
+    with st.spinner("Loading old tariff for rate shift..."):
+        try:
+            _rs_tariff = fetch_tariff_detail(_rs_load_label)
+            st.session_state["rate_shift_old_tariff"] = _rs_tariff
+            st.sidebar.success(f"Old tariff loaded: {_rs_tariff.name}")
+        except Exception as e:
+            st.error(f"Error loading old tariff: {e}")
+
+for _rs_nema_i in range(len(st.session_state.get("nema_meters", []))):
+    _rs_nema_key = f"_pending_nema_rs_tariff_{_rs_nema_i}"
+    _rs_nema_label = st.session_state.get(_rs_nema_key)
+    if _rs_nema_label:
+        st.session_state.pop(_rs_nema_key)
+        with st.spinner(f"Loading old tariff for meter {_rs_nema_i}..."):
+            try:
+                _rs_nema_tariff = fetch_tariff_detail(_rs_nema_label)
+                if "nema_rate_shift_tariffs" not in st.session_state:
+                    st.session_state["nema_rate_shift_tariffs"] = {}
+                st.session_state["nema_rate_shift_tariffs"][_rs_nema_i] = _rs_nema_tariff
+                _rs_meter_name = st.session_state.get("nema_meters", [])[_rs_nema_i].get("name", f"Meter {_rs_nema_i}")
+                st.sidebar.success(f"Old tariff loaded for {_rs_meter_name}: {_rs_nema_tariff.name}")
+            except Exception as e:
+                st.error(f"Error loading old tariff: {e}")
+
+# ECC rate shift load handler
+if st.session_state.get("_pending_ecc_rs_load"):
+    _ecc_rs_file = st.session_state.pop("_pending_ecc_rs_load")
+    with st.spinner("Loading old ECC tariff..."):
+        try:
+            import tempfile
+            _tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".json")
+            _tmp.write(_ecc_rs_file.read())
+            _tmp.close()
+            _rs_calc, _rs_tdata = load_ecc_tariff_from_json(_tmp.name)
+            os.remove(_tmp.name)
+            st.session_state["rate_shift_old_ecc_calculator"] = _rs_calc
+            st.sidebar.success("Old ECC tariff loaded for rate shift.")
+        except Exception as e:
+            st.error(f"Error loading old ECC tariff: {e}")
 
 # --- ECC tariff fetch/load handlers ---
 if ecc_fetch_btn:
@@ -3777,6 +3899,68 @@ if run_sim:
                     )
                     st.success("Simulation complete!")
 
+        # --- Post-simulation: Rate Shift Analysis ---
+        if st.session_state.get("rate_shift_enabled"):
+            _rs_result = st.session_state["billing_result"]
+            _rs_pv_only = st.session_state.get("billing_result_pv_only")
+
+            if billing_engine == "ECC" and st.session_state.get("rate_shift_old_ecc_calculator"):
+                _rs_old_calc = st.session_state["rate_shift_old_ecc_calculator"]
+                _rs_old = compute_old_rate_baseline_ecc(
+                    st.session_state["load_8760"], _rs_old_calc,
+                )
+                # Apply to all result variants
+                for _rs_r in [_rs_result, _rs_pv_only]:
+                    if _rs_r is not None:
+                        _rs_r.old_rate_annual_baseline = _rs_old["annual_cost"]
+                        _rs_r.old_rate_monthly_baselines = _rs_old["monthly_costs"]
+                        _rs_r.rate_shift_annual_savings = (
+                            _rs_old["annual_cost"] - _rs_r.annual_bill_without_solar
+                        )
+
+            elif billing_engine == "Custom":
+                _rs_old_tariff = st.session_state.get("rate_shift_old_tariff")
+                if _rs_old_tariff is not None:
+                    if st.session_state.get("load_mode") == "NEM-A Aggregation":
+                        # NEM-A: compute per-meter old-rate baselines and sum
+                        _rs_nema_tariffs = st.session_state.get("nema_rate_shift_tariffs", {})
+                        _rs_nema_loads = st.session_state.get("nema_meter_loads", {})
+                        _rs_nema_meters = st.session_state.get("nema_meters", [])
+                        _rs_total_old = 0.0
+                        _rs_monthly_old = [0.0] * 12
+                        for _rs_mi, _rs_minfo in enumerate(_rs_nema_meters):
+                            # Use per-meter old tariff if set, else fall back to main old tariff
+                            _rs_m_old_tariff = _rs_nema_tariffs.get(_rs_mi, _rs_old_tariff)
+                            if _rs_minfo.get("is_generating"):
+                                _rs_m_load = st.session_state["load_8760"]
+                            else:
+                                _rs_m_load = _rs_nema_loads.get(_rs_mi)
+                            if _rs_m_load is not None:
+                                _rs_m_old = compute_old_rate_baseline(_rs_m_load, _rs_m_old_tariff)
+                                _rs_total_old += _rs_m_old["annual_cost"]
+                                for _rs_j in range(12):
+                                    _rs_monthly_old[_rs_j] += _rs_m_old["monthly_costs"][_rs_j]
+
+                        for _rs_r in [_rs_result, _rs_pv_only]:
+                            if _rs_r is not None:
+                                _rs_r.old_rate_annual_baseline = _rs_total_old
+                                _rs_r.old_rate_monthly_baselines = _rs_monthly_old
+                                _rs_r.rate_shift_annual_savings = (
+                                    _rs_total_old - _rs_r.annual_bill_without_solar
+                                )
+                    else:
+                        # Single meter
+                        _rs_old = compute_old_rate_baseline(
+                            st.session_state["load_8760"], _rs_old_tariff,
+                        )
+                        for _rs_r in [_rs_result, _rs_pv_only]:
+                            if _rs_r is not None:
+                                _rs_r.old_rate_annual_baseline = _rs_old["annual_cost"]
+                                _rs_r.old_rate_monthly_baselines = _rs_old["monthly_costs"]
+                                _rs_r.rate_shift_annual_savings = (
+                                    _rs_old["annual_cost"] - _rs_r.annual_bill_without_solar
+                                )
+
         # Clear overlay and editing flag when done
         _overlay.empty()
         st.session_state["editing_saved_sim"] = False
@@ -3874,6 +4058,7 @@ if st.session_state["billing_result"] is not None:
         "nbc_rate_2": st.session_state.get("nbc_rate_2", 0.0) if nem_switch else 0.0,
         "nsc_rate_2": st.session_state.get("nsc_rate_2", 0.0) if nem_switch else 0.0,
     }
+    _rs_old_baseline_for_proj = result.old_rate_annual_baseline if result.old_rate_annual_baseline is not None else None
     _main_projection = build_annual_projection(
         result=result,
         system_cost=system_cost,
@@ -3883,6 +4068,7 @@ if st.session_state["billing_result"] is not None:
         export_rates_multiyear=st.session_state.get("export_rates_multiyear"),
         result_pv_only=pv_only_for_display,
         compound_escalation=compound_escalation,
+        rate_shift_old_baseline=_rs_old_baseline_for_proj,
         **_common_nem_kw,
     )
 
@@ -3918,6 +4104,11 @@ if st.session_state["billing_result"] is not None:
             "Export Credit ($)": fmt_dollar(raw['export_credit'].sum()),
             "Net Bill ($)": fmt_dollar(raw['net_bill'].sum()),
         })
+        # Rate shift savings total
+        if result.old_rate_monthly_baselines is not None and result.monthly_baseline_details is not None:
+            _rs_old = result.old_rate_monthly_baselines
+            _rs_new = [d["total"] for d in result.monthly_baseline_details]
+            totals["Rate Shift Savings ($)"] = fmt_dollar(sum(_rs_old) - sum(_rs_new))
         totals_row = pd.DataFrame([totals])
         display_with_totals = pd.concat([display_df, totals_row], ignore_index=True)
 
@@ -3988,10 +4179,13 @@ if st.session_state["billing_result"] is not None:
                 )
 
             _proj_bold = ["Calendar Year"] if "Calendar Year" in display_proj.columns else ["Year"]
+            _proj_highlight = ["Cumulative Savings ($)"]
+            if "Cumulative Total Savings ($)" in display_proj.columns:
+                _proj_highlight.append("Cumulative Total Savings ($)")
             st.markdown(render_styled_table(
                 display_proj,
                 bold_cols=_proj_bold,
-                highlight_cols=["Cumulative Savings ($)"],
+                highlight_cols=_proj_highlight,
             ), unsafe_allow_html=True)
 
         _render_projection_table()
@@ -4002,10 +4196,18 @@ if st.session_state["billing_result"] is not None:
         fig.add_trace(go.Scatter(
             x=projection_df["Year"],
             y=projection_df["Cumulative Savings ($)"],
-            name="Cumulative Savings",
+            name="Cumulative Solar Savings",
             mode="lines+markers",
             line=dict(color="#00CC96", width=2.5),
         ))
+        if "Cumulative Total Savings ($)" in projection_df.columns:
+            fig.add_trace(go.Scatter(
+                x=projection_df["Year"],
+                y=projection_df["Cumulative Total Savings ($)"],
+                name="Cumulative Total Savings (incl. Rate Shift)",
+                mode="lines+markers",
+                line=dict(color="#636EFA", width=2.5),
+            ))
         fig.add_hline(
             y=system_cost, line_dash="dash", line_color="#EF553B",
             annotation_text=f"System Cost: ${system_cost:,.0f}",
@@ -4071,6 +4273,20 @@ if st.session_state["billing_result"] is not None:
             cmp_data["PV Only"].append("—")
             cmp_data["PV + Battery"].append(fmt_dollar(battery_value))
 
+            # Rate shift rows
+            if st.session_state.get("rate_shift_enabled") and pv_only.rate_shift_annual_savings is not None:
+                cmp_data["Metric"].append("Rate Shift Savings")
+                cmp_data["No Solar"].append("—")
+                cmp_data["PV Only"].append(fmt_dollar(pv_only.rate_shift_annual_savings))
+                cmp_data["PV + Battery"].append(fmt_dollar(pv_batt.rate_shift_annual_savings))
+
+                pv_total = pv_only.annual_savings + pv_only.rate_shift_annual_savings
+                batt_total = pv_batt.annual_savings + pv_batt.rate_shift_annual_savings
+                cmp_data["Metric"].append("Total Savings")
+                cmp_data["No Solar"].append("—")
+                cmp_data["PV Only"].append(fmt_dollar(pv_total))
+                cmp_data["PV + Battery"].append(fmt_dollar(batt_total))
+
             cmp_df = pd.DataFrame(cmp_data)
             st.markdown(render_styled_table(cmp_df), unsafe_allow_html=True)
             st.divider()
@@ -4091,6 +4307,18 @@ if st.session_state["billing_result"] is not None:
                 st.metric("Simple Payback", f"{summary['simple_payback_years']:.1f} years")
             else:
                 st.metric("Simple Payback", "N/A")
+        # Rate shift savings display
+        if summary.get("rate_shift_annual_savings") is not None:
+            st.divider()
+            st.subheader("Rate Shift Analysis")
+            rs_c1, rs_c2, rs_c3 = st.columns(3)
+            with rs_c1:
+                st.metric("Old Rate Baseline", f"${result.old_rate_annual_baseline:,.0f}")
+            with rs_c2:
+                st.metric("Rate Shift Savings", f"${summary['rate_shift_annual_savings']:,.0f}/yr")
+            with rs_c3:
+                st.metric("Total Combined Savings", f"${summary['total_annual_savings']:,.0f}/yr")
+
         st.divider()
         st.subheader("Energy Balance")
         col_a, col_b = st.columns(2)
@@ -4383,6 +4611,7 @@ if st.session_state["billing_result"] is not None:
             export_rates_multiyear=st.session_state.get("export_rates_multiyear"),
             result_pv_only=pv_only_for_display,
             compound_escalation=compound_escalation,
+            rate_shift_old_baseline=_rs_old_baseline_for_proj,
             **_common_nem_kw,
         )
 
@@ -4594,6 +4823,7 @@ if st.session_state["billing_result"] is not None:
                             export_rates_multiyear=st.session_state.get("export_rates_multiyear"),
                             result_pv_only=pv_only_for_display,
                             compound_escalation=compound_escalation,
+                            rate_shift_old_baseline=_rs_old_baseline_for_proj,
                             **_common_nem_kw,
                         )
 

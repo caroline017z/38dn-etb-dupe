@@ -675,6 +675,10 @@ def _slide_exec_summary(prs, pg, total, name, result, tariff, utility,
         fin.append(("PPA Escalator", f"{esc_pct:.1f}%/yr"))
     fin.append(("Contract Term", f"{term} years"))
     fin.append(("Upfront Cost", "$0"))
+    if result.rate_shift_annual_savings is not None:
+        fin.append(("Rate Shift Savings", _fd(result.rate_shift_annual_savings)))
+        total_sav = sav + result.rate_shift_annual_savings
+        fin.append(("Total Combined Savings", _fd(total_sav)))
 
     for i, (lbl, val) in enumerate(fin):
         y = sy + Inches(0.40 + i * 0.36)
@@ -929,6 +933,8 @@ def _slide_year1(prs, pg, total, ex, result, tariff, proj_df=None,
     nbc = getattr(result, "annual_nbc_cost", 0) or 0
     if nbc > 0:
         breakdown.append(("NBC charges (NEM-2)", f"({_fd(nbc)})", RGBColor(0xCC, 0x44, 0x44)))
+    if result.rate_shift_annual_savings is not None:
+        breakdown.append(("Rate shift savings", _fd(result.rate_shift_annual_savings), RGBColor(0x1D, 0x6F, 0xA9)))
 
     for i, (lbl, val, clr) in enumerate(breakdown):
         y = Inches(4.47 + i * 0.30)
