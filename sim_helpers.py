@@ -99,7 +99,143 @@ def _gcs_blob_name(sim_name: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Public API
+# Generic GCS file operations (used by profile persistence)
+# ---------------------------------------------------------------------------
+
+def gcs_list_files(prefix: str, ext: str) -> list[str] | None:
+    """List blob names under *prefix* ending with *ext*. Returns list of
+    names (without extension) or None if GCS is unavailable."""
+    bucket = _get_gcs_bucket()
+    if bucket is None:
+        return None
+    try:
+        blobs = list(bucket.list_blobs(prefix=prefix))
+        names = []
+        for b in blobs:
+            fname = b.name[len(prefix):]
+            if fname.endswith(ext):
+                names.append(fname[: -len(ext)])
+        return names
+    except Exception as e:
+        logger.warning(f"gcs_list_files failed ({e})")
+        return None
+
+
+def gcs_load_file(prefix: str, name: str, ext: str) -> bytes | None:
+    """Download blob bytes from *prefix/name+ext*. Returns bytes or None."""
+    bucket = _get_gcs_bucket()
+    if bucket is None:
+        return None
+    try:
+        blob = bucket.blob(f"{prefix}{name}{ext}")
+        if blob.exists():
+            return blob.download_as_bytes()
+    except Exception as e:
+        logger.warning(f"gcs_load_file failed ({e})")
+    return None
+
+
+def gcs_save_file(prefix: str, name: str, data: bytes, ext: str) -> bool:
+    """Upload *data* bytes to *prefix/name+ext*. Returns True on success."""
+    bucket = _get_gcs_bucket()
+    if bucket is None:
+        return False
+    try:
+        content_type = "application/json" if ext == ".json" else "text/csv"
+        blob = bucket.blob(f"{prefix}{name}{ext}")
+        blob.upload_from_string(data, content_type=content_type)
+        return True
+    except Exception as e:
+        logger.warning(f"gcs_save_file failed ({e})")
+        return False
+
+
+def gcs_delete_file(prefix: str, name: str, ext: str) -> bool:
+    """Delete blob at *prefix/name+ext*. Returns True on success."""
+    bucket = _get_gcs_bucket()
+    if bucket is None:
+        return False
+    try:
+        blob = bucket.blob(f"{prefix}{name}{ext}")
+        if blob.exists():
+            blob.delete()
+        return True
+    except Exception as e:
+        logger.warning(f"gcs_delete_file failed ({e})")
+        return False
+
+
+def gcs_diagnostic() -> dict:
+    """Return dict with ``connected``, ``bucket_name``, ``blob_count``, ``error``."""
+    bucket = _get_gcs_bucket()
+    if bucket is None:
+        return {
+            "connected": False,
+            "bucket_name": None,
+            "blob_count": 0,
+            "error": "GCS not configured or credentials missing",
+        }
+    try:
+        blobs = list(bucket.list_blobs())
+        return {
+            "connected": True,
+            "bucket_name": bucket.name,
+            "blob_count": len(blobs),
+            "error": None,
+        }
+    except Exception as e:
+        return {
+            "connected": False,
+            "bucket_name": bucket.name,
+            "blob_count": 0,
+            "error": str(e),
+        }
+
+
+# ---------------------------------------------------------------------------
+# Profile-aware wrappers (GCS + local fallback)
+# ---------------------------------------------------------------------------
+
+def list_profile_files(local_dir: str, gcs_prefix: str, ext: str) -> list[str]:
+    """Return deduplicated profile names from GCS and local, sorted alphabetically."""
+    names: set[str] = set()
+    # GCS
+    gcs_names = gcs_list_files(gcs_prefix, ext)
+    if gcs_names is not None:
+        names.update(gcs_names)
+    # Local
+    for f in glob.glob(os.path.join(local_dir, f"*{ext}")):
+        names.add(os.path.splitext(os.path.basename(f))[0])
+    return sorted(names)
+
+
+def load_profile_bytes(local_dir: str, gcs_prefix: str, name: str, ext: str) -> bytes | None:
+    """Load file bytes — try local first, then GCS."""
+    local_path = os.path.join(local_dir, f"{name}{ext}")
+    if os.path.isfile(local_path):
+        with open(local_path, "rb") as f:
+            return f.read()
+    return gcs_load_file(gcs_prefix, name, ext)
+
+
+def save_profile_bytes(local_dir: str, gcs_prefix: str, name: str, data: bytes, ext: str) -> None:
+    """Save file bytes to both local and GCS."""
+    os.makedirs(local_dir, exist_ok=True)
+    with open(os.path.join(local_dir, f"{name}{ext}"), "wb") as f:
+        f.write(data)
+    gcs_save_file(gcs_prefix, name, data, ext)
+
+
+def delete_profile_file(local_dir: str, gcs_prefix: str, name: str, ext: str) -> None:
+    """Delete file from both local and GCS."""
+    local_path = os.path.join(local_dir, f"{name}{ext}")
+    if os.path.exists(local_path):
+        os.remove(local_path)
+    gcs_delete_file(gcs_prefix, name, ext)
+
+
+# ---------------------------------------------------------------------------
+# Public API — Simulations
 # ---------------------------------------------------------------------------
 
 def list_saved_simulations() -> list[str]:
