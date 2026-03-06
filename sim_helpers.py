@@ -5,8 +5,23 @@ import os
 import re
 import json
 import glob
+import numpy as np
 import pandas as pd
 from datetime import date, datetime
+
+
+class _NumpyEncoder(json.JSONEncoder):
+    """JSON encoder that converts numpy types to native Python types."""
+    def default(self, obj):
+        if isinstance(obj, (np.integer,)):
+            return int(obj)
+        if isinstance(obj, (np.floating,)):
+            return float(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        if isinstance(obj, (np.bool_,)):
+            return bool(obj)
+        return super().default(obj)
 
 
 def sanitize_filename(name: str) -> str:
@@ -50,7 +65,7 @@ def save_simulation(name, result, summary, projection_df, inputs, **extra):
     }
     data.update(extra)
     with open(os.path.join(SIMULATIONS_DIR, f"{name}.json"), "w") as f:
-        json.dump(data, f, indent=2)
+        json.dump(data, f, indent=2, cls=_NumpyEncoder)
 
 
 def delete_simulation(name: str):
