@@ -8,6 +8,7 @@ customers with solar PV systems under Net Value Billing Tariff (NVBT).
 import streamlit as st
 import pandas as pd
 import numpy as np
+import io
 import os
 import json
 import glob
@@ -115,6 +116,14 @@ NEMA_PROFILES_DIR = os.path.join(DATA_DIR, "nema_profiles")
 for d in [SIMULATIONS_DIR, LOAD_PROFILES_DIR, EXPORT_PROFILES_DIR, ECC_TARIFFS_DIR, SYSTEM_PROFILES_DIR, NEMA_PROFILES_DIR]:
     os.makedirs(d, exist_ok=True)
 
+_DIR_TO_GCS_PREFIX = {
+    LOAD_PROFILES_DIR: "load_profiles/",
+    NEMA_PROFILES_DIR: "nema_profiles/",
+    EXPORT_PROFILES_DIR: "export_profiles/",
+    SYSTEM_PROFILES_DIR: "system_profiles/",
+    ECC_TARIFFS_DIR: "ecc_tariffs/",
+}
+
 
 # =============================================================================
 # HELPER FUNCTIONS — Simulations (shared module)
@@ -128,32 +137,61 @@ from sim_helpers import (
     get_simulation_metadata,
     populate_session_from_simulation,
     sanitize_filename,
+    list_profile_files,
+    load_profile_bytes,
+    save_profile_bytes,
+    delete_profile_file,
+    gcs_diagnostic,
 )
 
 
 def _list_saved(directory: str, ext: str = ".json") -> list[str]:
-    """Generic file lister — still used by Load Profiles / Export Profiles."""
+    """Generic file lister with GCS backing."""
+    gcs_prefix = _DIR_TO_GCS_PREFIX.get(directory)
+    if gcs_prefix:
+        return list_profile_files(directory, gcs_prefix, ext)
+    # Fallback: local-only for unknown directories
     files = glob.glob(os.path.join(directory, f"*{ext}"))
     files.sort(key=os.path.getmtime, reverse=True)
     return [os.path.splitext(os.path.basename(f))[0] for f in files]
 
 
 def _list_all_load_profiles() -> list[tuple[str, str]]:
-    """Return unified (name, type) list of CSV + NEM-A profiles sorted by mtime (newest first)."""
+    """Return unified (name, type) list of CSV + NEM-A profiles (GCS + local)."""
+    seen: set[tuple[str, str]] = set()
     entries: list[tuple[float, str, str]] = []  # (mtime, name, type)
+    # Local files (have mtime for sorting)
     for f in glob.glob(os.path.join(LOAD_PROFILES_DIR, "*.csv")):
-        entries.append((os.path.getmtime(f), os.path.splitext(os.path.basename(f))[0], "csv"))
+        name = os.path.splitext(os.path.basename(f))[0]
+        entries.append((os.path.getmtime(f), name, "csv"))
+        seen.add((name, "csv"))
     for f in glob.glob(os.path.join(NEMA_PROFILES_DIR, "*.json")):
-        entries.append((os.path.getmtime(f), os.path.splitext(os.path.basename(f))[0], "nema"))
+        name = os.path.splitext(os.path.basename(f))[0]
+        entries.append((os.path.getmtime(f), name, "nema"))
+        seen.add((name, "nema"))
+    # GCS-only files (no mtime — append at end with mtime=0)
+    from sim_helpers import gcs_list_files
+    for gcs_names, ext, typ in [
+        (gcs_list_files("load_profiles/", ".csv"), ".csv", "csv"),
+        (gcs_list_files("nema_profiles/", ".json"), ".json", "nema"),
+    ]:
+        if gcs_names:
+            for n in gcs_names:
+                if (n, typ) not in seen:
+                    entries.append((0, n, typ))
     entries.sort(key=lambda x: x[0], reverse=True)
     return [(name, typ) for _, name, typ in entries]
 
 
 def _delete_file(directory, name, ext):
-    """Generic file deleter — still used by Load Profiles / Export Profiles."""
-    fp = os.path.join(directory, f"{name}{ext}")
-    if os.path.exists(fp):
-        os.remove(fp)
+    """Generic file deleter with GCS backing."""
+    gcs_prefix = _DIR_TO_GCS_PREFIX.get(directory)
+    if gcs_prefix:
+        delete_profile_file(directory, gcs_prefix, name, ext)
+    else:
+        fp = os.path.join(directory, f"{name}{ext}")
+        if os.path.exists(fp):
+            os.remove(fp)
 
 
 # =============================================================================
@@ -213,11 +251,26 @@ def _progress_overlay_html(pct: int, step_text: str) -> str:
 # =============================================================================
 def _save_profile_csv(directory, name, df):
     name = sanitize_filename(name)
-    df.to_csv(os.path.join(directory, f"{name}.csv"), index=False)
+    csv_bytes = df.to_csv(index=False).encode("utf-8")
+    gcs_prefix = _DIR_TO_GCS_PREFIX.get(directory)
+    if gcs_prefix:
+        save_profile_bytes(directory, gcs_prefix, name, csv_bytes, ".csv")
+    else:
+        with open(os.path.join(directory, f"{name}.csv"), "wb") as f:
+            f.write(csv_bytes)
 
 
 def _load_profile_csv(directory, name) -> pd.DataFrame:
-    return pd.read_csv(os.path.join(directory, f"{name}.csv"))
+    local_path = os.path.join(directory, f"{name}.csv")
+    if os.path.isfile(local_path):
+        return pd.read_csv(local_path)
+    # Try GCS fallback
+    gcs_prefix = _DIR_TO_GCS_PREFIX.get(directory)
+    if gcs_prefix:
+        data = load_profile_bytes(directory, gcs_prefix, name, ".csv")
+        if data is not None:
+            return pd.read_csv(io.BytesIO(data))
+    return pd.read_csv(local_path)  # raise FileNotFoundError as before
 
 
 def _save_system_profile(name: str) -> None:
@@ -241,14 +294,21 @@ def _save_system_profile(name: str) -> None:
     summary = st.session_state.get("production_summary")
     if summary is not None:
         profile["production_summary"] = summary
-    fp = os.path.join(SYSTEM_PROFILES_DIR, f"{name}.json")
-    with open(fp, "w") as f:
-        json.dump(profile, f)
+    json_bytes = json.dumps(profile).encode("utf-8")
+    save_profile_bytes(SYSTEM_PROFILES_DIR, _DIR_TO_GCS_PREFIX[SYSTEM_PROFILES_DIR], name, json_bytes, ".json")
 
 
 def _load_system_profile(name: str) -> dict:
     """Load a system profile JSON and return the dict."""
     fp = os.path.join(SYSTEM_PROFILES_DIR, f"{name}.json")
+    if os.path.isfile(fp):
+        with open(fp, "r") as f:
+            return json.load(f)
+    # GCS fallback
+    data = load_profile_bytes(SYSTEM_PROFILES_DIR, _DIR_TO_GCS_PREFIX[SYSTEM_PROFILES_DIR], name, ".json")
+    if data is not None:
+        return json.loads(data)
+    # Raise FileNotFoundError as before
     with open(fp, "r") as f:
         return json.load(f)
 
@@ -260,8 +320,16 @@ def _load_nema_profile_into_session(profile_name: str):
     existing_solar_nema_meters, and sets load_8760 from the generating meter.
     """
     path = os.path.join(NEMA_PROFILES_DIR, f"{profile_name}.json")
-    with open(path) as f:
-        data = json.load(f)
+    if os.path.isfile(path):
+        with open(path) as f:
+            data = json.load(f)
+    else:
+        raw = load_profile_bytes(NEMA_PROFILES_DIR, _DIR_TO_GCS_PREFIX[NEMA_PROFILES_DIR], profile_name, ".json")
+        if raw is not None:
+            data = json.loads(raw)
+        else:
+            with open(path) as f:  # raise FileNotFoundError
+                data = json.load(f)
     st.session_state["nema_utility"] = data.get("utility", "PG&E")
     year = st.session_state.get("sb_cod_date", date(2026, 1, 1)).year
     dt = pd.date_range(f"{year}-01-01", periods=8760, freq="h")
@@ -1234,9 +1302,9 @@ if st.session_state["active_mgmt_tab"] == "Load Profiles":
                     "meters": _nema_bundle_meters,
                     "existing_solar_meters": st.session_state.get("existing_solar_nema_meters", []),
                 }
-                _nema_save_path = os.path.join(NEMA_PROFILES_DIR, f"{sanitize_filename(_nema_profile_name)}.json")
-                with open(_nema_save_path, "w") as _f:
-                    _json.dump(_nema_bundle, _f)
+                _nema_safe_name = sanitize_filename(_nema_profile_name)
+                _nema_json_bytes = _json.dumps(_nema_bundle).encode("utf-8")
+                save_profile_bytes(NEMA_PROFILES_DIR, _DIR_TO_GCS_PREFIX[NEMA_PROFILES_DIR], _nema_safe_name, _nema_json_bytes, ".json")
                 st.success(f"NEM-A profile '{_nema_profile_name}' saved with {len(_nema_bundle_meters)} meters.")
                 st.rerun()
 
@@ -1920,6 +1988,16 @@ if st.session_state["active_mgmt_tab"] == "Custom Rates":
             except Exception as e:
                 st.error(f"Save failed: {e}")
 
+
+# ---------------------------------------------------------------------------
+# Storage Diagnostics (below management tabs, before main content)
+# ---------------------------------------------------------------------------
+with st.expander("Storage Diagnostics"):
+    _diag = gcs_diagnostic()
+    if _diag["connected"]:
+        st.success(f"GCS connected — bucket: {_diag['bucket_name']}, {_diag['blob_count']} files")
+    else:
+        st.warning(f"GCS not available: {_diag['error']}. Using local storage only.")
 
 st.title("PV Solar Rate Simulator")
 st.markdown(
@@ -3318,9 +3396,8 @@ if ecc_fetch_btn:
             import json as _json_mod
             _rate_tag = st.session_state.get("ecc_rate_filter", "").strip()
             _save_label = _rate_tag if _rate_tag else utility_name
-            _save_dest = os.path.join(ECC_TARIFFS_DIR, f"{_save_label}.json")
-            with open(_save_dest, "w") as _sf:
-                _json_mod.dump(tdata, _sf)
+            _ecc_bytes = _json_mod.dumps(tdata).encode("utf-8")
+            save_profile_bytes(ECC_TARIFFS_DIR, _DIR_TO_GCS_PREFIX[ECC_TARIFFS_DIR], _save_label, _ecc_bytes, ".json")
             st.sidebar.success(f"ECC tariff loaded ({len(tdata)} block(s)).")
         except Exception as e:
             st.error(f"ECC tariff fetch error: {e}")
@@ -3356,7 +3433,6 @@ if ecc_load_json_btn:
         _ecc_uploaded = st.session_state.get("ecc_json_upload")
         if _ecc_uploaded is not None:
             import tempfile as _tmpmod
-            import shutil as _shutil
             try:
                 with _tmpmod.TemporaryDirectory() as _tmp_dir:
                     _safe_ecc_name = sanitize_filename(_ecc_uploaded.name)
@@ -3382,8 +3458,9 @@ if ecc_load_json_btn:
                     }
                     # Save a copy to ECC_TARIFFS_DIR for future "Use Saved Tariff"
                     _save_name = os.path.splitext(_safe_ecc_name)[0]
-                    _save_dest = os.path.join(ECC_TARIFFS_DIR, f"{_save_name}.json")
-                    _shutil.copy2(_tmp_path, _save_dest)
+                    with open(_tmp_path, "rb") as _rb:
+                        _ecc_upload_bytes = _rb.read()
+                    save_profile_bytes(ECC_TARIFFS_DIR, _DIR_TO_GCS_PREFIX[ECC_TARIFFS_DIR], _save_name, _ecc_upload_bytes, ".json")
                 st.sidebar.success(f"ECC tariff loaded from JSON ({len(tdata)} block(s)).")
             except Exception as e:
                 st.error(f"ECC JSON load error: {e}")
