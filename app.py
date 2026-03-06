@@ -2343,8 +2343,8 @@ with st.sidebar:
 
     # --- Rate Shift Analysis ---
     st.markdown("---")
-    rate_shift_enabled = st.checkbox(
-        "Enable Rate Shift Analysis",
+    rate_shift_enabled = st.toggle(
+        "Rate Shift Analysis",
         key="rate_shift_toggle",
         value=st.session_state.get("rate_shift_enabled", False),
         help="Compare savings from switching tariffs (e.g., TOU-C to TOU-D). "
@@ -2353,33 +2353,36 @@ with st.sidebar:
     st.session_state["rate_shift_enabled"] = rate_shift_enabled
 
     if rate_shift_enabled and billing_engine == "Custom":
-        if st.session_state["available_rates"]:
-            _rs_rate_options = {f"{r['name']}": r["label"] for r in st.session_state["available_rates"]}
-            _rs_selected = st.selectbox(
-                "Old Rate (pre-switch)",
-                list(_rs_rate_options.keys()),
-                key="rate_shift_old_rate_sel",
-                help="Select the tariff the customer was on before switching.",
-            )
-            _rs_label = _rs_rate_options[_rs_selected]
-            if st.button("Load Old Tariff", key="rate_shift_load_btn"):
-                st.session_state["_pending_rate_shift_load"] = _rs_label
+        _rs_is_nema = st.session_state.get("load_mode") == "NEM-A Aggregation"
+
+        if not _rs_is_nema:
+            # Single meter: one old tariff selector
+            if st.session_state["available_rates"]:
+                _rs_rate_options = {f"{r['name']}": r["label"] for r in st.session_state["available_rates"]}
+                _rs_selected = st.selectbox(
+                    "Old Rate (pre-switch)",
+                    list(_rs_rate_options.keys()),
+                    key="rate_shift_old_rate_sel",
+                    help="Select the tariff the customer was on before switching.",
+                )
+                _rs_label = _rs_rate_options[_rs_selected]
+                if st.button("Load Old Tariff", key="rate_shift_load_btn"):
+                    st.session_state["_pending_rate_shift_load"] = _rs_label
+            else:
+                st.caption("Fetch rates above first to select an old tariff.")
+
+            _rs_current = st.session_state.get("rate_shift_old_tariff")
+            if _rs_current is not None:
+                st.success(f"Old tariff loaded: {_rs_current.name}")
         else:
-            st.caption("Fetch rates above first to select an old tariff.")
-
-        # Show current old tariff status
-        _rs_current = st.session_state.get("rate_shift_old_tariff")
-        if _rs_current is not None:
-            st.success(f"Old tariff loaded: {_rs_current.name}")
-
-        # Per-meter old tariff selection for NEM-A
-        if st.session_state.get("load_mode") == "NEM-A Aggregation":
+            # NEM-A: per-meter old tariff selectors only (no blanket option)
             _rs_meters = st.session_state.get("nema_meters", [])
             if _rs_meters and st.session_state["available_rates"]:
                 st.markdown("**Per-Meter Old Tariffs (NEM-A)**")
                 _rs_nema_tariffs = st.session_state.get("nema_rate_shift_tariffs", {})
+                _rs_all_loaded = True
                 for _rs_i, _rs_m in enumerate(_rs_meters):
-                    with st.expander(f"Old tariff for: {_rs_m['name']}", expanded=False):
+                    with st.expander(f"Old tariff for: {_rs_m['name']}", expanded=(_rs_i not in _rs_nema_tariffs)):
                         _rs_pmt_options = {f"{r['name']}": r["label"] for r in st.session_state["available_rates"]}
                         _rs_pmt_sel = st.selectbox(
                             "Old Rate", list(_rs_pmt_options.keys()),
@@ -2391,6 +2394,12 @@ with st.sidebar:
                         _rs_pmt_current = _rs_nema_tariffs.get(_rs_i)
                         if _rs_pmt_current is not None:
                             st.success(f"Loaded: {_rs_pmt_current.name}")
+                        else:
+                            _rs_all_loaded = False
+                if not _rs_all_loaded:
+                    st.warning("Load an old tariff for each meter to enable rate shift analysis.")
+            else:
+                st.caption("Fetch rates and configure NEM-A meters first.")
 
     elif rate_shift_enabled and billing_engine == "ECC":
         st.caption("Rate shift with ECC engine: upload a second ECC tariff JSON for the old rate.")
@@ -3922,18 +3931,17 @@ if run_sim:
                         )
 
             elif billing_engine == "Custom":
-                _rs_old_tariff = st.session_state.get("rate_shift_old_tariff")
-                if _rs_old_tariff is not None:
-                    if st.session_state.get("load_mode") == "NEM-A Aggregation":
-                        # NEM-A: compute per-meter old-rate baselines and sum
-                        _rs_nema_tariffs = st.session_state.get("nema_rate_shift_tariffs", {})
-                        _rs_nema_loads = st.session_state.get("nema_meter_loads", {})
-                        _rs_nema_meters = st.session_state.get("nema_meters", [])
+                if st.session_state.get("load_mode") == "NEM-A Aggregation":
+                    # NEM-A: require per-meter old tariffs (no blanket fallback)
+                    _rs_nema_tariffs = st.session_state.get("nema_rate_shift_tariffs", {})
+                    _rs_nema_loads = st.session_state.get("nema_meter_loads", {})
+                    _rs_nema_meters = st.session_state.get("nema_meters", [])
+                    # Only compute if every meter has an old tariff assigned
+                    if all(_rs_mi in _rs_nema_tariffs for _rs_mi in range(len(_rs_nema_meters))):
                         _rs_total_old = 0.0
                         _rs_monthly_old = [0.0] * 12
                         for _rs_mi, _rs_minfo in enumerate(_rs_nema_meters):
-                            # Use per-meter old tariff if set, else fall back to main old tariff
-                            _rs_m_old_tariff = _rs_nema_tariffs.get(_rs_mi, _rs_old_tariff)
+                            _rs_m_old_tariff = _rs_nema_tariffs[_rs_mi]
                             if _rs_minfo.get("is_generating"):
                                 _rs_m_load = st.session_state["load_8760"]
                             else:
@@ -3951,8 +3959,10 @@ if run_sim:
                                 _rs_r.rate_shift_annual_savings = (
                                     _rs_total_old - _rs_r.annual_bill_without_solar
                                 )
-                    else:
-                        # Single meter
+                else:
+                    # Single meter
+                    _rs_old_tariff = st.session_state.get("rate_shift_old_tariff")
+                    if _rs_old_tariff is not None:
                         _rs_old = compute_old_rate_baseline(
                             st.session_state["load_8760"], _rs_old_tariff,
                         )
