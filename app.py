@@ -2065,6 +2065,9 @@ with st.sidebar:
     # Initialize radio key from load_mode if not yet set
     if "load_mode_radio" not in st.session_state:
         st.session_state["load_mode_radio"] = st.session_state.get("load_mode", "Single Meter")
+    # Apply pending load mode from saved profile restore
+    if "_pending_load_mode_radio" in st.session_state:
+        st.session_state["load_mode_radio"] = st.session_state.pop("_pending_load_mode_radio")
     load_mode = st.radio(
         "Configuration",
         ["Single Meter", "NEM-A Aggregation"],
