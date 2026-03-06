@@ -390,7 +390,7 @@ def populate_session_from_simulation(st_session_state, sim_data: dict):
     # 8) Restore NEM-A profile if present
     _saved_load_mode = inp.get("load_mode", "Single Meter")
     st_session_state["load_mode"] = _saved_load_mode
-    st_session_state["load_mode_radio"] = _saved_load_mode
+    st_session_state["_pending_load_mode_radio"] = _saved_load_mode
     if _saved_load_mode == "NEM-A Aggregation":
         st_session_state["nema_utility"] = inp.get("nema_utility", "PG&E")
         _nema_meters_data = sim_data.get("nema_meters", [])
