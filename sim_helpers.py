@@ -1,13 +1,20 @@
 """
 Shared simulation management helpers — used by both app.py and pages/All_Simulations.py.
+
+Supports Google Cloud Storage (GCS) for persistent storage across Streamlit
+Cloud reboots.  Falls back to local filesystem when GCS is not configured.
 """
 import os
 import re
+import io
 import json
 import glob
+import logging
 import numpy as np
 import pandas as pd
 from datetime import date, datetime
+
+logger = logging.getLogger(__name__)
 
 
 class _NumpyEncoder(json.JSONEncoder):
@@ -31,6 +38,7 @@ def sanitize_filename(name: str) -> str:
     name = name.lstrip('.')
     return name or "untitled"
 
+
 from modules.tariff import TariffSchedule, NSC_DEFAULT_RATE, UTILITY_EIA_IDS
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
@@ -38,31 +46,123 @@ SIMULATIONS_DIR = os.path.join(DATA_DIR, "simulations")
 os.makedirs(SIMULATIONS_DIR, exist_ok=True)
 
 
+# ---------------------------------------------------------------------------
+# GCS backend (lazy-initialised singleton)
+# ---------------------------------------------------------------------------
+_GCS_PREFIX = "simulations/"  # blob prefix inside the bucket
+_gcs_bucket = None  # cached bucket object
+_gcs_available = None  # tri-state: None = not checked, True/False
+
+
+def _get_gcs_bucket():
+    """Return a GCS Bucket object, or None if not configured."""
+    global _gcs_bucket, _gcs_available
+    if _gcs_available is False:
+        return None
+    if _gcs_bucket is not None:
+        return _gcs_bucket
+
+    try:
+        import streamlit as st
+        from google.cloud import storage
+        from google.oauth2 import service_account
+
+        # Read service account credentials from Streamlit secrets
+        gcs_secrets = st.secrets.get("gcs", None)
+        if gcs_secrets is None:
+            logger.info("No [gcs] section in Streamlit secrets — using local storage")
+            _gcs_available = False
+            return None
+
+        bucket_name = gcs_secrets.get("bucket_name")
+        if not bucket_name:
+            logger.warning("[gcs] section found but no bucket_name — using local storage")
+            _gcs_available = False
+            return None
+
+        # Build credentials from the secrets dict
+        creds_dict = {k: v for k, v in gcs_secrets.items() if k != "bucket_name"}
+        credentials = service_account.Credentials.from_service_account_info(creds_dict)
+        client = storage.Client(credentials=credentials, project=creds_dict.get("project_id"))
+        _gcs_bucket = client.bucket(bucket_name)
+        _gcs_available = True
+        logger.info(f"GCS storage enabled — bucket: {bucket_name}")
+        return _gcs_bucket
+    except Exception as e:
+        logger.warning(f"GCS init failed ({e}) — falling back to local storage")
+        _gcs_available = False
+        return None
+
+
+def _gcs_blob_name(sim_name: str) -> str:
+    return f"{_GCS_PREFIX}{sim_name}.json"
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
 def list_saved_simulations() -> list[str]:
-    """Return simulation names sorted by file mtime (most recent first)."""
+    """Return simulation names sorted by most recent first."""
+    bucket = _get_gcs_bucket()
+    if bucket is not None:
+        try:
+            blobs = list(bucket.list_blobs(prefix=_GCS_PREFIX))
+            # Sort by updated timestamp (most recent first)
+            blobs.sort(key=lambda b: b.updated or datetime.min, reverse=True)
+            names = []
+            for b in blobs:
+                fname = b.name[len(_GCS_PREFIX):]
+                if fname.endswith(".json"):
+                    names.append(fname[:-5])
+            return names
+        except Exception as e:
+            logger.warning(f"GCS list failed ({e}) — falling back to local")
+
+    # Local fallback
     files = glob.glob(os.path.join(SIMULATIONS_DIR, "*.json"))
     files.sort(key=os.path.getmtime, reverse=True)
     return [os.path.splitext(os.path.basename(f))[0] for f in files]
 
 
 def load_simulation(name: str) -> dict:
-    """Load a simulation JSON by name.  Returns empty dict if file is corrupt."""
+    """Load a simulation JSON by name.  Returns empty dict if not found or corrupt."""
     name = sanitize_filename(name)
+
+    bucket = _get_gcs_bucket()
+    if bucket is not None:
+        try:
+            blob = bucket.blob(_gcs_blob_name(name))
+            if blob.exists():
+                content = blob.download_as_text()
+                return json.loads(content)
+        except (json.JSONDecodeError, ValueError):
+            # Corrupted blob — delete it
+            try:
+                bucket.blob(_gcs_blob_name(name)).delete()
+            except Exception:
+                pass
+            return {}
+        except Exception as e:
+            logger.warning(f"GCS load failed ({e}) — trying local")
+
+    # Local fallback
     fp = os.path.join(SIMULATIONS_DIR, f"{name}.json")
     try:
         with open(fp, "r") as f:
             return json.load(f)
     except (json.JSONDecodeError, ValueError):
-        # Corrupted file — remove it so it doesn't keep causing errors
         try:
             os.remove(fp)
         except OSError:
             pass
         return {}
+    except FileNotFoundError:
+        return {}
 
 
 def save_simulation(name, result, summary, projection_df, inputs, **extra):
-    """Save a simulation to JSON."""
+    """Save a simulation to JSON (GCS + local)."""
     name = sanitize_filename(name)
     data = {
         "name": name,
@@ -73,13 +173,37 @@ def save_simulation(name, result, summary, projection_df, inputs, **extra):
         "projection": projection_df.to_dict(orient="records") if projection_df is not None else [],
     }
     data.update(extra)
+    json_str = json.dumps(data, indent=2, cls=_NumpyEncoder)
+
+    # Save to GCS
+    bucket = _get_gcs_bucket()
+    if bucket is not None:
+        try:
+            blob = bucket.blob(_gcs_blob_name(name))
+            blob.upload_from_string(json_str, content_type="application/json")
+        except Exception as e:
+            logger.warning(f"GCS save failed ({e})")
+
+    # Always save locally too (for immediate reads within same session)
     with open(os.path.join(SIMULATIONS_DIR, f"{name}.json"), "w") as f:
-        json.dump(data, f, indent=2, cls=_NumpyEncoder)
+        f.write(json_str)
 
 
 def delete_simulation(name: str):
-    """Delete a simulation JSON file."""
+    """Delete a simulation JSON file (GCS + local)."""
     name = sanitize_filename(name)
+
+    # Delete from GCS
+    bucket = _get_gcs_bucket()
+    if bucket is not None:
+        try:
+            blob = bucket.blob(_gcs_blob_name(name))
+            if blob.exists():
+                blob.delete()
+        except Exception as e:
+            logger.warning(f"GCS delete failed ({e})")
+
+    # Delete locally
     fp = os.path.join(SIMULATIONS_DIR, f"{name}.json")
     if os.path.exists(fp):
         os.remove(fp)
@@ -88,6 +212,20 @@ def delete_simulation(name: str):
 def touch_simulation_mtime(name: str):
     """Update file mtime to now (marks simulation as recently accessed)."""
     name = sanitize_filename(name)
+
+    # For GCS, re-upload with updated metadata
+    bucket = _get_gcs_bucket()
+    if bucket is not None:
+        try:
+            blob = bucket.blob(_gcs_blob_name(name))
+            if blob.exists():
+                # Patch metadata to update the blob's updated timestamp
+                blob.metadata = {"last_accessed": datetime.now().isoformat()}
+                blob.patch()
+        except Exception as e:
+            logger.warning(f"GCS touch failed ({e})")
+
+    # Local
     fp = os.path.join(SIMULATIONS_DIR, f"{name}.json")
     if os.path.exists(fp):
         os.utime(fp, None)
