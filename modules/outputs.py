@@ -208,6 +208,16 @@ def build_monthly_summary_display(
 
     display_cols += ["export_credit", "net_bill"]
 
+    # Rate shift savings column (when old-rate baseline is available)
+    if result.old_rate_monthly_baselines is not None and result.monthly_baseline_details is not None:
+        _old_baselines = result.old_rate_monthly_baselines
+        _new_baselines = [d["total"] for d in result.monthly_baseline_details]
+        df["rate_shift_savings"] = [
+            round(_old_baselines[i] - _new_baselines[i], 2)
+            for i in range(12)
+        ]
+        display_cols.append("rate_shift_savings")
+
     rename_map.update({
         "energy_cost": "Energy ($)",
         "total_demand_charge": "Demand ($)",
@@ -215,6 +225,7 @@ def build_monthly_summary_display(
         "nbc_charge": "NBC ($)",
         "export_credit": "Export Credit ($)",
         "net_bill": "Net Bill ($)",
+        "rate_shift_savings": "Rate Shift Savings ($)",
     })
 
     # Only include columns that exist
@@ -245,7 +256,7 @@ def build_savings_summary(result: BillingResult, system_cost: float = 0.0) -> di
     if result.annual_savings > 0 and system_cost > 0:
         simple_payback = system_cost / result.annual_savings
 
-    return {
+    summary = {
         "annual_load_kwh": round(result.annual_load_kwh, 0),
         "annual_solar_kwh": round(result.annual_solar_kwh, 0),
         "solar_offset_pct": round(
@@ -261,6 +272,15 @@ def build_savings_summary(result: BillingResult, system_cost: float = 0.0) -> di
         "system_cost": round(system_cost, 2),
         "simple_payback_years": round(simple_payback, 1) if simple_payback else None,
     }
+
+    # Rate shift analysis fields
+    if result.rate_shift_annual_savings is not None:
+        summary["rate_shift_annual_savings"] = round(result.rate_shift_annual_savings, 2)
+        summary["total_annual_savings"] = round(
+            result.annual_savings + result.rate_shift_annual_savings, 2
+        )
+
+    return summary
 
 
 def _compute_tou_netted_monthly(hourly_detail: pd.DataFrame) -> tuple[
@@ -333,6 +353,7 @@ def build_annual_projection(
     nbc_rate_2: float = 0.0,
     nsc_rate_2: float = 0.0,
     compound_escalation: bool = True,
+    rate_shift_old_baseline: float | None = None,
 ) -> pd.DataFrame:
     """
     Build a multi-year annual projection table.
@@ -435,6 +456,7 @@ def build_annual_projection(
 
     rows = []
     cumulative_savings = 0.0
+    cumulative_total_savings = 0.0
     # Multi-year export rates: keyed by calendar year (e.g. {2026: Series, 2027: ...})
     if export_rates_multiyear and len(export_rates_multiyear) >= 1:
         _my_keys = sorted(export_rates_multiyear.keys())
@@ -651,6 +673,18 @@ def build_annual_projection(
             "Annual Savings ($)": round(yr_savings),
             "Cumulative Savings ($)": round(cumulative_savings),
         })
+
+        # Rate shift columns (when old-rate baseline is provided)
+        if rate_shift_old_baseline is not None:
+            yr_old_rate_baseline = rate_shift_old_baseline * load_factor * rate_factor
+            yr_rate_shift_savings = yr_old_rate_baseline - yr_bill_no_solar
+            yr_total_savings = yr_savings + yr_rate_shift_savings
+            cumulative_total_savings += yr_total_savings
+            row["Old Rate Baseline ($)"] = round(yr_old_rate_baseline)
+            row["Rate Shift Savings ($)"] = round(yr_rate_shift_savings)
+            row["Total Savings ($)"] = round(yr_total_savings)
+            row["Cumulative Total Savings ($)"] = round(cumulative_total_savings)
+
         rows.append(row)
 
     return pd.DataFrame(rows)
@@ -1470,6 +1504,13 @@ def generate_simulation_excel(
         ("Utility Escalator (%/yr)", rate_escalator_pct),
         ("Demand Escalator (%/yr)", load_escalator_pct),
     ]
+    # Rate shift analysis rows
+    if result.old_rate_annual_baseline is not None:
+        summary_rows.append(("Old Rate Annual Baseline ($)", round(result.old_rate_annual_baseline, 2)))
+    if result.rate_shift_annual_savings is not None:
+        summary_rows.append(("Rate Shift Annual Savings ($)", round(result.rate_shift_annual_savings, 2)))
+        total_savings = result.annual_savings + result.rate_shift_annual_savings
+        summary_rows.append(("Total Combined Savings ($)", round(total_savings, 2)))
     summary_df = pd.DataFrame(summary_rows, columns=["Parameter", "Value"])
 
     # ------------------------------------------------------------------

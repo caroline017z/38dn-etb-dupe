@@ -456,6 +456,40 @@ def run_ecc_billing_simulation(
     )
 
 
+def compute_old_rate_baseline_ecc(
+    load_8760: pd.Series,
+    cost_calculator: CostCalculator,
+) -> dict:
+    """Compute baseline bill on old tariff using the ECC engine for rate shift analysis.
+
+    Returns dict with keys: annual_cost, monthly_costs (list of 12 floats).
+    """
+    _start_year = load_8760.index[0].year
+    dt_index = pd.date_range(
+        start=f"{_start_year}-01-01", periods=8760, freq="h", tz="US/Pacific"
+    )
+    load_wh = load_8760.values * 1000.0
+    df_baseline = pd.DataFrame({"consumption": load_wh}, index=dt_index)
+    bill_baseline = cost_calculator.compute_bill(
+        df_baseline, column_data="consumption", monthly_detailed=True
+    ) or {}
+
+    monthly_costs = []
+    for month_num in range(1, 13):
+        month_key = f"{_start_year}-{month_num:02d}"
+        if month_key in bill_baseline:
+            month_bill = bill_baseline[month_key]
+            fixed, energy, flat_demand, tou_demand, _ = _extract_monthly_charges(month_bill)
+            monthly_costs.append(energy + flat_demand + tou_demand + fixed)
+        else:
+            monthly_costs.append(0.0)
+
+    return {
+        "annual_cost": sum(monthly_costs),
+        "monthly_costs": monthly_costs,
+    }
+
+
 def _extract_monthly_charges(month_bill: dict) -> tuple[float, float, float, float, float]:
     """
     Extract (fixed_cost, energy_cost, flat_demand_cost, tou_demand_cost, peak_kw) from a single

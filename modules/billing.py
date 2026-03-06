@@ -62,6 +62,11 @@ class BillingResult:
     # Monthly baseline breakdown (no-solar bill components per month)
     monthly_baseline_details: list[dict] | None = None  # 12 dicts: {energy, demand, fixed, total}
 
+    # Rate shift analysis fields (old tariff baseline)
+    old_rate_annual_baseline: float | None = None          # Annual cost on old tariff, no solar
+    old_rate_monthly_baselines: list[float] | None = None   # 12 monthly costs on old tariff
+    rate_shift_annual_savings: float | None = None          # old_rate_baseline - new_rate_baseline
+
 
 def _build_schedule_arrays(
     tariff: TariffSchedule,
@@ -693,3 +698,17 @@ def _calc_baseline_bill(load_8760: pd.Series, tariff: TariffSchedule) -> tuple[f
 
     total_baseline = sum(d["total"] for d in monthly_details)
     return float(total_baseline), monthly_details
+
+
+def compute_old_rate_baseline(
+    load_8760: pd.Series, old_tariff: TariffSchedule,
+) -> dict:
+    """Compute baseline bill on the old (pre-switch) tariff for rate shift analysis.
+
+    Returns dict with keys: annual_cost, monthly_costs (list of 12 floats).
+    """
+    annual_total, monthly_details = _calc_baseline_bill(load_8760, old_tariff)
+    return {
+        "annual_cost": annual_total,
+        "monthly_costs": [d["total"] for d in monthly_details],
+    }

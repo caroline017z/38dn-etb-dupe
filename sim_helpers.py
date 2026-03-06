@@ -459,6 +459,9 @@ def populate_session_from_simulation(st_session_state, sim_data: dict):
                     _adj_load.values - _es_prod.values, index=_adj_load.index, name="load_kwh"
                 )
 
-    # 10) Close saved view and flag editing mode
+    # 10) Rate shift config
+    st_session_state["rate_shift_enabled"] = inp.get("rate_shift_enabled", False)
+
+    # 11) Close saved view and flag editing mode
     st_session_state["saved_view"] = None
     st_session_state["editing_saved_sim"] = True
