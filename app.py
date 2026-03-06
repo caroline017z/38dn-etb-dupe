@@ -1036,6 +1036,11 @@ with _mgmt_btn_cols[6]:
 
 # ---- LOAD PROFILES SECTION ----
 if st.session_state["active_mgmt_tab"] == "Load Profiles":
+    _lp_hdr_l, _lp_hdr_r = st.columns([6, 1])
+    _lp_hdr_l.markdown("#### Load Profiles")
+    if _lp_hdr_r.button("Close", key="close_load_profiles", type="tertiary"):
+        st.session_state["active_mgmt_tab"] = None
+        st.rerun()
     # ================================================================
     # A. Saved Load Profiles — unified dropdown (CSV + NEM-A)
     # ================================================================
@@ -1588,6 +1593,11 @@ if st.session_state["active_mgmt_tab"] == "Load Profiles":
 
 # ---- EXPORT PROFILES SECTION ----
 if st.session_state["active_mgmt_tab"] == "Export Profiles":
+    _ep_hdr_l, _ep_hdr_r = st.columns([6, 1])
+    _ep_hdr_l.markdown("#### Export Profiles")
+    if _ep_hdr_r.button("Close", key="close_export_profiles", type="tertiary"):
+        st.session_state["active_mgmt_tab"] = None
+        st.rerun()
     saved_exports = _list_saved(EXPORT_PROFILES_DIR, ".csv")
     ep_col1, ep_col2 = st.columns([2, 1])
 
@@ -1664,6 +1674,11 @@ if st.session_state["active_mgmt_tab"] == "Export Profiles":
 
 # ---- SYSTEM PROFILES SECTION ----
 if st.session_state["active_mgmt_tab"] == "System Profiles":
+    _sp_hdr_l, _sp_hdr_r = st.columns([6, 1])
+    _sp_hdr_l.markdown("#### System Profiles")
+    if _sp_hdr_r.button("Close", key="close_system_profiles", type="tertiary"):
+        st.session_state["active_mgmt_tab"] = None
+        st.rerun()
     saved_sp = _list_saved(SYSTEM_PROFILES_DIR, ".json")
     sp_col1, sp_col2 = st.columns([2, 1])
 
@@ -1783,7 +1798,11 @@ if st.session_state["active_mgmt_tab"] == "System Profiles":
 
 # ---- CUSTOM RATES SECTION ----
 if st.session_state["active_mgmt_tab"] == "Custom Rates":
-    st.subheader("Custom Rates")
+    _cr_hdr_l, _cr_hdr_r = st.columns([6, 1])
+    _cr_hdr_l.markdown("#### Custom Rates")
+    if _cr_hdr_r.button("Close", key="close_custom_rates", type="tertiary"):
+        st.session_state["active_mgmt_tab"] = None
+        st.rerun()
 
     # ================================================================
     # A. Saved Custom Rates
@@ -2894,6 +2913,7 @@ if save_btn and sim_name and st.session_state.get("billing_result") is not None:
         nsc_rate_2=st.session_state.get("nsc_rate_2", 0.0) if nem_switch else 0.0,
         compound_escalation=compound_escalation,
         rate_shift_old_baseline=_save_rs_old_baseline,
+        existing_solar_offset_kwh=_es_offset_annual,
     )
 
     # Build extra battery data for saved view parity
@@ -2921,6 +2941,7 @@ if save_btn and sim_name and st.session_state.get("billing_result") is not None:
             nsc_rate_2=st.session_state.get("nsc_rate_2", 0.0) if nem_switch else 0.0,
             compound_escalation=compound_escalation,
             rate_shift_old_baseline=_save_rs_old_baseline,
+            existing_solar_offset_kwh=_es_offset_annual,
         ).to_dict(orient="records")
         extra_save["projection_batt"] = build_annual_projection(
             result=batt_res, system_cost=system_cost,
@@ -2938,6 +2959,7 @@ if save_btn and sim_name and st.session_state.get("billing_result") is not None:
             nsc_rate_2=st.session_state.get("nsc_rate_2", 0.0) if nem_switch else 0.0,
             compound_escalation=compound_escalation,
             rate_shift_old_baseline=_save_rs_old_baseline,
+            existing_solar_offset_kwh=_es_offset_annual,
         ).to_dict(orient="records")
 
         batt_cap = st.session_state.get("battery_capacity_kwh", 0)
@@ -3247,6 +3269,15 @@ if _es_enabled and _es_production is not None:
                 if _aminfo.get("is_generating") and _ami in _adjusted_nema:
                     st.session_state["load_8760"] = _adjusted_nema[_ami]
                     break
+
+# Compute existing-solar offset for display columns
+_es_offset_monthly = None
+_es_offset_annual = 0.0
+if st.session_state.get("existing_solar_enabled") and st.session_state.get("existing_solar_production_8760") is not None:
+    _es_prod = st.session_state["existing_solar_production_8760"]
+    _dt = pd.date_range(f"{cod_year}-01-01", periods=8760, freq="h")
+    _es_offset_monthly = [float(_es_prod[_dt.month == m].sum()) for m in range(1, 13)]
+    _es_offset_annual = float(_es_prod.sum())
 
 
 # =============================================================================
@@ -4159,23 +4190,27 @@ if st.session_state["billing_result"] is not None:
         result_pv_only=pv_only_for_display,
         compound_escalation=compound_escalation,
         rate_shift_old_baseline=_rs_old_baseline_for_proj,
+        existing_solar_offset_kwh=_es_offset_annual,
         **_common_nem_kw,
     )
 
     # --- Tab 1: Monthly Bills ---
     with tab1:
         st.subheader("Monthly Bill Summary")
-        display_df = build_monthly_summary_display(result, result_pv_only=pv_only_for_display)
+        display_df = build_monthly_summary_display(result, result_pv_only=pv_only_for_display, existing_solar_offset_kwh=_es_offset_monthly)
         raw = result.monthly_summary
         totals = {
             "Month": "TOTAL",
-            "Load (kWh)": fmt_num(raw['load_kwh'].sum()),
+        }
+        if _es_offset_monthly is not None:
+            totals["Degraded System Load Offset (kWh)"] = fmt_num(sum(_es_offset_monthly))
+        totals.update({
             "Solar (kWh)": fmt_num(raw['solar_kwh'].sum()),
             "Import (kWh)": fmt_num(raw['import_kwh'].sum()),
             "Export (kWh)": fmt_num(raw['export_kwh'].sum()),
             "Export Peak (kWh)": fmt_num(raw['export_peak_kwh'].sum()),
             "Export Off-Peak (kWh)": fmt_num(raw['export_offpeak_kwh'].sum()),
-        }
+        })
         if pv_only_for_display is not None:
             totals["Demand kW (PV)"] = fmt_num(pv_only_for_display.monthly_summary['peak_demand_kw'].max())
             totals["Demand kW (PV+BESS)"] = fmt_num(raw['peak_demand_kw'].max())
@@ -4702,6 +4737,7 @@ if st.session_state["billing_result"] is not None:
             result_pv_only=pv_only_for_display,
             compound_escalation=compound_escalation,
             rate_shift_old_baseline=_rs_old_baseline_for_proj,
+            existing_solar_offset_kwh=_es_offset_annual,
             **_common_nem_kw,
         )
 
@@ -4914,6 +4950,7 @@ if st.session_state["billing_result"] is not None:
                             result_pv_only=pv_only_for_display,
                             compound_escalation=compound_escalation,
                             rate_shift_old_baseline=_rs_old_baseline_for_proj,
+                            existing_solar_offset_kwh=_es_offset_annual,
                             **_common_nem_kw,
                         )
 
