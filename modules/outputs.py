@@ -157,6 +157,7 @@ def _negate_outflow_columns(df: pd.DataFrame) -> pd.DataFrame:
 def build_monthly_summary_display(
     result: BillingResult,
     result_pv_only: BillingResult | None = None,
+    existing_solar_offset_kwh: list[float] | None = None,
 ) -> pd.DataFrame:
     """
     Format the monthly summary for display in Streamlit.
@@ -171,18 +172,23 @@ def build_monthly_summary_display(
 
     # Build display columns and rename map
     display_cols = [
-        "month_name", "load_kwh", "solar_kwh", "import_kwh", "export_kwh",
+        "month_name", "solar_kwh", "import_kwh", "export_kwh",
         "export_peak_kwh", "export_offpeak_kwh",
     ]
     rename_map = {
         "month_name": "Month",
-        "load_kwh": "Load (kWh)",
         "solar_kwh": "Solar (kWh)",
         "import_kwh": "Import (kWh)",
         "export_kwh": "Export (kWh)",
         "export_peak_kwh": "Export Peak (kWh)",
         "export_offpeak_kwh": "Export Off-Peak (kWh)",
     }
+
+    # Conditionally add degraded system load offset column
+    if existing_solar_offset_kwh is not None and len(existing_solar_offset_kwh) == 12:
+        df["degraded_offset_kwh"] = existing_solar_offset_kwh
+        display_cols.insert(1, "degraded_offset_kwh")
+        rename_map["degraded_offset_kwh"] = "Degraded System Load Offset (kWh)"
 
     if result_pv_only is not None:
         # BESS mode: show both PV-only and PV+BESS demand
@@ -354,6 +360,7 @@ def build_annual_projection(
     nsc_rate_2: float = 0.0,
     compound_escalation: bool = True,
     rate_shift_old_baseline: float | None = None,
+    existing_solar_offset_kwh: float = 0.0,
 ) -> pd.DataFrame:
     """
     Build a multi-year annual projection table.
@@ -643,8 +650,9 @@ def build_annual_projection(
         yr_self_consumed = yr_solar_kwh - max(yr_export_kwh, 0)
         # Net grid load = import - export (what flows through the meter from grid)
         yr_net_grid = yr_import_kwh - max(yr_export_kwh, 0)
+        if existing_solar_offset_kwh > 0:
+            row["Degraded System Load Offset (kWh)"] = round(existing_solar_offset_kwh * load_factor)
         row.update({
-            "Load (kWh)": round(yr_net_grid),
             "Customer Load (kWh)": round(yr_load_kwh),
             "Solar (kWh)": round(yr_solar_kwh),
             "Solar Offset (kWh)": round(yr_self_consumed),
