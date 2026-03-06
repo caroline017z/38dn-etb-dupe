@@ -46,10 +46,19 @@ def list_saved_simulations() -> list[str]:
 
 
 def load_simulation(name: str) -> dict:
-    """Load a simulation JSON by name."""
+    """Load a simulation JSON by name.  Returns empty dict if file is corrupt."""
     name = sanitize_filename(name)
-    with open(os.path.join(SIMULATIONS_DIR, f"{name}.json"), "r") as f:
-        return json.load(f)
+    fp = os.path.join(SIMULATIONS_DIR, f"{name}.json")
+    try:
+        with open(fp, "r") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, ValueError):
+        # Corrupted file — remove it so it doesn't keep causing errors
+        try:
+            os.remove(fp)
+        except OSError:
+            pass
+        return {}
 
 
 def save_simulation(name, result, summary, projection_df, inputs, **extra):
