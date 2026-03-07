@@ -1036,976 +1036,960 @@ with _mgmt_btn_cols[6]:
 
 # ---- LOAD PROFILES SECTION ----
 if st.session_state["active_mgmt_tab"] == "Load Profiles":
-    _lp_hdr_l, _lp_hdr_r = st.columns([6, 1])
-    _lp_hdr_l.markdown("#### Load Profiles")
-    if _lp_hdr_r.button("Close", key="close_load_profiles", type="tertiary"):
-        st.session_state["active_mgmt_tab"] = None
-        st.rerun()
-    # ================================================================
-    # A. Saved Load Profiles — unified dropdown (CSV + NEM-A)
-    # ================================================================
-    _all_profiles = _list_all_load_profiles()
+    with st.expander("Load Profiles", expanded=True):
+        # ================================================================
+        # A. Saved Load Profiles — unified dropdown (CSV + NEM-A)
+        # ================================================================
+        _all_profiles = _list_all_load_profiles()
 
-    _sel_name = None
-    _sel_type = None
+        _sel_name = None
+        _sel_type = None
 
-    if _all_profiles:
-        st.markdown("**Saved Load Profiles**")
-        _profile_names = [p[0] for p in _all_profiles]
-        _sel_name = st.selectbox("Select profile", _profile_names, key="lp_sel", index=None, placeholder="Choose a profile to edit...")
+        if _all_profiles:
+            st.markdown("**Saved Load Profiles**")
+            _profile_names = [p[0] for p in _all_profiles]
+            _sel_name = st.selectbox("Select profile", _profile_names, key="lp_sel", index=None, placeholder="Choose a profile to edit...")
 
-        if _sel_name:
-            _sel_idx = _profile_names.index(_sel_name)
-            _sel_type = _all_profiles[_sel_idx][1]
+            if _sel_name:
+                _sel_idx = _profile_names.index(_sel_name)
+                _sel_type = _all_profiles[_sel_idx][1]
 
-            # Show profile details
-            try:
-                if _sel_type == "csv":
-                    _det_df = _load_profile_csv(LOAD_PROFILES_DIR, _sel_name)
-                    _det_vals = _parse_8760_csv(_det_df)
-                    st.caption(
-                        f"**{_sel_name}** — Single Meter CSV · "
-                        f"{_det_vals.sum():,.0f} kWh/yr · Peak: {_det_vals.max():,.1f} kW"
-                    )
-                else:
-                    with open(os.path.join(NEMA_PROFILES_DIR, f"{_sel_name}.json")) as _det_f:
-                        _det_nd = json.load(_det_f)
-                    _det_meters = _det_nd.get("meters", [])
-                    _det_total = sum(sum(m.get("load_8760", [])) for m in _det_meters)
-                    _det_gen = next((m["name"] for m in _det_meters if m.get("is_generating")), "—")
-                    st.caption(
-                        f"**{_sel_name}** — NEM-A · {_det_nd.get('utility', '')} · "
-                        f"{len(_det_meters)} meters · {_det_total:,.0f} kWh/yr · Gen: {_det_gen}"
-                    )
-            except Exception as e:
-                st.warning(f"Could not load profile details: {e}")
-
-            _btn_col1, _btn_col2 = st.columns(2)
-            with _btn_col1:
-                _lp_load_btn = st.button("Load into Session", key="lp_load_session", type="primary")
-            with _btn_col2:
-                _lp_del_btn = st.button("Delete", key="lp_del")
-
-            if _lp_load_btn:
+                # Show profile details
                 try:
-                    _cod_yr = st.session_state.get("sb_cod_date", date(2026, 1, 1)).year
                     if _sel_type == "csv":
-                        _al_df = _load_profile_csv(LOAD_PROFILES_DIR, _sel_name)
-                        _al_vals = _parse_8760_csv(_al_df)
-                        _al_dt = pd.date_range(f"{_cod_yr}-01-01", periods=8760, freq="h")
-                        st.session_state["load_8760"] = pd.Series(_al_vals, index=_al_dt, name="load_kwh")
-                        st.session_state["_raw_load_8760"] = st.session_state["load_8760"].copy()
-                        st.session_state["load_mode"] = "Single Meter"
-                        st.session_state["load_mode_radio"] = "Single Meter"
-                        st.success(f"Loaded '{_sel_name}': {_al_vals.sum():,.0f} kWh/yr")
-                    else:
-                        _load_nema_profile_into_session(_sel_name)
-                        st.success(f"Loaded NEM-A '{_sel_name}' ({len(st.session_state.get('nema_meters', []))} meters)")
-                except Exception as e:
-                    st.error(f"Error loading profile: {e}")
-
-            if _lp_del_btn:
-                if _sel_type == "csv":
-                    _delete_file(LOAD_PROFILES_DIR, _sel_name, ".csv")
-                else:
-                    _delete_file(NEMA_PROFILES_DIR, _sel_name, ".json")
-                st.success(f"Deleted '{_sel_name}'.")
-                st.rerun()
-    else:
-        st.caption("No saved load profiles yet.")
-
-    # ================================================================
-    # B. Create New Profile (CSV upload or NEM-A builder)
-    # ================================================================
-    st.markdown("---")
-    _new_profile_type = st.radio(
-        "New Profile Type",
-        ["Single Meter CSV", "NEM-A Multi-Meter"],
-        horizontal=True,
-        key="mgmt_new_profile_type",
-    )
-
-    if _new_profile_type == "Single Meter CSV":
-        # --- CSV upload & save ---
-        lp_name = st.text_input("Profile Name", placeholder="e.g., Dairy-Farm-2024", key="lp_name")
-        lp_file = st.file_uploader("Upload 8760 Load CSV", type=["csv"], key="lp_upload")
-        lp_save_btn = st.button("Save Load Profile", disabled=(not lp_name or lp_file is None))
-
-        if lp_save_btn and lp_file is not None and lp_name:
-            try:
-                df_up = pd.read_csv(lp_file)
-                _parse_8760_csv(df_up)  # validate
-                _save_profile_csv(LOAD_PROFILES_DIR, lp_name, df_up)
-                st.success(f"Load profile '{lp_name}' saved!")
-                st.rerun()
-            except Exception as e:
-                st.error(str(e))
-
-    else:
-        # --- NEM-A multi-meter profile builder ---
-        _nema_profile_name = st.text_input(
-            "NEM-A Profile Name",
-            placeholder="e.g., Dairy-Farm-2024",
-            key="mgmt_nema_profile_name",
-        )
-
-        # --- Utility selector ---
-        _mgmt_nema_utility = st.selectbox(
-            "NEM-A Utility (for fees)",
-            list(NEMA_FEES.keys()),
-            key="mgmt_nema_utility_sel",
-            index=list(NEMA_FEES.keys()).index(st.session_state.get("nema_utility", "PG&E")),
-        )
-        st.session_state["nema_utility"] = _mgmt_nema_utility
-
-        _mgmt_fee_info = NEMA_FEES[_mgmt_nema_utility]
-        st.caption(
-            f"Admin fees: ${_mgmt_fee_info['setup_per_meter']:.0f}/meter setup"
-            + (f" (cap ${_mgmt_fee_info['setup_cap']:.0f})" if _mgmt_fee_info['setup_cap'] else "")
-            + f", ${_mgmt_fee_info['monthly_per_meter']:.2f}/meter/month"
-        )
-
-        # --- Fetch Available Rates (shared across meters) ---
-        _mgmt_fetch_col1, _mgmt_fetch_col2 = st.columns([1, 2])
-        with _mgmt_fetch_col1:
-            if st.button("Fetch Available Rates", key="mgmt_nema_fetch_rates"):
-                st.session_state["_pending_mgmt_fetch_rates"] = _mgmt_nema_utility
-        if st.session_state.get("available_rates"):
-            st.caption(f"{len(st.session_state['available_rates'])} rate schedules available for per-meter tariff selection.")
-
-        # --- Initialize meter list if needed ---
-        if "nema_meters" not in st.session_state or not st.session_state["nema_meters"]:
-            st.session_state["nema_meters"] = [
-                {"name": "Generating Meter", "is_generating": True, "load_key": "nema_load_0", "tariff_key": "nema_tariff_0"},
-                {"name": "Meter 2", "is_generating": False, "load_key": "nema_load_1", "tariff_key": "nema_tariff_1"},
-            ]
-
-        # --- Add meter ---
-        if st.button("+ Add Meter", key="mgmt_nema_add_meter"):
-            _mgmt_idx = len(st.session_state["nema_meters"])
-            st.session_state["nema_meters"].append({
-                "name": f"Meter {_mgmt_idx + 1}",
-                "is_generating": False,
-                "load_key": f"nema_load_{_mgmt_idx}",
-                "tariff_key": f"nema_tariff_{_mgmt_idx}",
-            })
-            st.rerun()
-
-        st.markdown("---")
-        st.caption("Upload an 8760 load CSV for each meter, then save the entire configuration as one profile.")
-
-        # --- Per-meter expanders (config + upload only) ---
-        _nema_staged_uploads: dict[int, pd.DataFrame] = {}
-        for _lp_i, _lp_meter in enumerate(st.session_state["nema_meters"]):
-            with st.expander(f"{'*' if _lp_meter.get('is_generating') else ''} {_lp_meter['name']}", expanded=(_lp_i < 2)):
-                _lp_meter["name"] = st.text_input(
-                    "Meter Name", value=_lp_meter["name"], key=f"mgmt_nema_name_{_lp_i}",
-                )
-                _lp_meter["is_generating"] = st.checkbox(
-                    "Generating meter (PV/ESS)",
-                    value=_lp_meter["is_generating"],
-                    key=f"mgmt_nema_gen_{_lp_i}",
-                )
-                _lp_m_file = st.file_uploader(
-                    "Upload 8760 Load CSV", type=["csv"], key=f"mgmt_lp_upload_{_lp_i}",
-                )
-                if _lp_m_file is not None:
-                    try:
-                        _lp_m_df = pd.read_csv(_lp_m_file)
-                        _lp_m_vals = _parse_8760_csv(_lp_m_df)
-                        _nema_staged_uploads[_lp_i] = _lp_m_df
-                        st.success(f"{len(_lp_m_vals):,} rows loaded ({_lp_m_vals.sum():,.0f} kWh)")
-                    except Exception as e:
-                        st.error(str(e))
-                else:
-                    _existing_load = st.session_state.get("nema_meter_loads", {}).get(_lp_i)
-                    if _existing_load is not None:
-                        st.caption(f"Loaded: {len(_existing_load):,} rows ({_existing_load.sum():,.0f} kWh)")
-                    elif _lp_meter.get("is_generating") and st.session_state.get("load_8760") is not None:
-                        st.caption(f"Using generating meter load from sidebar ({st.session_state["load_8760"].sum():,.0f} kWh)")
-
-                # --- Per-meter tariff selection (non-generating meters) ---
-                if not _lp_meter.get("is_generating"):
-                    st.markdown("**Tariff**")
-                    _lp_use_gen = st.checkbox(
-                        "Use generating meter's tariff",
-                        value=_lp_meter.get("use_gen_tariff", True),
-                        key=f"mgmt_nema_use_gen_tariff_{_lp_i}",
-                    )
-                    _lp_meter["use_gen_tariff"] = _lp_use_gen
-                    if not _lp_use_gen and st.session_state.get("available_rates"):
-                        _mgmt_rate_opts = {f"{r['name']}": r["label"] for r in st.session_state["available_rates"]}
-                        _mgmt_sel_rate = st.selectbox(
-                            "Select Rate Schedule", list(_mgmt_rate_opts.keys()),
-                            key=f"mgmt_nema_tariff_sel_{_lp_i}",
+                        _det_df = _load_profile_csv(LOAD_PROFILES_DIR, _sel_name)
+                        _det_vals = _parse_8760_csv(_det_df)
+                        st.caption(
+                            f"**{_sel_name}** — Single Meter CSV · "
+                            f"{_det_vals.sum():,.0f} kWh/yr · Peak: {_det_vals.max():,.1f} kW"
                         )
-                        if st.button("Load Tariff", key=f"mgmt_nema_tariff_load_{_lp_i}", type="primary"):
-                            st.session_state[f"_pending_mgmt_nema_tariff_{_lp_i}"] = _mgmt_rate_opts[_mgmt_sel_rate]
-                    _lp_cur_tariff = st.session_state.get("nema_meter_tariffs", {}).get(_lp_i)
-                    if _lp_cur_tariff is not None:
-                        st.success(f"Tariff loaded: {_lp_cur_tariff.name}")
-                    elif not _lp_use_gen:
-                        st.warning("No tariff loaded for this meter.")
+                    else:
+                        with open(os.path.join(NEMA_PROFILES_DIR, f"{_sel_name}.json")) as _det_f:
+                            _det_nd = json.load(_det_f)
+                        _det_meters = _det_nd.get("meters", [])
+                        _det_total = sum(sum(m.get("load_8760", [])) for m in _det_meters)
+                        _det_gen = next((m["name"] for m in _det_meters if m.get("is_generating")), "—")
+                        st.caption(
+                            f"**{_sel_name}** — NEM-A · {_det_nd.get('utility', '')} · "
+                            f"{len(_det_meters)} meters · {_det_total:,.0f} kWh/yr · Gen: {_det_gen}"
+                        )
+                except Exception as e:
+                    st.warning(f"Could not load profile details: {e}")
 
-                # Remove meter
-                if len(st.session_state["nema_meters"]) > 2 and not _lp_meter["is_generating"]:
-                    if st.button("Remove this meter", key=f"mgmt_nema_remove_{_lp_i}"):
-                        st.session_state["nema_meters"].pop(_lp_i)
-                        _old_tariffs = st.session_state.get("nema_meter_tariffs", {})
-                        _new_tariffs = {}
-                        for _tk, _tv in _old_tariffs.items():
-                            if _tk < _lp_i:
-                                _new_tariffs[_tk] = _tv
-                            elif _tk > _lp_i:
-                                _new_tariffs[_tk - 1] = _tv
-                        st.session_state["nema_meter_tariffs"] = _new_tariffs
-                        st.rerun()
+                _btn_col1, _btn_col2 = st.columns(2)
+                with _btn_col1:
+                    _lp_load_btn = st.button("Load into Session", key="lp_load_session", type="primary")
+                with _btn_col2:
+                    _lp_del_btn = st.button("Delete", key="lp_del")
 
-        # --- Save NEM-A profile ---
+                if _lp_load_btn:
+                    try:
+                        _cod_yr = st.session_state.get("sb_cod_date", date(2026, 1, 1)).year
+                        if _sel_type == "csv":
+                            _al_df = _load_profile_csv(LOAD_PROFILES_DIR, _sel_name)
+                            _al_vals = _parse_8760_csv(_al_df)
+                            _al_dt = pd.date_range(f"{_cod_yr}-01-01", periods=8760, freq="h")
+                            st.session_state["load_8760"] = pd.Series(_al_vals, index=_al_dt, name="load_kwh")
+                            st.session_state["_raw_load_8760"] = st.session_state["load_8760"].copy()
+                            st.session_state["load_mode"] = "Single Meter"
+                            st.session_state["load_mode_radio"] = "Single Meter"
+                            st.success(f"Loaded '{_sel_name}': {_al_vals.sum():,.0f} kWh/yr")
+                        else:
+                            _load_nema_profile_into_session(_sel_name)
+                            st.success(f"Loaded NEM-A '{_sel_name}' ({len(st.session_state.get('nema_meters', []))} meters)")
+                    except Exception as e:
+                        st.error(f"Error loading profile: {e}")
+
+                if _lp_del_btn:
+                    if _sel_type == "csv":
+                        _delete_file(LOAD_PROFILES_DIR, _sel_name, ".csv")
+                    else:
+                        _delete_file(NEMA_PROFILES_DIR, _sel_name, ".json")
+                    st.success(f"Deleted '{_sel_name}'.")
+                    st.rerun()
+        else:
+            st.caption("No saved load profiles yet.")
+
+        # ================================================================
+        # B. Create New Profile (CSV upload or NEM-A builder)
+        # ================================================================
         st.markdown("---")
-        _nema_save_col1, _nema_save_col2 = st.columns([1, 1])
-        with _nema_save_col1:
-            _nema_save_btn = st.button(
-                "Save NEM-A Profile",
-                type="primary",
-                disabled=(not _nema_profile_name),
-                key="mgmt_nema_save_profile",
-            )
-        if _nema_save_btn and _nema_profile_name:
-            _nema_bundle_meters = []
-            _nema_save_ok = True
-            _nema_existing_loads = st.session_state.get("nema_meter_loads", {})
-            for _si, _sm in enumerate(st.session_state["nema_meters"]):
-                if _si in _nema_staged_uploads:
-                    _s_vals = _parse_8760_csv(_nema_staged_uploads[_si])
-                    _s_load_list = _s_vals.tolist()
-                elif _si in _nema_existing_loads:
-                    _s_load_list = _nema_existing_loads[_si].tolist()
-                elif _sm.get("is_generating") and st.session_state.get("load_8760") is not None:
-                    _s_load_list = st.session_state["load_8760"].tolist()
-                else:
-                    _s_load_list = None
+        _new_profile_type = st.radio(
+            "New Profile Type",
+            ["Single Meter CSV", "NEM-A Multi-Meter"],
+            horizontal=True,
+            key="mgmt_new_profile_type",
+        )
 
-                if _s_load_list is None:
-                    st.error(f"No load data for meter '{_sm['name']}'. Upload a CSV or load a profile in the sidebar first.")
-                    _nema_save_ok = False
-                    break
+        if _new_profile_type == "Single Meter CSV":
+            # --- CSV upload & save ---
+            lp_name = st.text_input("Profile Name", placeholder="e.g., Dairy-Farm-2024", key="lp_name")
+            lp_file = st.file_uploader("Upload 8760 Load CSV", type=["csv"], key="lp_upload")
+            lp_save_btn = st.button("Save Load Profile", disabled=(not lp_name or lp_file is None))
 
-                _nema_save_tariffs = st.session_state.get("nema_meter_tariffs", {})
-                _nema_bundle_meters.append({
-                    "name": _sm["name"],
-                    "is_generating": _sm.get("is_generating", False),
-                    "use_gen_tariff": _sm.get("use_gen_tariff", not _sm.get("is_generating", False)),
-                    "load_8760": _s_load_list,
-                    "tariff": asdict(_nema_save_tariffs[_si]) if _si in _nema_save_tariffs else None,
-                })
-
-            if _nema_save_ok:
-                import json as _json
-                _nema_bundle = {
-                    "utility": _mgmt_nema_utility,
-                    "meters": _nema_bundle_meters,
-                    "existing_solar_meters": st.session_state.get("existing_solar_nema_meters", []),
-                }
-                _nema_safe_name = sanitize_filename(_nema_profile_name)
-                _nema_json_bytes = _json.dumps(_nema_bundle).encode("utf-8")
-                save_profile_bytes(NEMA_PROFILES_DIR, _DIR_TO_GCS_PREFIX[NEMA_PROFILES_DIR], _nema_safe_name, _nema_json_bytes, ".json")
-                st.success(f"NEM-A profile '{_nema_profile_name}' saved with {len(_nema_bundle_meters)} meters.")
-                st.rerun()
-
-    # ================================================================
-    # C. Editing selected profile
-    # ================================================================
-    if _sel_name and _sel_type:
-        st.markdown("---")
-        # --- Auto-populate: CSV viewer/editor ---
-        if _sel_type == "csv":
-            st.subheader(f"Editing: {_sel_name}")
-            edit_df = _load_profile_csv(LOAD_PROFILES_DIR, _sel_name)
-            try:
-                vals = _parse_8760_csv(edit_df)
-                st.write(f"**Rows:** {len(vals):,} | **Annual:** {vals.sum():,.0f} kWh | **Peak:** {vals.max():,.1f} kW")
-
-                # Chart selector
-                _preview_year = st.session_state.get("sb_cod_date", date(2026, 1, 1)).year
-                dt_idx = pd.date_range(f"{_preview_year}-01-01", periods=8760, freq="h")
-                _lp_chart_type = st.radio(
-                    "Display",
-                    ["Monthly Load", "Average Daily Profile", "Load Duration Curve"],
-                    horizontal=True,
-                    key="lp_chart_type",
-                )
-                import plotly.graph_objects as go
-                _chart_layout = dict(
-                    height=380,
-                    template="plotly_white",
-                    font=dict(family="Aptos Narrow, Aptos, Calibri, Arial Narrow, sans-serif", size=12),
-                    title_font=dict(size=15, color="#0E2841"),
-                    margin=dict(l=40, r=20, t=50, b=40),
-                )
-                if _lp_chart_type == "Monthly Load":
-                    monthly_kwh = pd.Series(vals, index=dt_idx).resample("ME").sum()
-                    fig = go.Figure(go.Bar(x=MONTH_NAMES, y=monthly_kwh.values, marker_color="#636EFA"))
-                    fig.update_layout(title="Monthly Load (kWh)", yaxis_title="kWh", **_chart_layout)
-                    st.plotly_chart(fig, use_container_width=True)
-                elif _lp_chart_type == "Average Daily Profile":
-                    _lp_series = pd.Series(vals, index=dt_idx)
-                    _lp_avg_hourly = _lp_series.groupby(_lp_series.index.hour).mean()
-                    fig = go.Figure(go.Scatter(
-                        x=list(range(24)), y=_lp_avg_hourly.values,
-                        mode="lines+markers", line=dict(color="#636EFA", width=2.5),
-                        marker=dict(size=5), fill="tozeroy", fillcolor="rgba(99,110,250,0.1)",
-                    ))
-                    fig.update_layout(
-                        title="Average Daily Load Profile",
-                        xaxis_title="Hour of Day", yaxis_title="Avg kW",
-                        xaxis=dict(dtick=1, range=[-0.5, 23.5]),
-                        **_chart_layout,
-                    )
-                    st.plotly_chart(fig, use_container_width=True)
-                else:  # Load Duration Curve
-                    _lp_sorted = np.sort(vals)[::-1]
-                    fig = go.Figure(go.Scatter(
-                        x=list(range(1, 8761)), y=_lp_sorted,
-                        mode="lines", line=dict(color="#636EFA", width=2),
-                        fill="tozeroy", fillcolor="rgba(99,110,250,0.1)",
-                    ))
-                    fig.update_layout(
-                        title="Load Duration Curve",
-                        xaxis_title="Hours", yaxis_title="kW",
-                        **_chart_layout,
-                    )
-                    st.plotly_chart(fig, use_container_width=True)
-            except Exception as e:
-                st.warning(str(e))
-
-            st.caption("Edit the data below and click Save to update.")
-            edited_df = st.data_editor(edit_df, num_rows="fixed", width="stretch", height=400, key="lp_editor")
-
-            lp_save_edit = st.button("Save Changes", key="lp_save_edit")
-            if lp_save_edit:
+            if lp_save_btn and lp_file is not None and lp_name:
                 try:
-                    _parse_8760_csv(edited_df)  # validate
-                    _save_profile_csv(LOAD_PROFILES_DIR, _sel_name, edited_df)
-                    st.success(f"'{_sel_name}' updated!")
+                    df_up = pd.read_csv(lp_file)
+                    _parse_8760_csv(df_up)  # validate
+                    _save_profile_csv(LOAD_PROFILES_DIR, lp_name, df_up)
+                    st.success(f"Load profile '{lp_name}' saved!")
                     st.rerun()
                 except Exception as e:
                     st.error(str(e))
 
-        # --- Auto-populate: NEM-A inline editor ---
-        if _sel_type == "nema":
-            import json as _json
-            _nema_edit_path = os.path.join(NEMA_PROFILES_DIR, f"{_sel_name}.json")
-            if os.path.exists(_nema_edit_path):
-                with open(_nema_edit_path, "r") as _f:
-                    _ne_data = _json.load(_f)
+        else:
+            # --- NEM-A multi-meter profile builder ---
+            _nema_profile_name = st.text_input(
+                "NEM-A Profile Name",
+                placeholder="e.g., Dairy-Farm-2024",
+                key="mgmt_nema_profile_name",
+            )
 
-                st.subheader(f"Editing: {_sel_name}")
+            # --- Utility selector ---
+            _mgmt_nema_utility = st.selectbox(
+                "NEM-A Utility (for fees)",
+                list(NEMA_FEES.keys()),
+                key="mgmt_nema_utility_sel",
+                index=list(NEMA_FEES.keys()).index(st.session_state.get("nema_utility", "PG&E")),
+            )
+            st.session_state["nema_utility"] = _mgmt_nema_utility
 
-                # Load into Session button
-                if st.button("Load into Session", key="mgmt_nema_load_profile", type="primary"):
-                    _load_nema_profile_into_session(_sel_name)
-                    st.success(f"Loaded NEM-A profile '{_sel_name}' ({len(st.session_state.get('nema_meters', []))} meters).")
-                    st.rerun()
+            _mgmt_fee_info = NEMA_FEES[_mgmt_nema_utility]
+            st.caption(
+                f"Admin fees: ${_mgmt_fee_info['setup_per_meter']:.0f}/meter setup"
+                + (f" (cap ${_mgmt_fee_info['setup_cap']:.0f})" if _mgmt_fee_info['setup_cap'] else "")
+                + f", ${_mgmt_fee_info['monthly_per_meter']:.2f}/meter/month"
+            )
 
-                # --- Utility selector ---
-                _ne_utility = st.selectbox(
-                    "Utility",
-                    list(NEMA_FEES.keys()),
-                    key="edit_nema_utility",
-                    index=list(NEMA_FEES.keys()).index(_ne_data.get("utility", "PG&E")),
-                )
+            # --- Fetch Available Rates (shared across meters) ---
+            _mgmt_fetch_col1, _mgmt_fetch_col2 = st.columns([1, 2])
+            with _mgmt_fetch_col1:
+                if st.button("Fetch Available Rates", key="mgmt_nema_fetch_rates"):
+                    st.session_state["_pending_mgmt_fetch_rates"] = _mgmt_nema_utility
+            if st.session_state.get("available_rates"):
+                st.caption(f"{len(st.session_state['available_rates'])} rate schedules available for per-meter tariff selection.")
 
-                _ne_fee_info = NEMA_FEES[_ne_utility]
-                st.caption(
-                    f"Admin fees: ${_ne_fee_info['setup_per_meter']:.0f}/meter setup"
-                    + (f" (cap ${_ne_fee_info['setup_cap']:.0f})" if _ne_fee_info['setup_cap'] else "")
-                    + f", ${_ne_fee_info['monthly_per_meter']:.2f}/meter/month"
-                )
+            # --- Initialize meter list if needed ---
+            if "nema_meters" not in st.session_state or not st.session_state["nema_meters"]:
+                st.session_state["nema_meters"] = [
+                    {"name": "Generating Meter", "is_generating": True, "load_key": "nema_load_0", "tariff_key": "nema_tariff_0"},
+                    {"name": "Meter 2", "is_generating": False, "load_key": "nema_load_1", "tariff_key": "nema_tariff_1"},
+                ]
 
-                # Fetch rates for tariff selection
-                if st.button("Fetch Available Rates", key="edit_nema_fetch_rates"):
-                    st.session_state["_pending_edit_nema_fetch_rates"] = _ne_utility
-                if st.session_state.get("available_rates"):
-                    st.caption(f"{len(st.session_state['available_rates'])} rate schedules available.")
+            # --- Add meter ---
+            if st.button("+ Add Meter", key="mgmt_nema_add_meter"):
+                _mgmt_idx = len(st.session_state["nema_meters"])
+                st.session_state["nema_meters"].append({
+                    "name": f"Meter {_mgmt_idx + 1}",
+                    "is_generating": False,
+                    "load_key": f"nema_load_{_mgmt_idx}",
+                    "tariff_key": f"nema_tariff_{_mgmt_idx}",
+                })
+                st.rerun()
 
-                # Initialize edit-state meters from JSON (only on first load of this profile)
-                _ne_edit_key = f"_ne_editing_{_sel_name}"
-                if st.session_state.get("_ne_edit_profile") != _sel_name:
-                    st.session_state["_ne_edit_profile"] = _sel_name
-                    _ne_edit_meters = []
-                    _ne_edit_loads: dict[int, list] = {}
-                    _ne_edit_tariffs: dict[int, dict | None] = {}
-                    for _ei, _em in enumerate(_ne_data.get("meters", [])):
-                        _ne_edit_meters.append({
-                            "name": _em["name"],
-                            "is_generating": _em.get("is_generating", False),
-                            "use_gen_tariff": _em.get("use_gen_tariff", not _em.get("is_generating", False)),
-                        })
-                        if _em.get("load_8760"):
-                            _ne_edit_loads[_ei] = _em["load_8760"]
-                        _ne_edit_tariffs[_ei] = _em.get("tariff")
-                    st.session_state["_ne_edit_meters"] = _ne_edit_meters
-                    st.session_state["_ne_edit_loads"] = _ne_edit_loads
-                    st.session_state["_ne_edit_tariffs"] = _ne_edit_tariffs
+            st.markdown("---")
+            st.caption("Upload an 8760 load CSV for each meter, then save the entire configuration as one profile.")
 
-                _ne_edit_meters = st.session_state.get("_ne_edit_meters", [])
-                _ne_edit_loads = st.session_state.get("_ne_edit_loads", {})
-                _ne_edit_tariffs = st.session_state.get("_ne_edit_tariffs", {})
+            # --- Per-meter expanders (config + upload only) ---
+            _nema_staged_uploads: dict[int, pd.DataFrame] = {}
+            for _lp_i, _lp_meter in enumerate(st.session_state["nema_meters"]):
+                with st.expander(f"{'*' if _lp_meter.get('is_generating') else ''} {_lp_meter['name']}", expanded=(_lp_i < 2)):
+                    _lp_meter["name"] = st.text_input(
+                        "Meter Name", value=_lp_meter["name"], key=f"mgmt_nema_name_{_lp_i}",
+                    )
+                    _lp_meter["is_generating"] = st.checkbox(
+                        "Generating meter (PV/ESS)",
+                        value=_lp_meter["is_generating"],
+                        key=f"mgmt_nema_gen_{_lp_i}",
+                    )
+                    _lp_m_file = st.file_uploader(
+                        "Upload 8760 Load CSV", type=["csv"], key=f"mgmt_lp_upload_{_lp_i}",
+                    )
+                    if _lp_m_file is not None:
+                        try:
+                            _lp_m_df = pd.read_csv(_lp_m_file)
+                            _lp_m_vals = _parse_8760_csv(_lp_m_df)
+                            _nema_staged_uploads[_lp_i] = _lp_m_df
+                            st.success(f"{len(_lp_m_vals):,} rows loaded ({_lp_m_vals.sum():,.0f} kWh)")
+                        except Exception as e:
+                            st.error(str(e))
+                    else:
+                        _existing_load = st.session_state.get("nema_meter_loads", {}).get(_lp_i)
+                        if _existing_load is not None:
+                            st.caption(f"Loaded: {len(_existing_load):,} rows ({_existing_load.sum():,.0f} kWh)")
+                        elif _lp_meter.get("is_generating") and st.session_state.get("load_8760") is not None:
+                            st.caption(f"Using generating meter load from sidebar ({st.session_state["load_8760"].sum():,.0f} kWh)")
 
-                # Add meter
-                if st.button("+ Add Meter", key="edit_nema_add_meter"):
-                    _ne_new_idx = len(_ne_edit_meters)
-                    _ne_edit_meters.append({
-                        "name": f"Meter {_ne_new_idx + 1}",
-                        "is_generating": False,
-                        "use_gen_tariff": True,
-                    })
-                    st.session_state["_ne_edit_meters"] = _ne_edit_meters
-                    st.rerun()
-
-                st.markdown("---")
-
-                # Per-meter expanders
-                _ne_staged_uploads: dict[int, pd.DataFrame] = {}
-                for _ei, _em in enumerate(_ne_edit_meters):
-                    with st.expander(f"{'*' if _em.get('is_generating') else ''} {_em['name']}", expanded=(_ei < 2)):
-                        _em["name"] = st.text_input(
-                            "Meter Name", value=_em["name"], key=f"edit_nema_name_{_ei}",
+                    # --- Per-meter tariff selection (non-generating meters) ---
+                    if not _lp_meter.get("is_generating"):
+                        st.markdown("**Tariff**")
+                        _lp_use_gen = st.checkbox(
+                            "Use generating meter's tariff",
+                            value=_lp_meter.get("use_gen_tariff", True),
+                            key=f"mgmt_nema_use_gen_tariff_{_lp_i}",
                         )
-                        _em["is_generating"] = st.checkbox(
-                            "Generating meter (PV/ESS)",
-                            value=_em.get("is_generating", False),
-                            key=f"edit_nema_gen_{_ei}",
-                        )
-
-                        # Load upload
-                        _ne_m_file = st.file_uploader(
-                            "Upload 8760 Load CSV", type=["csv"], key=f"edit_nema_upload_{_ei}",
-                        )
-                        if _ne_m_file is not None:
-                            try:
-                                _ne_m_df = pd.read_csv(_ne_m_file)
-                                _ne_m_vals = _parse_8760_csv(_ne_m_df)
-                                _ne_staged_uploads[_ei] = _ne_m_df
-                                st.success(f"{len(_ne_m_vals):,} rows loaded ({_ne_m_vals.sum():,.0f} kWh)")
-                            except Exception as e:
-                                st.error(str(e))
-                        else:
-                            _ne_cur_load = _ne_edit_loads.get(_ei)
-                            if _ne_cur_load is not None:
-                                _ne_load_sum = sum(_ne_cur_load)
-                                st.caption(f"Loaded: {len(_ne_cur_load):,} rows ({_ne_load_sum:,.0f} kWh)")
-
-                        # Tariff selection (non-generating)
-                        if not _em.get("is_generating"):
-                            st.markdown("**Tariff**")
-                            _ne_use_gen = st.checkbox(
-                                "Use generating meter's tariff",
-                                value=_em.get("use_gen_tariff", True),
-                                key=f"edit_nema_use_gen_tariff_{_ei}",
+                        _lp_meter["use_gen_tariff"] = _lp_use_gen
+                        if not _lp_use_gen and st.session_state.get("available_rates"):
+                            _mgmt_rate_opts = {f"{r['name']}": r["label"] for r in st.session_state["available_rates"]}
+                            _mgmt_sel_rate = st.selectbox(
+                                "Select Rate Schedule", list(_mgmt_rate_opts.keys()),
+                                key=f"mgmt_nema_tariff_sel_{_lp_i}",
                             )
-                            _em["use_gen_tariff"] = _ne_use_gen
-                            if not _ne_use_gen and st.session_state.get("available_rates"):
-                                _ne_rate_opts = {f"{r['name']}": r["label"] for r in st.session_state["available_rates"]}
-                                _ne_sel_rate = st.selectbox(
-                                    "Select Rate Schedule", list(_ne_rate_opts.keys()),
-                                    key=f"edit_nema_tariff_sel_{_ei}",
-                                )
-                                if st.button("Load Tariff", key=f"edit_nema_tariff_load_{_ei}", type="primary"):
-                                    st.session_state[f"_pending_edit_nema_tariff_{_ei}"] = _ne_rate_opts[_ne_sel_rate]
-                            _ne_cur_tariff = _ne_edit_tariffs.get(_ei)
-                            if _ne_cur_tariff is not None and isinstance(_ne_cur_tariff, dict) and _ne_cur_tariff.get("name"):
-                                st.success(f"Tariff: {_ne_cur_tariff['name']}")
-                            elif not _ne_use_gen:
-                                st.warning("No tariff loaded for this meter.")
-                        else:
-                            _em["use_gen_tariff"] = False
+                            if st.button("Load Tariff", key=f"mgmt_nema_tariff_load_{_lp_i}", type="primary"):
+                                st.session_state[f"_pending_mgmt_nema_tariff_{_lp_i}"] = _mgmt_rate_opts[_mgmt_sel_rate]
+                        _lp_cur_tariff = st.session_state.get("nema_meter_tariffs", {}).get(_lp_i)
+                        if _lp_cur_tariff is not None:
+                            st.success(f"Tariff loaded: {_lp_cur_tariff.name}")
+                        elif not _lp_use_gen:
+                            st.warning("No tariff loaded for this meter.")
 
-                        # Remove meter
-                        if len(_ne_edit_meters) > 2 and not _em.get("is_generating"):
-                            if st.button("Remove this meter", key=f"edit_nema_remove_{_ei}"):
-                                _ne_edit_meters.pop(_ei)
-                                # Re-index loads and tariffs
-                                _new_loads = {}
-                                for _k, _v in _ne_edit_loads.items():
-                                    if _k < _ei:
-                                        _new_loads[_k] = _v
-                                    elif _k > _ei:
-                                        _new_loads[_k - 1] = _v
-                                _new_tariffs = {}
-                                for _k, _v in _ne_edit_tariffs.items():
-                                    if _k < _ei:
-                                        _new_tariffs[_k] = _v
-                                    elif _k > _ei:
-                                        _new_tariffs[_k - 1] = _v
-                                st.session_state["_ne_edit_meters"] = _ne_edit_meters
-                                st.session_state["_ne_edit_loads"] = _new_loads
-                                st.session_state["_ne_edit_tariffs"] = _new_tariffs
-                                st.rerun()
+                    # Remove meter
+                    if len(st.session_state["nema_meters"]) > 2 and not _lp_meter["is_generating"]:
+                        if st.button("Remove this meter", key=f"mgmt_nema_remove_{_lp_i}"):
+                            st.session_state["nema_meters"].pop(_lp_i)
+                            _old_tariffs = st.session_state.get("nema_meter_tariffs", {})
+                            _new_tariffs = {}
+                            for _tk, _tv in _old_tariffs.items():
+                                if _tk < _lp_i:
+                                    _new_tariffs[_tk] = _tv
+                                elif _tk > _lp_i:
+                                    _new_tariffs[_tk - 1] = _tv
+                            st.session_state["nema_meter_tariffs"] = _new_tariffs
+                            st.rerun()
 
-                # Save Changes button
-                st.markdown("---")
-                if st.button("Save Changes", key="edit_nema_save", type="primary"):
-                    _ne_bundle_meters = []
-                    _ne_save_ok = True
-                    for _si, _sm in enumerate(_ne_edit_meters):
-                        if _si in _ne_staged_uploads:
-                            _s_vals = _parse_8760_csv(_ne_staged_uploads[_si])
-                            _s_load_list = _s_vals.tolist()
-                        elif _si in _ne_edit_loads:
-                            _s_load_list = _ne_edit_loads[_si]
-                            if not isinstance(_s_load_list, list):
-                                _s_load_list = list(_s_load_list)
-                        else:
-                            _s_load_list = None
+            # --- Save NEM-A profile ---
+            st.markdown("---")
+            _nema_save_col1, _nema_save_col2 = st.columns([1, 1])
+            with _nema_save_col1:
+                _nema_save_btn = st.button(
+                    "Save NEM-A Profile",
+                    type="primary",
+                    disabled=(not _nema_profile_name),
+                    key="mgmt_nema_save_profile",
+                )
+            if _nema_save_btn and _nema_profile_name:
+                _nema_bundle_meters = []
+                _nema_save_ok = True
+                _nema_existing_loads = st.session_state.get("nema_meter_loads", {})
+                for _si, _sm in enumerate(st.session_state["nema_meters"]):
+                    if _si in _nema_staged_uploads:
+                        _s_vals = _parse_8760_csv(_nema_staged_uploads[_si])
+                        _s_load_list = _s_vals.tolist()
+                    elif _si in _nema_existing_loads:
+                        _s_load_list = _nema_existing_loads[_si].tolist()
+                    elif _sm.get("is_generating") and st.session_state.get("load_8760") is not None:
+                        _s_load_list = st.session_state["load_8760"].tolist()
+                    else:
+                        _s_load_list = None
 
-                        if _s_load_list is None:
-                            st.error(f"No load data for meter '{_sm['name']}'. Upload a CSV.")
-                            _ne_save_ok = False
-                            break
+                    if _s_load_list is None:
+                        st.error(f"No load data for meter '{_sm['name']}'. Upload a CSV or load a profile in the sidebar first.")
+                        _nema_save_ok = False
+                        break
 
-                        _ne_s_tariff = _ne_edit_tariffs.get(_si)
-                        _ne_bundle_meters.append({
-                            "name": _sm["name"],
-                            "is_generating": _sm.get("is_generating", False),
-                            "use_gen_tariff": _sm.get("use_gen_tariff", not _sm.get("is_generating", False)),
-                            "load_8760": _s_load_list,
-                            "tariff": _ne_s_tariff,
-                        })
+                    _nema_save_tariffs = st.session_state.get("nema_meter_tariffs", {})
+                    _nema_bundle_meters.append({
+                        "name": _sm["name"],
+                        "is_generating": _sm.get("is_generating", False),
+                        "use_gen_tariff": _sm.get("use_gen_tariff", not _sm.get("is_generating", False)),
+                        "load_8760": _s_load_list,
+                        "tariff": asdict(_nema_save_tariffs[_si]) if _si in _nema_save_tariffs else None,
+                    })
 
-                    if _ne_save_ok:
-                        _ne_bundle = {
-                            "utility": _ne_utility,
-                            "meters": _ne_bundle_meters,
-                            "existing_solar_meters": _ne_data.get("existing_solar_meters", []),
-                        }
-                        with open(_nema_edit_path, "w") as _f:
-                            _json.dump(_ne_bundle, _f)
-                        # Update edit state loads with staged uploads
-                        for _ui, _udf in _ne_staged_uploads.items():
-                            _ne_edit_loads[_ui] = _parse_8760_csv(_udf).tolist()
-                        st.session_state["_ne_edit_loads"] = _ne_edit_loads
-                        st.success(f"'{_sel_name}' updated with {len(_ne_bundle_meters)} meters.")
+                if _nema_save_ok:
+                    import json as _json
+                    _nema_bundle = {
+                        "utility": _mgmt_nema_utility,
+                        "meters": _nema_bundle_meters,
+                        "existing_solar_meters": st.session_state.get("existing_solar_nema_meters", []),
+                    }
+                    _nema_safe_name = sanitize_filename(_nema_profile_name)
+                    _nema_json_bytes = _json.dumps(_nema_bundle).encode("utf-8")
+                    save_profile_bytes(NEMA_PROFILES_DIR, _DIR_TO_GCS_PREFIX[NEMA_PROFILES_DIR], _nema_safe_name, _nema_json_bytes, ".json")
+                    st.success(f"NEM-A profile '{_nema_profile_name}' saved with {len(_nema_bundle_meters)} meters.")
+                    st.rerun()
+
+        # ================================================================
+        # C. Editing selected profile
+        # ================================================================
+        if _sel_name and _sel_type:
+            st.markdown("---")
+            # --- Auto-populate: CSV viewer/editor ---
+            if _sel_type == "csv":
+                st.subheader(f"Editing: {_sel_name}")
+                edit_df = _load_profile_csv(LOAD_PROFILES_DIR, _sel_name)
+                try:
+                    vals = _parse_8760_csv(edit_df)
+                    st.write(f"**Rows:** {len(vals):,} | **Annual:** {vals.sum():,.0f} kWh | **Peak:** {vals.max():,.1f} kW")
+
+                    # Chart selector
+                    _preview_year = st.session_state.get("sb_cod_date", date(2026, 1, 1)).year
+                    dt_idx = pd.date_range(f"{_preview_year}-01-01", periods=8760, freq="h")
+                    _lp_chart_type = st.radio(
+                        "Display",
+                        ["Monthly Load", "Average Daily Profile", "Load Duration Curve"],
+                        horizontal=True,
+                        key="lp_chart_type",
+                    )
+                    import plotly.graph_objects as go
+                    _chart_layout = dict(
+                        height=380,
+                        template="plotly_white",
+                        font=dict(family="Aptos Narrow, Aptos, Calibri, Arial Narrow, sans-serif", size=12),
+                        title_font=dict(size=15, color="#0E2841"),
+                        margin=dict(l=40, r=20, t=50, b=40),
+                    )
+                    if _lp_chart_type == "Monthly Load":
+                        monthly_kwh = pd.Series(vals, index=dt_idx).resample("ME").sum()
+                        fig = go.Figure(go.Bar(x=MONTH_NAMES, y=monthly_kwh.values, marker_color="#636EFA"))
+                        fig.update_layout(title="Monthly Load (kWh)", yaxis_title="kWh", **_chart_layout)
+                        st.plotly_chart(fig, use_container_width=True)
+                    elif _lp_chart_type == "Average Daily Profile":
+                        _lp_series = pd.Series(vals, index=dt_idx)
+                        _lp_avg_hourly = _lp_series.groupby(_lp_series.index.hour).mean()
+                        fig = go.Figure(go.Scatter(
+                            x=list(range(24)), y=_lp_avg_hourly.values,
+                            mode="lines+markers", line=dict(color="#636EFA", width=2.5),
+                            marker=dict(size=5), fill="tozeroy", fillcolor="rgba(99,110,250,0.1)",
+                        ))
+                        fig.update_layout(
+                            title="Average Daily Load Profile",
+                            xaxis_title="Hour of Day", yaxis_title="Avg kW",
+                            xaxis=dict(dtick=1, range=[-0.5, 23.5]),
+                            **_chart_layout,
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
+                    else:  # Load Duration Curve
+                        _lp_sorted = np.sort(vals)[::-1]
+                        fig = go.Figure(go.Scatter(
+                            x=list(range(1, 8761)), y=_lp_sorted,
+                            mode="lines", line=dict(color="#636EFA", width=2),
+                            fill="tozeroy", fillcolor="rgba(99,110,250,0.1)",
+                        ))
+                        fig.update_layout(
+                            title="Load Duration Curve",
+                            xaxis_title="Hours", yaxis_title="kW",
+                            **_chart_layout,
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
+                except Exception as e:
+                    st.warning(str(e))
+
+                st.caption("Edit the data below and click Save to update.")
+                edited_df = st.data_editor(edit_df, num_rows="fixed", width="stretch", height=400, key="lp_editor")
+
+                lp_save_edit = st.button("Save Changes", key="lp_save_edit")
+                if lp_save_edit:
+                    try:
+                        _parse_8760_csv(edited_df)  # validate
+                        _save_profile_csv(LOAD_PROFILES_DIR, _sel_name, edited_df)
+                        st.success(f"'{_sel_name}' updated!")
                         st.rerun()
+                    except Exception as e:
+                        st.error(str(e))
+
+            # --- Auto-populate: NEM-A inline editor ---
+            if _sel_type == "nema":
+                import json as _json
+                _nema_edit_path = os.path.join(NEMA_PROFILES_DIR, f"{_sel_name}.json")
+                if os.path.exists(_nema_edit_path):
+                    with open(_nema_edit_path, "r") as _f:
+                        _ne_data = _json.load(_f)
+
+                    st.subheader(f"Editing: {_sel_name}")
+
+                    # Load into Session button
+                    if st.button("Load into Session", key="mgmt_nema_load_profile", type="primary"):
+                        _load_nema_profile_into_session(_sel_name)
+                        st.success(f"Loaded NEM-A profile '{_sel_name}' ({len(st.session_state.get('nema_meters', []))} meters).")
+                        st.rerun()
+
+                    # --- Utility selector ---
+                    _ne_utility = st.selectbox(
+                        "Utility",
+                        list(NEMA_FEES.keys()),
+                        key="edit_nema_utility",
+                        index=list(NEMA_FEES.keys()).index(_ne_data.get("utility", "PG&E")),
+                    )
+
+                    _ne_fee_info = NEMA_FEES[_ne_utility]
+                    st.caption(
+                        f"Admin fees: ${_ne_fee_info['setup_per_meter']:.0f}/meter setup"
+                        + (f" (cap ${_ne_fee_info['setup_cap']:.0f})" if _ne_fee_info['setup_cap'] else "")
+                        + f", ${_ne_fee_info['monthly_per_meter']:.2f}/meter/month"
+                    )
+
+                    # Fetch rates for tariff selection
+                    if st.button("Fetch Available Rates", key="edit_nema_fetch_rates"):
+                        st.session_state["_pending_edit_nema_fetch_rates"] = _ne_utility
+                    if st.session_state.get("available_rates"):
+                        st.caption(f"{len(st.session_state['available_rates'])} rate schedules available.")
+
+                    # Initialize edit-state meters from JSON (only on first load of this profile)
+                    _ne_edit_key = f"_ne_editing_{_sel_name}"
+                    if st.session_state.get("_ne_edit_profile") != _sel_name:
+                        st.session_state["_ne_edit_profile"] = _sel_name
+                        _ne_edit_meters = []
+                        _ne_edit_loads: dict[int, list] = {}
+                        _ne_edit_tariffs: dict[int, dict | None] = {}
+                        for _ei, _em in enumerate(_ne_data.get("meters", [])):
+                            _ne_edit_meters.append({
+                                "name": _em["name"],
+                                "is_generating": _em.get("is_generating", False),
+                                "use_gen_tariff": _em.get("use_gen_tariff", not _em.get("is_generating", False)),
+                            })
+                            if _em.get("load_8760"):
+                                _ne_edit_loads[_ei] = _em["load_8760"]
+                            _ne_edit_tariffs[_ei] = _em.get("tariff")
+                        st.session_state["_ne_edit_meters"] = _ne_edit_meters
+                        st.session_state["_ne_edit_loads"] = _ne_edit_loads
+                        st.session_state["_ne_edit_tariffs"] = _ne_edit_tariffs
+
+                    _ne_edit_meters = st.session_state.get("_ne_edit_meters", [])
+                    _ne_edit_loads = st.session_state.get("_ne_edit_loads", {})
+                    _ne_edit_tariffs = st.session_state.get("_ne_edit_tariffs", {})
+
+                    # Add meter
+                    if st.button("+ Add Meter", key="edit_nema_add_meter"):
+                        _ne_new_idx = len(_ne_edit_meters)
+                        _ne_edit_meters.append({
+                            "name": f"Meter {_ne_new_idx + 1}",
+                            "is_generating": False,
+                            "use_gen_tariff": True,
+                        })
+                        st.session_state["_ne_edit_meters"] = _ne_edit_meters
+                        st.rerun()
+
+                    st.markdown("---")
+
+                    # Per-meter expanders
+                    _ne_staged_uploads: dict[int, pd.DataFrame] = {}
+                    for _ei, _em in enumerate(_ne_edit_meters):
+                        with st.expander(f"{'*' if _em.get('is_generating') else ''} {_em['name']}", expanded=(_ei < 2)):
+                            _em["name"] = st.text_input(
+                                "Meter Name", value=_em["name"], key=f"edit_nema_name_{_ei}",
+                            )
+                            _em["is_generating"] = st.checkbox(
+                                "Generating meter (PV/ESS)",
+                                value=_em.get("is_generating", False),
+                                key=f"edit_nema_gen_{_ei}",
+                            )
+
+                            # Load upload
+                            _ne_m_file = st.file_uploader(
+                                "Upload 8760 Load CSV", type=["csv"], key=f"edit_nema_upload_{_ei}",
+                            )
+                            if _ne_m_file is not None:
+                                try:
+                                    _ne_m_df = pd.read_csv(_ne_m_file)
+                                    _ne_m_vals = _parse_8760_csv(_ne_m_df)
+                                    _ne_staged_uploads[_ei] = _ne_m_df
+                                    st.success(f"{len(_ne_m_vals):,} rows loaded ({_ne_m_vals.sum():,.0f} kWh)")
+                                except Exception as e:
+                                    st.error(str(e))
+                            else:
+                                _ne_cur_load = _ne_edit_loads.get(_ei)
+                                if _ne_cur_load is not None:
+                                    _ne_load_sum = sum(_ne_cur_load)
+                                    st.caption(f"Loaded: {len(_ne_cur_load):,} rows ({_ne_load_sum:,.0f} kWh)")
+
+                            # Tariff selection (non-generating)
+                            if not _em.get("is_generating"):
+                                st.markdown("**Tariff**")
+                                _ne_use_gen = st.checkbox(
+                                    "Use generating meter's tariff",
+                                    value=_em.get("use_gen_tariff", True),
+                                    key=f"edit_nema_use_gen_tariff_{_ei}",
+                                )
+                                _em["use_gen_tariff"] = _ne_use_gen
+                                if not _ne_use_gen and st.session_state.get("available_rates"):
+                                    _ne_rate_opts = {f"{r['name']}": r["label"] for r in st.session_state["available_rates"]}
+                                    _ne_sel_rate = st.selectbox(
+                                        "Select Rate Schedule", list(_ne_rate_opts.keys()),
+                                        key=f"edit_nema_tariff_sel_{_ei}",
+                                    )
+                                    if st.button("Load Tariff", key=f"edit_nema_tariff_load_{_ei}", type="primary"):
+                                        st.session_state[f"_pending_edit_nema_tariff_{_ei}"] = _ne_rate_opts[_ne_sel_rate]
+                                _ne_cur_tariff = _ne_edit_tariffs.get(_ei)
+                                if _ne_cur_tariff is not None and isinstance(_ne_cur_tariff, dict) and _ne_cur_tariff.get("name"):
+                                    st.success(f"Tariff: {_ne_cur_tariff['name']}")
+                                elif not _ne_use_gen:
+                                    st.warning("No tariff loaded for this meter.")
+                            else:
+                                _em["use_gen_tariff"] = False
+
+                            # Remove meter
+                            if len(_ne_edit_meters) > 2 and not _em.get("is_generating"):
+                                if st.button("Remove this meter", key=f"edit_nema_remove_{_ei}"):
+                                    _ne_edit_meters.pop(_ei)
+                                    # Re-index loads and tariffs
+                                    _new_loads = {}
+                                    for _k, _v in _ne_edit_loads.items():
+                                        if _k < _ei:
+                                            _new_loads[_k] = _v
+                                        elif _k > _ei:
+                                            _new_loads[_k - 1] = _v
+                                    _new_tariffs = {}
+                                    for _k, _v in _ne_edit_tariffs.items():
+                                        if _k < _ei:
+                                            _new_tariffs[_k] = _v
+                                        elif _k > _ei:
+                                            _new_tariffs[_k - 1] = _v
+                                    st.session_state["_ne_edit_meters"] = _ne_edit_meters
+                                    st.session_state["_ne_edit_loads"] = _new_loads
+                                    st.session_state["_ne_edit_tariffs"] = _new_tariffs
+                                    st.rerun()
+
+                    # Save Changes button
+                    st.markdown("---")
+                    if st.button("Save Changes", key="edit_nema_save", type="primary"):
+                        _ne_bundle_meters = []
+                        _ne_save_ok = True
+                        for _si, _sm in enumerate(_ne_edit_meters):
+                            if _si in _ne_staged_uploads:
+                                _s_vals = _parse_8760_csv(_ne_staged_uploads[_si])
+                                _s_load_list = _s_vals.tolist()
+                            elif _si in _ne_edit_loads:
+                                _s_load_list = _ne_edit_loads[_si]
+                                if not isinstance(_s_load_list, list):
+                                    _s_load_list = list(_s_load_list)
+                            else:
+                                _s_load_list = None
+
+                            if _s_load_list is None:
+                                st.error(f"No load data for meter '{_sm['name']}'. Upload a CSV.")
+                                _ne_save_ok = False
+                                break
+
+                            _ne_s_tariff = _ne_edit_tariffs.get(_si)
+                            _ne_bundle_meters.append({
+                                "name": _sm["name"],
+                                "is_generating": _sm.get("is_generating", False),
+                                "use_gen_tariff": _sm.get("use_gen_tariff", not _sm.get("is_generating", False)),
+                                "load_8760": _s_load_list,
+                                "tariff": _ne_s_tariff,
+                            })
+
+                        if _ne_save_ok:
+                            _ne_bundle = {
+                                "utility": _ne_utility,
+                                "meters": _ne_bundle_meters,
+                                "existing_solar_meters": _ne_data.get("existing_solar_meters", []),
+                            }
+                            with open(_nema_edit_path, "w") as _f:
+                                _json.dump(_ne_bundle, _f)
+                            # Update edit state loads with staged uploads
+                            for _ui, _udf in _ne_staged_uploads.items():
+                                _ne_edit_loads[_ui] = _parse_8760_csv(_udf).tolist()
+                            st.session_state["_ne_edit_loads"] = _ne_edit_loads
+                            st.success(f"'{_sel_name}' updated with {len(_ne_bundle_meters)} meters.")
+                            st.rerun()
 
 
 
 # ---- EXPORT PROFILES SECTION ----
 if st.session_state["active_mgmt_tab"] == "Export Profiles":
-    _ep_hdr_l, _ep_hdr_r = st.columns([6, 1])
-    _ep_hdr_l.markdown("#### Export Profiles")
-    if _ep_hdr_r.button("Close", key="close_export_profiles", type="tertiary"):
-        st.session_state["active_mgmt_tab"] = None
-        st.rerun()
-    saved_exports = _list_saved(EXPORT_PROFILES_DIR, ".csv")
-    ep_col1, ep_col2 = st.columns([2, 1])
+    with st.expander("Export Profiles", expanded=True):
+        saved_exports = _list_saved(EXPORT_PROFILES_DIR, ".csv")
+        ep_col1, ep_col2 = st.columns([2, 1])
 
-    with ep_col1:
-        st.markdown("**Upload & Save an Export Rate Profile**")
-        ep_name = st.text_input("Profile Name", placeholder="e.g., PGE-ACC-2024", key="ep_name")
-        ep_file = st.file_uploader("Upload 8760 Export Rate CSV", type=["csv"], key="ep_upload")
-        ep_save_btn = st.button("Save Export Profile", disabled=(not ep_name or ep_file is None))
+        with ep_col1:
+            st.markdown("**Upload & Save an Export Rate Profile**")
+            ep_name = st.text_input("Profile Name", placeholder="e.g., PGE-ACC-2024", key="ep_name")
+            ep_file = st.file_uploader("Upload 8760 Export Rate CSV", type=["csv"], key="ep_upload")
+            ep_save_btn = st.button("Save Export Profile", disabled=(not ep_name or ep_file is None))
 
-        if ep_save_btn and ep_file is not None and ep_name:
-            try:
-                df_up = pd.read_csv(ep_file)
-                _parse_8760_csv(df_up)  # validate
-                _save_profile_csv(EXPORT_PROFILES_DIR, ep_name, df_up)
-                st.success(f"Export profile '{ep_name}' saved!")
-                st.rerun()
-            except Exception as e:
-                st.error(str(e))
-
-    with ep_col2:
-        if saved_exports:
-            st.markdown("**Saved Export Profiles**")
-            sel_ep = st.selectbox("Select profile", saved_exports, key="ep_sel")
-            ep_view_btn = st.button("View / Edit", key="ep_view")
-            ep_del_btn = st.button("Delete", key="ep_del")
-
-            if ep_del_btn and sel_ep:
-                _delete_file(EXPORT_PROFILES_DIR, sel_ep, ".csv")
-                st.success(f"Deleted '{sel_ep}'.")
-                st.rerun()
-        else:
-            st.caption("No saved export profiles yet.")
-            sel_ep = None
-            ep_view_btn = False
-
-    # View / Edit section
-    if saved_exports and ep_view_btn and sel_ep:
-        st.session_state["ep_editing"] = sel_ep
-    if st.session_state.get("ep_editing"):
-        edit_name = st.session_state["ep_editing"]
-        st.subheader(f"Editing: {edit_name}")
-        edit_df = _load_profile_csv(EXPORT_PROFILES_DIR, edit_name)
-        try:
-            vals = _parse_8760_csv(edit_df)
-            st.write(f"**Rows:** {len(vals):,} | **Avg Rate:** ${vals.mean():.4f}/kWh | **Range:** ${vals.min():.4f} - ${vals.max():.4f}")
-
-            _preview_year = st.session_state.get("sb_cod_date", date(2026, 1, 1)).year
-            dt_idx = pd.date_range(f"{_preview_year}-01-01", periods=8760, freq="h")
-            monthly_avg = pd.Series(vals, index=dt_idx).resample("ME").mean()
-            import plotly.graph_objects as go
-            fig = go.Figure(go.Bar(x=MONTH_NAMES, y=monthly_avg.values, marker_color="#00CC96"))
-            fig.update_layout(title="Monthly Avg Export Rate ($/kWh)", yaxis_title="$/kWh", height=300, template="plotly_white")
-            st.plotly_chart(fig, width="stretch")
-        except Exception as e:
-            st.warning(str(e))
-
-        st.caption("Edit the data below and click Save to update.")
-        edited_df = st.data_editor(edit_df, num_rows="fixed", width="stretch", height=400, key="ep_editor")
-
-        ep_save_edit = st.button("Save Changes", key="ep_save_edit")
-        if ep_save_edit:
-            try:
-                _parse_8760_csv(edited_df)  # validate
-                _save_profile_csv(EXPORT_PROFILES_DIR, edit_name, edited_df)
-                st.success(f"'{edit_name}' updated!")
-                st.rerun()
-            except Exception as e:
-                st.error(str(e))
-
-        if st.button("Close Editor", key="ep_close_edit"):
-            del st.session_state["ep_editing"]
-            st.rerun()
-
-
-# ---- SYSTEM PROFILES SECTION ----
-if st.session_state["active_mgmt_tab"] == "System Profiles":
-    _sp_hdr_l, _sp_hdr_r = st.columns([6, 1])
-    _sp_hdr_l.markdown("#### System Profiles")
-    if _sp_hdr_r.button("Close", key="close_system_profiles", type="tertiary"):
-        st.session_state["active_mgmt_tab"] = None
-        st.rerun()
-    saved_sp = _list_saved(SYSTEM_PROFILES_DIR, ".json")
-    sp_col1, sp_col2 = st.columns([2, 1])
-
-    _sp_editing_name = st.session_state.get("sp_editing")
-
-    with sp_col1:
-        if _sp_editing_name:
-            st.markdown(f"**Editing: {_sp_editing_name}**")
-            st.caption("Modify the sidebar values, then click Update to overwrite this profile.")
-            _sp_edit_bcols = st.columns(2)
-            with _sp_edit_bcols[0]:
-                if st.button("Update Profile", key="sp_update_btn", type="primary", width="stretch"):
-                    try:
-                        _save_system_profile(_sp_editing_name)
-                        st.session_state.pop("sp_editing", None)
-                        st.success(f"Profile '{_sp_editing_name}' updated!")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(str(e))
-            with _sp_edit_bcols[1]:
-                if st.button("Cancel Edit", key="sp_cancel_edit", width="stretch"):
-                    st.session_state.pop("sp_editing", None)
-                    st.rerun()
-        else:
-            st.markdown("**Save Current System Profile**")
-            sp_name = st.text_input(
-                "Profile Name",
-                placeholder="e.g., Ranch-500kW-SAT",
-                key="sp_name",
-            )
-            sp_save_btn = st.button("Save System Profile", disabled=(not sp_name))
-
-            if sp_save_btn and sp_name:
+            if ep_save_btn and ep_file is not None and ep_name:
                 try:
-                    _save_system_profile(sp_name)
-                    st.success(f"System profile '{sp_name}' saved!")
+                    df_up = pd.read_csv(ep_file)
+                    _parse_8760_csv(df_up)  # validate
+                    _save_profile_csv(EXPORT_PROFILES_DIR, ep_name, df_up)
+                    st.success(f"Export profile '{ep_name}' saved!")
                     st.rerun()
                 except Exception as e:
                     st.error(str(e))
 
-    with sp_col2:
-        if saved_sp:
-            st.markdown("**Saved System Profiles**")
-            sel_sp = st.selectbox("Select profile", saved_sp, key="sp_sel")
-            _sp_action_cols = st.columns(4)
-            with _sp_action_cols[0]:
-                sp_view_btn = st.button("View", key="sp_view", width="stretch")
-            with _sp_action_cols[1]:
-                sp_edit_btn = st.button("Edit", key="sp_edit", width="stretch")
-            with _sp_action_cols[2]:
-                sp_dup_btn = st.button("Duplicate", key="sp_dup", width="stretch")
-            with _sp_action_cols[3]:
-                sp_del_btn = st.button("Delete", key="sp_del", width="stretch")
+        with ep_col2:
+            if saved_exports:
+                st.markdown("**Saved Export Profiles**")
+                sel_ep = st.selectbox("Select profile", saved_exports, key="ep_sel")
+                ep_view_btn = st.button("View / Edit", key="ep_view")
+                ep_del_btn = st.button("Delete", key="ep_del")
 
-            if sp_del_btn and sel_sp:
-                _delete_file(SYSTEM_PROFILES_DIR, sel_sp, ".json")
-                st.success(f"Deleted '{sel_sp}'.")
-                st.rerun()
-
-            if sp_edit_btn and sel_sp:
-                st.session_state["sp_editing"] = sel_sp
-                st.session_state["pending_system_profile"] = sel_sp
-                st.session_state.pop("sp_viewing", None)
-                st.rerun()
-
-            if sp_dup_btn and sel_sp:
-                _dup_base = f"{sel_sp} - Copy"
-                _dup_name = _dup_base
-                _dup_i = 2
-                while os.path.exists(os.path.join(SYSTEM_PROFILES_DIR, f"{_dup_name}.json")):
-                    _dup_name = f"{_dup_base} {_dup_i}"
-                    _dup_i += 1
-                _dup_data = _load_system_profile(sel_sp)
-                with open(os.path.join(SYSTEM_PROFILES_DIR, f"{_dup_name}.json"), "w") as _df:
-                    json.dump(_dup_data, _df)
-                st.success(f"Duplicated as '{_dup_name}'.")
-                st.rerun()
-        else:
-            st.caption("No saved system profiles yet.")
-            sel_sp = None
-            sp_view_btn = False
-
-    # View section
-    if saved_sp and sp_view_btn and sel_sp:
-        st.session_state["sp_viewing"] = sel_sp
-    if st.session_state.get("sp_viewing"):
-        view_name = st.session_state["sp_viewing"]
-        st.subheader(f"Profile: {view_name}")
-        try:
-            _sp_view_data = _load_system_profile(view_name)
-            _vinfo = [
-                f"**Location:** {_sp_view_data.get('location', 'N/A')}",
-                f"**Lat/Lon:** {_sp_view_data.get('lat', 'N/A')}, {_sp_view_data.get('lon', 'N/A')}",
-                f"**System Size:** {_sp_view_data.get('system_size_kw', 0):,.1f} kW-DC",
-                f"**DC/AC Ratio:** {_sp_view_data.get('dc_ac_ratio', 0):.2f}",
-                f"**System Type:** {_sp_view_data.get('system_type', 'N/A')}",
-                f"**Module Type:** {_sp_view_data.get('module_type', 'N/A')}",
-                f"**System Losses:** {_sp_view_data.get('system_losses', 0):.2f}%",
-                f"**Degradation:** {_sp_view_data.get('degradation', 0):.2f}%/yr",
-                f"**System Life:** {_sp_view_data.get('system_life', 0)} years",
-                f"**COD:** {_sp_view_data.get('cod_date', 'N/A')}",
-            ]
-            if _sp_view_data.get("production_summary"):
-                _ps = _sp_view_data["production_summary"]
-                _vinfo.append(f"**Annual Production:** {_ps.get('ac_annual_kwh', 0):,.0f} kWh")
-                _vinfo.append(f"**Capacity Factor:** {_ps.get('capacity_factor', 0):.1f}%")
+                if ep_del_btn and sel_ep:
+                    _delete_file(EXPORT_PROFILES_DIR, sel_ep, ".csv")
+                    st.success(f"Deleted '{sel_ep}'.")
+                    st.rerun()
             else:
-                _vinfo.append("**Production:** Not saved (will need to re-run PVWatts)")
-            st.markdown("  \n".join(_vinfo))
-        except Exception as e:
-            st.error(str(e))
+                st.caption("No saved export profiles yet.")
+                sel_ep = None
+                ep_view_btn = False
 
-        if st.button("Close", key="sp_close_view"):
-            del st.session_state["sp_viewing"]
-            st.rerun()
+        # View / Edit section
+        if saved_exports and ep_view_btn and sel_ep:
+            st.session_state["ep_editing"] = sel_ep
+        if st.session_state.get("ep_editing"):
+            edit_name = st.session_state["ep_editing"]
+            st.subheader(f"Editing: {edit_name}")
+            edit_df = _load_profile_csv(EXPORT_PROFILES_DIR, edit_name)
+            try:
+                vals = _parse_8760_csv(edit_df)
+                st.write(f"**Rows:** {len(vals):,} | **Avg Rate:** ${vals.mean():.4f}/kWh | **Range:** ${vals.min():.4f} - ${vals.max():.4f}")
+
+                _preview_year = st.session_state.get("sb_cod_date", date(2026, 1, 1)).year
+                dt_idx = pd.date_range(f"{_preview_year}-01-01", periods=8760, freq="h")
+                monthly_avg = pd.Series(vals, index=dt_idx).resample("ME").mean()
+                import plotly.graph_objects as go
+                fig = go.Figure(go.Bar(x=MONTH_NAMES, y=monthly_avg.values, marker_color="#00CC96"))
+                fig.update_layout(title="Monthly Avg Export Rate ($/kWh)", yaxis_title="$/kWh", height=300, template="plotly_white")
+                st.plotly_chart(fig, width="stretch")
+            except Exception as e:
+                st.warning(str(e))
+
+            st.caption("Edit the data below and click Save to update.")
+            edited_df = st.data_editor(edit_df, num_rows="fixed", width="stretch", height=400, key="ep_editor")
+
+            ep_save_edit = st.button("Save Changes", key="ep_save_edit")
+            if ep_save_edit:
+                try:
+                    _parse_8760_csv(edited_df)  # validate
+                    _save_profile_csv(EXPORT_PROFILES_DIR, edit_name, edited_df)
+                    st.success(f"'{edit_name}' updated!")
+                    st.rerun()
+                except Exception as e:
+                    st.error(str(e))
+
+            if st.button("Close Editor", key="ep_close_edit"):
+                del st.session_state["ep_editing"]
+                st.rerun()
+
+
+# ---- SYSTEM PROFILES SECTION ----
+if st.session_state["active_mgmt_tab"] == "System Profiles":
+    with st.expander("System Profiles", expanded=True):
+        saved_sp = _list_saved(SYSTEM_PROFILES_DIR, ".json")
+        sp_col1, sp_col2 = st.columns([2, 1])
+
+        _sp_editing_name = st.session_state.get("sp_editing")
+
+        with sp_col1:
+            if _sp_editing_name:
+                st.markdown(f"**Editing: {_sp_editing_name}**")
+                st.caption("Modify the sidebar values, then click Update to overwrite this profile.")
+                _sp_edit_bcols = st.columns(2)
+                with _sp_edit_bcols[0]:
+                    if st.button("Update Profile", key="sp_update_btn", type="primary", width="stretch"):
+                        try:
+                            _save_system_profile(_sp_editing_name)
+                            st.session_state.pop("sp_editing", None)
+                            st.success(f"Profile '{_sp_editing_name}' updated!")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(str(e))
+                with _sp_edit_bcols[1]:
+                    if st.button("Cancel Edit", key="sp_cancel_edit", width="stretch"):
+                        st.session_state.pop("sp_editing", None)
+                        st.rerun()
+            else:
+                st.markdown("**Save Current System Profile**")
+                sp_name = st.text_input(
+                    "Profile Name",
+                    placeholder="e.g., Ranch-500kW-SAT",
+                    key="sp_name",
+                )
+                sp_save_btn = st.button("Save System Profile", disabled=(not sp_name))
+
+                if sp_save_btn and sp_name:
+                    try:
+                        _save_system_profile(sp_name)
+                        st.success(f"System profile '{sp_name}' saved!")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(str(e))
+
+        with sp_col2:
+            if saved_sp:
+                st.markdown("**Saved System Profiles**")
+                sel_sp = st.selectbox("Select profile", saved_sp, key="sp_sel")
+                _sp_action_cols = st.columns(4)
+                with _sp_action_cols[0]:
+                    sp_view_btn = st.button("View", key="sp_view", width="stretch")
+                with _sp_action_cols[1]:
+                    sp_edit_btn = st.button("Edit", key="sp_edit", width="stretch")
+                with _sp_action_cols[2]:
+                    sp_dup_btn = st.button("Duplicate", key="sp_dup", width="stretch")
+                with _sp_action_cols[3]:
+                    sp_del_btn = st.button("Delete", key="sp_del", width="stretch")
+
+                if sp_del_btn and sel_sp:
+                    _delete_file(SYSTEM_PROFILES_DIR, sel_sp, ".json")
+                    st.success(f"Deleted '{sel_sp}'.")
+                    st.rerun()
+
+                if sp_edit_btn and sel_sp:
+                    st.session_state["sp_editing"] = sel_sp
+                    st.session_state["pending_system_profile"] = sel_sp
+                    st.session_state.pop("sp_viewing", None)
+                    st.rerun()
+
+                if sp_dup_btn and sel_sp:
+                    _dup_base = f"{sel_sp} - Copy"
+                    _dup_name = _dup_base
+                    _dup_i = 2
+                    while os.path.exists(os.path.join(SYSTEM_PROFILES_DIR, f"{_dup_name}.json")):
+                        _dup_name = f"{_dup_base} {_dup_i}"
+                        _dup_i += 1
+                    _dup_data = _load_system_profile(sel_sp)
+                    with open(os.path.join(SYSTEM_PROFILES_DIR, f"{_dup_name}.json"), "w") as _df:
+                        json.dump(_dup_data, _df)
+                    st.success(f"Duplicated as '{_dup_name}'.")
+                    st.rerun()
+            else:
+                st.caption("No saved system profiles yet.")
+                sel_sp = None
+                sp_view_btn = False
+
+        # View section
+        if saved_sp and sp_view_btn and sel_sp:
+            st.session_state["sp_viewing"] = sel_sp
+        if st.session_state.get("sp_viewing"):
+            view_name = st.session_state["sp_viewing"]
+            st.subheader(f"Profile: {view_name}")
+            try:
+                _sp_view_data = _load_system_profile(view_name)
+                _vinfo = [
+                    f"**Location:** {_sp_view_data.get('location', 'N/A')}",
+                    f"**Lat/Lon:** {_sp_view_data.get('lat', 'N/A')}, {_sp_view_data.get('lon', 'N/A')}",
+                    f"**System Size:** {_sp_view_data.get('system_size_kw', 0):,.1f} kW-DC",
+                    f"**DC/AC Ratio:** {_sp_view_data.get('dc_ac_ratio', 0):.2f}",
+                    f"**System Type:** {_sp_view_data.get('system_type', 'N/A')}",
+                    f"**Module Type:** {_sp_view_data.get('module_type', 'N/A')}",
+                    f"**System Losses:** {_sp_view_data.get('system_losses', 0):.2f}%",
+                    f"**Degradation:** {_sp_view_data.get('degradation', 0):.2f}%/yr",
+                    f"**System Life:** {_sp_view_data.get('system_life', 0)} years",
+                    f"**COD:** {_sp_view_data.get('cod_date', 'N/A')}",
+                ]
+                if _sp_view_data.get("production_summary"):
+                    _ps = _sp_view_data["production_summary"]
+                    _vinfo.append(f"**Annual Production:** {_ps.get('ac_annual_kwh', 0):,.0f} kWh")
+                    _vinfo.append(f"**Capacity Factor:** {_ps.get('capacity_factor', 0):.1f}%")
+                else:
+                    _vinfo.append("**Production:** Not saved (will need to re-run PVWatts)")
+                st.markdown("  \n".join(_vinfo))
+            except Exception as e:
+                st.error(str(e))
+
+            if st.button("Close", key="sp_close_view"):
+                del st.session_state["sp_viewing"]
+                st.rerun()
 
 
 # ---- CUSTOM RATES SECTION ----
 if st.session_state["active_mgmt_tab"] == "Custom Rates":
-    _cr_hdr_l, _cr_hdr_r = st.columns([6, 1])
-    _cr_hdr_l.markdown("#### Custom Rates")
-    if _cr_hdr_r.button("Close", key="close_custom_rates", type="tertiary"):
-        st.session_state["active_mgmt_tab"] = None
-        st.rerun()
+    with st.expander("Custom Rates", expanded=True):
 
-    # ================================================================
-    # A. Saved Custom Rates
-    # ================================================================
-    _cr_all = _list_saved(ECC_TARIFFS_DIR, ".json")
-    if _cr_all:
-        st.markdown("**Saved Custom Rates**")
-        _cr_sel = st.selectbox(
-            "Select a saved rate", _cr_all, key="cr_sel", index=None,
-            placeholder="Choose a custom rate...",
+        # ================================================================
+        # A. Saved Custom Rates
+        # ================================================================
+        _cr_all = _list_saved(ECC_TARIFFS_DIR, ".json")
+        if _cr_all:
+            st.markdown("**Saved Custom Rates**")
+            _cr_sel = st.selectbox(
+                "Select a saved rate", _cr_all, key="cr_sel", index=None,
+                placeholder="Choose a custom rate...",
+            )
+            if _cr_sel:
+                _cr_btn_c1, _cr_btn_c2 = st.columns(2)
+                with _cr_btn_c1:
+                    _cr_load_btn = st.button(
+                        "Load into Simulator", key="cr_load", type="primary",
+                    )
+                with _cr_btn_c2:
+                    _cr_del_btn = st.button("Delete", key="cr_del")
+
+                if _cr_load_btn:
+                    try:
+                        _cr_path = os.path.join(ECC_TARIFFS_DIR, _cr_sel + ".json")
+                        _cr_calc, _cr_data = load_ecc_tariff_from_json(_cr_path)
+                        st.session_state["ecc_cost_calculator"] = _cr_calc
+                        st.session_state["ecc_tariff_data"] = _cr_data
+                        st.session_state["ecc_tariff_metadata"] = {
+                            "source": f"Custom: {_cr_sel}",
+                            "num_tariffs": len(_cr_data) if isinstance(_cr_data, list) else 1,
+                            "tariff_names": [t.get("name", _cr_sel) for t in (_cr_data if isinstance(_cr_data, list) else [_cr_data])],
+                        }
+                        st.session_state["billing_engine_radio"] = "ECC"
+                        st.session_state["billing_engine"] = "ECC"
+                        st.session_state["active_mgmt_tab"] = None
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Failed to load tariff: {e}")
+
+                if _cr_del_btn:
+                    _delete_file(ECC_TARIFFS_DIR, _cr_sel, ".json")
+                    st.success(f"Deleted '{_cr_sel}'.")
+                    st.rerun()
+        else:
+            st.caption("No saved custom rates yet.")
+
+        # ================================================================
+        # B. Create New Custom Rate
+        # ================================================================
+        st.markdown("---")
+        st.markdown("**Create New Custom Rate**")
+
+        _cr_up_c1, _cr_up_c2, _cr_up_c3 = st.columns([2, 1, 1])
+        with _cr_up_c1:
+            _cr_pdf = st.file_uploader("Upload Tariff PDF", type=["pdf"], key="cr_pdf_upload")
+        with _cr_up_c2:
+            _cr_utility = st.text_input("Utility", placeholder="e.g., PG&E", key="cr_utility")
+        with _cr_up_c3:
+            _cr_rate_name = st.text_input("Rate Name", placeholder="e.g., AG-C", key="cr_rate_name")
+
+        _cr_extract_btn = st.button(
+            "Extract Rate Data",
+            disabled=(_cr_pdf is None),
+            type="primary",
         )
-        if _cr_sel:
-            _cr_btn_c1, _cr_btn_c2 = st.columns(2)
-            with _cr_btn_c1:
-                _cr_load_btn = st.button(
-                    "Load into Simulator", key="cr_load", type="primary",
-                )
-            with _cr_btn_c2:
-                _cr_del_btn = st.button("Delete", key="cr_del")
 
-            if _cr_load_btn:
+        if _cr_extract_btn and _cr_pdf is not None:
+            with st.spinner("Extracting text from PDF..."):
                 try:
-                    _cr_path = os.path.join(ECC_TARIFFS_DIR, _cr_sel + ".json")
-                    _cr_calc, _cr_data = load_ecc_tariff_from_json(_cr_path)
-                    st.session_state["ecc_cost_calculator"] = _cr_calc
-                    st.session_state["ecc_tariff_data"] = _cr_data
-                    st.session_state["ecc_tariff_metadata"] = {
-                        "source": f"Custom: {_cr_sel}",
-                        "num_tariffs": len(_cr_data) if isinstance(_cr_data, list) else 1,
-                        "tariff_names": [t.get("name", _cr_sel) for t in (_cr_data if isinstance(_cr_data, list) else [_cr_data])],
-                    }
-                    st.session_state["billing_engine_radio"] = "ECC"
-                    st.session_state["billing_engine"] = "ECC"
-                    st.session_state["active_mgmt_tab"] = None
+                    _cr_text = extract_text_from_pdf(_cr_pdf)
+                except Exception as e:
+                    st.error(f"PDF extraction failed: {e}")
+                    _cr_text = None
+
+            if _cr_text:
+                with st.spinner("Analyzing tariff with Claude AI..."):
+                    try:
+                        _cr_result = extract_tariff_from_text(
+                            _cr_text, utility=_cr_utility, rate_name=_cr_rate_name,
+                        )
+                        st.session_state["custom_rate_extracted"] = _cr_result
+                        st.session_state["custom_rate_warnings"] = validate_tariff_structure(_cr_result)
+                        st.success("Rate data extracted successfully!")
+                    except Exception as e:
+                        st.error(f"Claude API extraction failed: {e}")
+
+        # ---- Preview extracted data ----
+        _cr_extracted = st.session_state.get("custom_rate_extracted")
+        if _cr_extracted:
+            st.markdown("---")
+            st.markdown("**Extracted Data Preview**")
+
+            _cr_warnings = st.session_state.get("custom_rate_warnings", [])
+            if _cr_warnings:
+                for _cw in _cr_warnings:
+                    st.warning(_cw)
+
+            # Tariff name / description
+            st.caption(f"**{_cr_extracted.get('name', 'Unnamed')}** — {_cr_extracted.get('utility', 'N/A')}")
+            if _cr_extracted.get("description"):
+                st.caption(_cr_extracted["description"])
+
+            # Energy rates table
+            _cr_energy = _cr_extracted.get("energyratestructure", [])
+            if _cr_energy:
+                with st.expander("Energy Rates ($/kWh)", expanded=True):
+                    # Parse period labels from energycomments
+                    import re as _re
+                    _cr_period_labels: dict[int, str] = {}
+                    _cr_comments = _cr_extracted.get("energycomments", "")
+                    if _cr_comments:
+                        for _m in _re.finditer(r"Period\s+(\d+)\s*:\s*([^.]+)", _cr_comments):
+                            _cr_period_labels[int(_m.group(1))] = _m.group(2).strip()
+                    _cr_erows = []
+                    for i, period in enumerate(_cr_energy):
+                        rate = period[0].get("rate", 0) if period else 0
+                        label = _cr_period_labels.get(i, "—")
+                        _cr_erows.append({"Period": i, "Type": label, "Rate ($/kWh)": f"${rate:.5f}"})
+                    st.table(pd.DataFrame(_cr_erows))
+
+            # TOU schedule heatmap
+            _cr_wk_sched = _cr_extracted.get("energyweekdayschedule")
+            if _cr_wk_sched:
+                with st.expander("TOU Schedule (Weekday)", expanded=False):
+                    import plotly.graph_objects as go
+                    _cr_months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                                  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+                    _cr_hours = [f"{h}:00" for h in range(24)]
+                    fig = go.Figure(data=go.Heatmap(
+                        z=_cr_wk_sched,
+                        x=_cr_hours,
+                        y=_cr_months,
+                        colorscale="Viridis",
+                        showscale=True,
+                        colorbar=dict(title="Period"),
+                    ))
+                    fig.update_layout(
+                        height=350,
+                        margin=dict(l=60, r=20, t=30, b=40),
+                        xaxis_title="Hour",
+                        yaxis_title="Month",
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+
+            # Demand charges
+            _cr_demand = _cr_extracted.get("demandratestructure", [])
+            if _cr_demand:
+                with st.expander("Demand Charges ($/kW)", expanded=True):
+                    _cr_demand_labels: dict[int, str] = {}
+                    _cr_dcomments = _cr_extracted.get("demandcomments", "")
+                    if _cr_dcomments:
+                        for _dm in _re.finditer(r"Period\s+(\d+)\s*:\s*([^.]+)", _cr_dcomments):
+                            _cr_demand_labels[int(_dm.group(1))] = _dm.group(2).strip()
+                    _cr_drows = []
+                    for i, period in enumerate(_cr_demand):
+                        rate = period[0].get("rate", 0) if period else 0
+                        label = _cr_demand_labels.get(i, "—")
+                        _cr_drows.append({"Period": i, "Type": label, "Rate ($/kW)": f"${rate:.2f}"})
+                    st.table(pd.DataFrame(_cr_drows))
+
+            # Flat demand
+            _cr_flat = _cr_extracted.get("flatdemandstructure")
+            if _cr_flat:
+                _cr_flat_rate = _cr_flat[0][0].get("rate", 0) if _cr_flat and _cr_flat[0] else 0
+                st.caption(f"**Flat Demand Charge:** ${_cr_flat_rate:.2f}/kW")
+
+            # Fixed charges
+            _cr_fixed = _cr_extracted.get("fixedchargefirstmeter")
+            if _cr_fixed:
+                st.caption(f"**Fixed Charge:** ${_cr_fixed:.5f}/{_cr_extracted.get('fixedchargeunits', '$/day')}")
+
+            # Energy comments
+            if _cr_extracted.get("energycomments"):
+                with st.expander("AI Period Descriptions"):
+                    st.write(_cr_extracted["energycomments"])
+
+            # ---- Save ----
+            st.markdown("---")
+            _cr_save_c1, _cr_save_c2 = st.columns([2, 1])
+            with _cr_save_c1:
+                _cr_save_name = st.text_input(
+                    "Save Name",
+                    value=_cr_extracted.get("label", ""),
+                    placeholder="e.g., PGE_AG-C_2026",
+                    key="cr_save_name",
+                )
+            with _cr_save_c2:
+                _cr_save_btn = st.button(
+                    "Save Custom Rate",
+                    disabled=(not _cr_save_name),
+                    type="primary",
+                )
+
+            if _cr_save_btn and _cr_save_name:
+                try:
+                    _cr_saved_path = save_custom_tariff(
+                        _cr_save_name, _cr_extracted, ECC_TARIFFS_DIR,
+                    )
+                    st.success(f"Saved as '{os.path.basename(_cr_saved_path)}'")
+                    st.session_state["custom_rate_extracted"] = None
+                    st.session_state["custom_rate_warnings"] = None
                     st.rerun()
                 except Exception as e:
-                    st.error(f"Failed to load tariff: {e}")
-
-            if _cr_del_btn:
-                _delete_file(ECC_TARIFFS_DIR, _cr_sel, ".json")
-                st.success(f"Deleted '{_cr_sel}'.")
-                st.rerun()
-    else:
-        st.caption("No saved custom rates yet.")
-
-    # ================================================================
-    # B. Create New Custom Rate
-    # ================================================================
-    st.markdown("---")
-    st.markdown("**Create New Custom Rate**")
-
-    _cr_up_c1, _cr_up_c2, _cr_up_c3 = st.columns([2, 1, 1])
-    with _cr_up_c1:
-        _cr_pdf = st.file_uploader("Upload Tariff PDF", type=["pdf"], key="cr_pdf_upload")
-    with _cr_up_c2:
-        _cr_utility = st.text_input("Utility", placeholder="e.g., PG&E", key="cr_utility")
-    with _cr_up_c3:
-        _cr_rate_name = st.text_input("Rate Name", placeholder="e.g., AG-C", key="cr_rate_name")
-
-    _cr_extract_btn = st.button(
-        "Extract Rate Data",
-        disabled=(_cr_pdf is None),
-        type="primary",
-    )
-
-    if _cr_extract_btn and _cr_pdf is not None:
-        with st.spinner("Extracting text from PDF..."):
-            try:
-                _cr_text = extract_text_from_pdf(_cr_pdf)
-            except Exception as e:
-                st.error(f"PDF extraction failed: {e}")
-                _cr_text = None
-
-        if _cr_text:
-            with st.spinner("Analyzing tariff with Claude AI..."):
-                try:
-                    _cr_result = extract_tariff_from_text(
-                        _cr_text, utility=_cr_utility, rate_name=_cr_rate_name,
-                    )
-                    st.session_state["custom_rate_extracted"] = _cr_result
-                    st.session_state["custom_rate_warnings"] = validate_tariff_structure(_cr_result)
-                    st.success("Rate data extracted successfully!")
-                except Exception as e:
-                    st.error(f"Claude API extraction failed: {e}")
-
-    # ---- Preview extracted data ----
-    _cr_extracted = st.session_state.get("custom_rate_extracted")
-    if _cr_extracted:
-        st.markdown("---")
-        st.markdown("**Extracted Data Preview**")
-
-        _cr_warnings = st.session_state.get("custom_rate_warnings", [])
-        if _cr_warnings:
-            for _cw in _cr_warnings:
-                st.warning(_cw)
-
-        # Tariff name / description
-        st.caption(f"**{_cr_extracted.get('name', 'Unnamed')}** — {_cr_extracted.get('utility', 'N/A')}")
-        if _cr_extracted.get("description"):
-            st.caption(_cr_extracted["description"])
-
-        # Energy rates table
-        _cr_energy = _cr_extracted.get("energyratestructure", [])
-        if _cr_energy:
-            with st.expander("Energy Rates ($/kWh)", expanded=True):
-                # Parse period labels from energycomments
-                import re as _re
-                _cr_period_labels: dict[int, str] = {}
-                _cr_comments = _cr_extracted.get("energycomments", "")
-                if _cr_comments:
-                    for _m in _re.finditer(r"Period\s+(\d+)\s*:\s*([^.]+)", _cr_comments):
-                        _cr_period_labels[int(_m.group(1))] = _m.group(2).strip()
-                _cr_erows = []
-                for i, period in enumerate(_cr_energy):
-                    rate = period[0].get("rate", 0) if period else 0
-                    label = _cr_period_labels.get(i, "—")
-                    _cr_erows.append({"Period": i, "Type": label, "Rate ($/kWh)": f"${rate:.5f}"})
-                st.table(pd.DataFrame(_cr_erows))
-
-        # TOU schedule heatmap
-        _cr_wk_sched = _cr_extracted.get("energyweekdayschedule")
-        if _cr_wk_sched:
-            with st.expander("TOU Schedule (Weekday)", expanded=False):
-                import plotly.graph_objects as go
-                _cr_months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
-                              "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
-                _cr_hours = [f"{h}:00" for h in range(24)]
-                fig = go.Figure(data=go.Heatmap(
-                    z=_cr_wk_sched,
-                    x=_cr_hours,
-                    y=_cr_months,
-                    colorscale="Viridis",
-                    showscale=True,
-                    colorbar=dict(title="Period"),
-                ))
-                fig.update_layout(
-                    height=350,
-                    margin=dict(l=60, r=20, t=30, b=40),
-                    xaxis_title="Hour",
-                    yaxis_title="Month",
-                )
-                st.plotly_chart(fig, use_container_width=True)
-
-        # Demand charges
-        _cr_demand = _cr_extracted.get("demandratestructure", [])
-        if _cr_demand:
-            with st.expander("Demand Charges ($/kW)", expanded=True):
-                _cr_demand_labels: dict[int, str] = {}
-                _cr_dcomments = _cr_extracted.get("demandcomments", "")
-                if _cr_dcomments:
-                    for _dm in _re.finditer(r"Period\s+(\d+)\s*:\s*([^.]+)", _cr_dcomments):
-                        _cr_demand_labels[int(_dm.group(1))] = _dm.group(2).strip()
-                _cr_drows = []
-                for i, period in enumerate(_cr_demand):
-                    rate = period[0].get("rate", 0) if period else 0
-                    label = _cr_demand_labels.get(i, "—")
-                    _cr_drows.append({"Period": i, "Type": label, "Rate ($/kW)": f"${rate:.2f}"})
-                st.table(pd.DataFrame(_cr_drows))
-
-        # Flat demand
-        _cr_flat = _cr_extracted.get("flatdemandstructure")
-        if _cr_flat:
-            _cr_flat_rate = _cr_flat[0][0].get("rate", 0) if _cr_flat and _cr_flat[0] else 0
-            st.caption(f"**Flat Demand Charge:** ${_cr_flat_rate:.2f}/kW")
-
-        # Fixed charges
-        _cr_fixed = _cr_extracted.get("fixedchargefirstmeter")
-        if _cr_fixed:
-            st.caption(f"**Fixed Charge:** ${_cr_fixed:.5f}/{_cr_extracted.get('fixedchargeunits', '$/day')}")
-
-        # Energy comments
-        if _cr_extracted.get("energycomments"):
-            with st.expander("AI Period Descriptions"):
-                st.write(_cr_extracted["energycomments"])
-
-        # ---- Save ----
-        st.markdown("---")
-        _cr_save_c1, _cr_save_c2 = st.columns([2, 1])
-        with _cr_save_c1:
-            _cr_save_name = st.text_input(
-                "Save Name",
-                value=_cr_extracted.get("label", ""),
-                placeholder="e.g., PGE_AG-C_2026",
-                key="cr_save_name",
-            )
-        with _cr_save_c2:
-            _cr_save_btn = st.button(
-                "Save Custom Rate",
-                disabled=(not _cr_save_name),
-                type="primary",
-            )
-
-        if _cr_save_btn and _cr_save_name:
-            try:
-                _cr_saved_path = save_custom_tariff(
-                    _cr_save_name, _cr_extracted, ECC_TARIFFS_DIR,
-                )
-                st.success(f"Saved as '{os.path.basename(_cr_saved_path)}'")
-                st.session_state["custom_rate_extracted"] = None
-                st.session_state["custom_rate_warnings"] = None
-                st.rerun()
-            except Exception as e:
-                st.error(f"Save failed: {e}")
+                    st.error(f"Save failed: {e}")
 
 
 # ---------------------------------------------------------------------------
