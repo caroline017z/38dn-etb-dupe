@@ -718,6 +718,8 @@ def _slide_exec_summary(prs, pg, total, name, result, tariff, utility,
     sc = ((result.annual_solar_kwh - result.annual_export_kwh) /
           result.annual_solar_kwh * 100 if result.annual_solar_kwh else 0)
 
+    export_pct = (result.annual_export_kwh / result.annual_solar_kwh * 100
+                  if result.annual_solar_kwh else 0)
     tech = [
         ("System Size (DC)", f"{sys_kw:,.0f} kW"),
         ("Annual Production", _fk(result.annual_solar_kwh)),
@@ -725,6 +727,7 @@ def _slide_exec_summary(prs, pg, total, name, result, tariff, utility,
         ("Solar Offset", f"{offset:.0f}%"),
         ("Specific Yield", f"{yld:,.0f} kWh/kW"),
         ("Self-Consumption", f"{sc:.0f}%"),
+        ("Generation Exported", f"{export_pct:.0f}%"),
         ("Peak Demand", f"{peak:,.0f} kW"),
     ]
     if batt_kwh > 0:
@@ -1698,10 +1701,24 @@ def _slide_savings_matrix(prs, pg, total, ex, proj_df,
         esc_note = ""
     _subtitle(sl, f"PPA rate backsolve and annual customer savings by NEM regime{esc_note}")
 
-    # ── LAYOUT: callout on right, table full width below ──
-    # Callout box on the right side of the header area (no takeaway box)
-    _callout_x = ML + Inches(7.5)
-    _callout_w = Inches(4.3)
+    # ── LAYOUT: table on left, KPI + callout stacked on right ──
+    tbl_w = Inches(8.5)
+    _sidebar_x = ML + tbl_w + Inches(0.20)
+    _sidebar_w = CW - tbl_w - Inches(0.20)
+
+    # KPI tiles stacked vertically on the right
+    for i, (t, c) in enumerate(zip(targets, target_colors)):
+        _ky = BODY_Y + Inches(i * 1.10)
+        _rect(sl, _sidebar_x, _ky, Inches(0.06), Inches(0.95), fill=c)
+        _txt(sl, _sidebar_x + Inches(0.18), _ky + Inches(0.08), _sidebar_w - Inches(0.25), Inches(0.35),
+             text=_fd(lifetime_sums[t]), sz=Pt(18), bold=True, color=c)
+        _txt(sl, _sidebar_x + Inches(0.18), _ky + Inches(0.45), _sidebar_w - Inches(0.25), Inches(0.18),
+             text=f"Lifetime @ {t}%", sz=Pt(8), color=GRAY50)
+        _txt(sl, _sidebar_x + Inches(0.18), _ky + Inches(0.65), _sidebar_w - Inches(0.25), Inches(0.18),
+             text=f"Yr 1 PPA: ${yr1_ppa_rates_r1[t]:.4f}/kWh", sz=Pt(7), color=GRAY70)
+
+    # Callout box below KPIs on the right
+    _callout_y = BODY_Y + Inches(3.40)
     _takeaway_text = (
         "Higher savings targets reduce the PPA rate; "
         "matrix shows trade-offs across the full project life.")
@@ -1709,31 +1726,20 @@ def _slide_savings_matrix(prs, pg, total, ex, proj_df,
         _takeaway_text += f" PPA escalates per regime; Yr 1 rate in TOTAL row."
         if r2_data:
             _takeaway_text += f" R2 Yr1 = {nem_regime_2} start rate."
-    _rect(sl, _callout_x, BODY_Y, _callout_w, Inches(0.48), fill=LT_GRAY)
-    _rect(sl, _callout_x, BODY_Y, Pt(4), Inches(0.48), fill=ACCENT1)
-    _txt(sl, _callout_x + Inches(0.18), BODY_Y + Inches(0.04),
-         _callout_w - Inches(0.3), Inches(0.40),
-         text=_takeaway_text, sz=Pt(8), bold=True, color=DK1)
+    _rect(sl, _sidebar_x, _callout_y, _sidebar_w, Inches(0.80), fill=LT_GRAY)
+    _rect(sl, _sidebar_x, _callout_y, Pt(4), Inches(0.80), fill=ACCENT1)
+    _txt(sl, _sidebar_x + Inches(0.18), _callout_y + Inches(0.06),
+         _sidebar_w - Inches(0.3), Inches(0.68),
+         text=_takeaway_text, sz=Pt(7.5), bold=True, color=DK1)
 
-    # KPI tiles inline next to callout
-    _kpi_y = BODY_Y
-    for i, (t, c) in enumerate(zip(targets, target_colors)):
-        _kx = ML + Inches(i * 2.45)
-        _rect(sl, _kx, _kpi_y, Inches(0.06), Inches(0.48), fill=c)
-        _txt(sl, _kx + Inches(0.15), _kpi_y + Inches(0.02), Inches(2.1), Inches(0.22),
-             text=_fd(lifetime_sums[t]), sz=Pt(14), bold=True, color=c)
-        _txt(sl, _kx + Inches(0.15), _kpi_y + Inches(0.25), Inches(2.1), Inches(0.18),
-             text=f"Lifetime @ {t}%  |  Yr1: ${yr1_ppa_rates_r1[t]:.4f}", sz=Pt(7), color=GRAY50)
+    # Table starts at BODY_Y on the left — as high as possible
+    _tbl_top = BODY_Y
 
-    # Table starts right below KPIs — scoot up as much as possible
-    _tbl_top = Inches(1.60)
-    tbl_w = CW  # full content width
-
-    # Column widths: Year(0.40) NEM(0.35) UtilSav(1.15) + 3×(Rate(1.10) Sav(1.10))
-    col_ws = [Inches(0.40), Inches(0.35), Inches(1.15),
-              Inches(1.10), Inches(1.10),
-              Inches(1.10), Inches(1.10),
-              Inches(1.10), Inches(1.10)]
+    # Column widths: Year(0.40) NEM(0.35) UtilSav(1.05) + 3×(Rate(1.05) Sav(1.05))
+    col_ws = [Inches(0.40), Inches(0.35), Inches(1.05),
+              Inches(1.05), Inches(1.05),
+              Inches(1.05), Inches(1.05),
+              Inches(1.05), Inches(1.05)]
 
     group_hdrs = [
         ("", 1, TBL_HDR),                       # Year
