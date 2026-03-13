@@ -415,15 +415,17 @@ def _add_hedge_chart(sl, left, top, width, height,
                      solar_kwh=0, ppa_rate_val=None,
                      proj_df=None, proj_df_original=None,
                      nem_regime_2=None, num_years_1=None,
-                     savings_pct=10.0, rate_esc_pct=4.0):
+                     savings_pct=10.0, rate_esc_pct=4.0,
+                     ppa_esc_pct_2=None, ppa_rate_val_2=None):
     """Add a native line chart: PPA cost vs utility at 4%, 7%, 10%.
 
     When *proj_df_original* is provided, the 'With PPA + Solar' curve is
     derived per-year from the projection (utility residual + PPA cost),
-    correctly reflecting any NEM regime switch.
+    correctly reflecting any NEM regime switch with per-regime PPA rates.
     """
     years_list = list(range(1, term + 1))
     years = np.array(years_list)
+    _has_switch = nem_regime_2 is not None and num_years_1 is not None
 
     # Utility scenarios
     util_4 = baseline_bill * (1.04 ** (years - 1))
@@ -431,17 +433,31 @@ def _add_hedge_chart(sl, left, top, width, height,
     util_10 = baseline_bill * (1.10 ** (years - 1))
 
     # PPA total cost — per-year from projection when available
-    if proj_df_original is not None and len(proj_df_original) >= term and ppa_rate_val:
+    if proj_df is not None and "PPA Cost ($)" in proj_df.columns and len(proj_df) >= term:
+        # Best case: PPA cost already baked into proj_df with per-regime rates
+        ppa_total_list = []
+        for yr_idx in range(term):
+            r = proj_df.iloc[yr_idx]
+            ppa_total_list.append(r.get("Bill w/ Solar ($)", 0))
+        ppa_total = np.array(ppa_total_list)
+    elif proj_df_original is not None and len(proj_df_original) >= term and ppa_rate_val:
         # Derive PPA + Solar curve using actual PPA rate + escalator.
         # Utility residual = Bill w/ Solar (grid charges only, before PPA).
-        # PPA cost = ppa_rate × (1 + esc)^(yr-1) × solar_kwh_yr.
+        # For regime switches: use regime-2 PPA rate and escalator after switch.
         ppa_total_list = []
-        esc_frac = ppa_esc_pct / 100.0
+        esc_frac_1 = ppa_esc_pct / 100.0
+        esc_frac_2 = (ppa_esc_pct_2 / 100.0) if ppa_esc_pct_2 is not None else esc_frac_1
+        r2_rate = ppa_rate_val_2 if ppa_rate_val_2 else ppa_rate_val
         for yr_idx in range(term):
             r = proj_df_original.iloc[yr_idx]
             bill_w = r.get("Bill w/ Solar ($)", 0)
             solar_yr = r.get("Solar (kWh)", 0)
-            ppa_yr_rate = ppa_rate_val * ((1 + esc_frac) ** yr_idx)
+            yr = yr_idx + 1
+            if _has_switch and yr > num_years_1:
+                regime_yr = yr - num_years_1
+                ppa_yr_rate = r2_rate * ((1 + esc_frac_2) ** (regime_yr - 1))
+            else:
+                ppa_yr_rate = ppa_rate_val * ((1 + esc_frac_1) ** yr_idx)
             ppa_cost = ppa_yr_rate * solar_yr
             ppa_total_list.append(bill_w + ppa_cost)
         ppa_total = np.array(ppa_total_list)
@@ -1285,7 +1301,8 @@ def _slide_rate_hedge(prs, pg, total, ex, utility, ppa, ppa_esc, term,
                       baseline_bill, ppa_bill_yr1, solar_kwh, ppa_rate,
                       proj_df=None, proj_df_original=None,
                       nem_regime_2=None, num_years_1=None,
-                      savings_pct=10.0, rate_esc_pct=4.0):
+                      savings_pct=10.0, rate_esc_pct=4.0,
+                      ppa_esc_2=None, ppa_rate_2=None):
     """Rate hedge analysis with multi-scenario chart."""
     sl = prs.slides.add_slide(prs.slide_layouts[6])
     _accent_rule(sl)
@@ -1311,7 +1328,9 @@ def _slide_rate_hedge(prs, pg, total, ex, utility, ppa, ppa_esc, term,
                      nem_regime_2=nem_regime_2,
                      num_years_1=num_years_1,
                      savings_pct=savings_pct,
-                     rate_esc_pct=rate_esc_pct)
+                     rate_esc_pct=rate_esc_pct,
+                     ppa_esc_pct_2=ppa_esc_2,
+                     ppa_rate_val_2=ppa_rate_2)
 
     # Right side: key points (aligned with chart top)
     rx = ML + Inches(7.8)
@@ -1678,25 +1697,43 @@ def _slide_savings_matrix(prs, pg, total, ex, proj_df,
     else:
         esc_note = ""
     _subtitle(sl, f"PPA rate backsolve and annual customer savings by NEM regime{esc_note}")
+
+    # ── LAYOUT: callout on right, table full width below ──
+    # Callout box on the right side of the header area (no takeaway box)
+    _callout_x = ML + Inches(7.5)
+    _callout_w = Inches(4.3)
     _takeaway_text = (
-        "Higher savings targets reduce the PPA rate the developer can charge; "
-        "the matrix shows exact trade-offs across the full project life.")
+        "Higher savings targets reduce the PPA rate; "
+        "matrix shows trade-offs across the full project life.")
     if esc_frac_1 > 0:
-        _takeaway_text += f" PPA rates escalate per regime; Year 1 rate shown in TOTAL row."
+        _takeaway_text += f" PPA escalates per regime; Yr 1 rate in TOTAL row."
         if r2_data:
-            _takeaway_text += f" R2 Yr1 row shows the {nem_regime_2} starting rate."
-    _takeaway(sl, _takeaway_text)
+            _takeaway_text += f" R2 Yr1 = {nem_regime_2} start rate."
+    _rect(sl, _callout_x, BODY_Y, _callout_w, Inches(0.48), fill=LT_GRAY)
+    _rect(sl, _callout_x, BODY_Y, Pt(4), Inches(0.48), fill=ACCENT1)
+    _txt(sl, _callout_x + Inches(0.18), BODY_Y + Inches(0.04),
+         _callout_w - Inches(0.3), Inches(0.40),
+         text=_takeaway_text, sz=Pt(8), bold=True, color=DK1)
 
-    # ── LAYOUT: table on left, KPI tiles stacked on right ──
-    tbl_w = Inches(8.2)
-    kpi_x = ML + tbl_w + Inches(0.25)
-    kpi_w = Inches(3.0)
+    # KPI tiles inline next to callout
+    _kpi_y = BODY_Y
+    for i, (t, c) in enumerate(zip(targets, target_colors)):
+        _kx = ML + Inches(i * 2.45)
+        _rect(sl, _kx, _kpi_y, Inches(0.06), Inches(0.48), fill=c)
+        _txt(sl, _kx + Inches(0.15), _kpi_y + Inches(0.02), Inches(2.1), Inches(0.22),
+             text=_fd(lifetime_sums[t]), sz=Pt(14), bold=True, color=c)
+        _txt(sl, _kx + Inches(0.15), _kpi_y + Inches(0.25), Inches(2.1), Inches(0.18),
+             text=f"Lifetime @ {t}%  |  Yr1: ${yr1_ppa_rates_r1[t]:.4f}", sz=Pt(7), color=GRAY50)
 
-    # Column widths: Year(0.40) NEM(0.35) UtilSav(1.05) + 3×(Rate(1.05) Sav(1.05))
-    col_ws = [Inches(0.40), Inches(0.35), Inches(1.05),
-              Inches(1.05), Inches(1.05),
-              Inches(1.05), Inches(1.05),
-              Inches(1.05), Inches(1.05)]
+    # Table starts right below KPIs — scoot up as much as possible
+    _tbl_top = Inches(1.60)
+    tbl_w = CW  # full content width
+
+    # Column widths: Year(0.40) NEM(0.35) UtilSav(1.15) + 3×(Rate(1.10) Sav(1.10))
+    col_ws = [Inches(0.40), Inches(0.35), Inches(1.15),
+              Inches(1.10), Inches(1.10),
+              Inches(1.10), Inches(1.10),
+              Inches(1.10), Inches(1.10)]
 
     group_hdrs = [
         ("", 1, TBL_HDR),                       # Year
@@ -1709,25 +1746,10 @@ def _slide_savings_matrix(prs, pg, total, ex, proj_df,
     sub_hdrs = ["Year", "NEM", "Utility\nSavings",
                 "PPA Rate", "Savings", "PPA Rate", "Savings", "PPA Rate", "Savings"]
 
-    _savings_matrix_table(sl, ML, Inches(1.60), tbl_w, col_ws,
-                          group_hdrs, sub_hdrs, rows, bold_last=True, sz=Pt(7))
-
-    # KPI tiles stacked vertically on the right
-    for i, (t, c) in enumerate(zip(targets, target_colors)):
-        ty = Inches(1.60 + i * 1.45)
-        # Tile background
-        _rect(sl, kpi_x, ty, kpi_w, Inches(1.25), fill=None)
-        # Colored accent bar
-        _rect(sl, kpi_x, ty, Inches(0.06), Inches(1.25), fill=c)
-        # Value
-        _txt(sl, kpi_x + Inches(0.20), ty + Inches(0.15), kpi_w - Inches(0.30), Inches(0.45),
-             text=_fd(lifetime_sums[t]), sz=Pt(20), bold=True, color=c)
-        # Label
-        _txt(sl, kpi_x + Inches(0.20), ty + Inches(0.60), kpi_w - Inches(0.30), Inches(0.25),
-             text=f"Lifetime Savings @ {t}%", sz=Pt(9), color=GRAY50)
-        # Year 1 PPA rate sub-label
-        _txt(sl, kpi_x + Inches(0.20), ty + Inches(0.85), kpi_w - Inches(0.30), Inches(0.25),
-             text=f"Yr 1 PPA: ${yr1_ppa_rates_r1[t]:.4f}/kWh", sz=Pt(8), color=GRAY70)
+    # Use smaller font for 25+ year tables to prevent overflow
+    _tbl_sz = Pt(6) if len(rows) > 22 else Pt(7)
+    _savings_matrix_table(sl, ML, _tbl_top, tbl_w, col_ws,
+                          group_hdrs, sub_hdrs, rows, bold_last=True, sz=_tbl_sz)
 
     _source(sl, "38DN projection model  |  PPA rates backsolve from utility savings at stated customer savings targets"
             + (f"  |  {ppa_escalator_pct:.1f}%/yr escalator" if esc_frac_1 > 0 else ""))
@@ -1977,7 +1999,9 @@ def generate_proposal_pptx(
                       nem_regime_2=nem_regime_2,
                       num_years_1=num_years_1,
                       savings_pct=_hedge_sav,
-                      rate_esc_pct=rate_escalator_pct)
+                      rate_esc_pct=rate_escalator_pct,
+                      ppa_esc_2=ppa_escalator_pct_2,
+                      ppa_rate_2=ppa_rate_regime_2)
 
     # Savings Matrix — always use the original (utility-only) projection so
     # PPA rate backsolve reflects true utility savings, not post-PPA bills.
