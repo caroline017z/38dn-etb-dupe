@@ -364,18 +364,24 @@ def _build_aggregate_result(
     if gen_result.monthly_baseline_details is not None:
         monthly_baseline = []
         for month_idx in range(12):
+            _gen_bd = gen_result.monthly_baseline_details[month_idx]
             combined = {
-                "energy": gen_result.monthly_baseline_details[month_idx]["energy"],
-                "demand": gen_result.monthly_baseline_details[month_idx]["demand"],
-                "fixed": gen_result.monthly_baseline_details[month_idx]["fixed"],
-                "total": gen_result.monthly_baseline_details[month_idx]["total"],
+                "energy": _gen_bd["energy"],
+                "demand": _gen_bd["demand"],
+                "fixed": _gen_bd["fixed"],
+                "peak_demand_kw": _gen_bd.get("peak_demand_kw", 0),
+                "total": _gen_bd["total"],
             }
             for agg_res in agg_results.values():
                 if agg_res.monthly_baseline_details:
-                    combined["energy"] += agg_res.monthly_baseline_details[month_idx]["energy"]
-                    combined["demand"] += agg_res.monthly_baseline_details[month_idx]["demand"]
-                    combined["fixed"] += agg_res.monthly_baseline_details[month_idx]["fixed"]
-                    combined["total"] += agg_res.monthly_baseline_details[month_idx]["total"]
+                    _agg_bd = agg_res.monthly_baseline_details[month_idx]
+                    combined["energy"] += _agg_bd["energy"]
+                    combined["demand"] += _agg_bd["demand"]
+                    combined["fixed"] += _agg_bd["fixed"]
+                    combined["peak_demand_kw"] = max(
+                        combined["peak_demand_kw"], _agg_bd.get("peak_demand_kw", 0)
+                    )
+                    combined["total"] += _agg_bd["total"]
             # NEM-A admin fees are a cost of being on NEM-A (with solar),
             # NOT part of the no-solar baseline — do not add them here.
             monthly_baseline.append(combined)
