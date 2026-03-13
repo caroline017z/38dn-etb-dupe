@@ -2868,6 +2868,15 @@ with st.sidebar:
         )
 
 
+# Compute existing-solar offset for display columns
+_es_offset_monthly = None
+_es_offset_annual = 0.0
+if st.session_state.get("existing_solar_enabled") and st.session_state.get("existing_solar_production_8760") is not None:
+    _es_prod = st.session_state["existing_solar_production_8760"]
+    _dt = pd.date_range(f"{cod_year}-01-01", periods=8760, freq="h")
+    _es_offset_monthly = [float(_es_prod[_dt.month == m].sum()) for m in range(1, 13)]
+    _es_offset_annual = float(_es_prod.sum())
+
 # =============================================================================
 # SAVE SIMULATION HANDLER (after sidebar so variables are available)
 # =============================================================================
@@ -3253,15 +3262,6 @@ if _es_enabled and _es_production is not None:
                 if _aminfo.get("is_generating") and _ami in _adjusted_nema:
                     st.session_state["load_8760"] = _adjusted_nema[_ami]
                     break
-
-# Compute existing-solar offset for display columns
-_es_offset_monthly = None
-_es_offset_annual = 0.0
-if st.session_state.get("existing_solar_enabled") and st.session_state.get("existing_solar_production_8760") is not None:
-    _es_prod = st.session_state["existing_solar_production_8760"]
-    _dt = pd.date_range(f"{cod_year}-01-01", periods=8760, freq="h")
-    _es_offset_monthly = [float(_es_prod[_dt.month == m].sum()) for m in range(1, 13)]
-    _es_offset_annual = float(_es_prod.sum())
 
 
 # =============================================================================
