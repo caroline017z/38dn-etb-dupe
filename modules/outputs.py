@@ -631,12 +631,23 @@ def build_annual_projection(
             if active_regime in ("NEM-1", "NEM-2", "NEM-A (NEM-1)", "NEM-A (NEM-2)"):
                 yr_nsc = nsc_rate_2 * yr_export_kwh * rate_factor
 
-        yr_bill_solar = yr_energy + yr_demand + yr_fixed + yr_nbc + yr_nsc - yr_export
+        yr_bill_solar_raw = yr_energy + yr_demand + yr_fixed + yr_nbc + yr_nsc - yr_export
+        # Year 1: anchor to actual billing result (includes MBO/ABO credit
+        # banking, min_monthly_charge floors, and NSC true-ups that the
+        # component sum misses).  Subsequent years use the component projection.
+        if yr == 1:
+            yr_bill_solar = result.annual_bill_with_solar
+        else:
+            yr_bill_solar = yr_bill_solar_raw
 
         # Baseline (no solar): load grows and rates increase
         yr_baseline_energy = year1_baseline_energy * load_factor * rate_factor
         yr_baseline_demand = year1_baseline_demand * load_factor
-        yr_bill_no_solar = yr_baseline_energy + yr_baseline_demand + year1_baseline_fixed
+        yr_bill_no_solar_raw = yr_baseline_energy + yr_baseline_demand + year1_baseline_fixed
+        if yr == 1:
+            yr_bill_no_solar = year1_bill_no_solar
+        else:
+            yr_bill_no_solar = yr_bill_no_solar_raw
 
         yr_savings = yr_bill_no_solar - yr_bill_solar
         cumulative_savings += yr_savings
