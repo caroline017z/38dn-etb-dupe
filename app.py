@@ -4825,8 +4825,23 @@ if st.session_state["billing_result"] is not None:
             _it_savings = st.session_state.get("it_savings_pct", 10.0)
             _it_sav_esc = st.session_state.get("it_savings_esc", 0.0)
 
-            # --- PPA Escalator inputs (per NEM period) ---
+            # --- Primary controls: Customer Savings + PPA Escalator ---
             if nem_switch:
+                _sav_c1, _sav_c2 = st.columns(2)
+                with _sav_c1:
+                    _prop_sav_1 = st.number_input(
+                        f"{nem_regime_1} Customer Savings (%)",
+                        min_value=0.0, max_value=99.0,
+                        value=float(_it_savings), step=0.5,
+                        key="prop_savings_regime_1",
+                    )
+                with _sav_c2:
+                    _prop_sav_2 = st.number_input(
+                        f"{nem_regime_2} Customer Savings (%)",
+                        min_value=0.0, max_value=99.0,
+                        value=float(_it_savings), step=0.5,
+                        key="prop_savings_regime_2",
+                    )
                 _esc_c1, _esc_c2 = st.columns(2)
                 with _esc_c1:
                     _prop_ppa_esc = st.number_input(
@@ -4843,20 +4858,35 @@ if st.session_state["billing_result"] is not None:
                         step=0.1, format="%.1f", key="prop_ppa_esc_2",
                     )
             else:
-                _prop_ppa_esc = st.number_input(
-                    "PPA Rate Escalator (%/yr)",
-                    min_value=0.0, max_value=10.0,
-                    value=float(st.session_state.get("it_ppa_esc_1", 2.9)),
-                    step=0.1, format="%.1f", key="prop_ppa_esc_1",
-                )
+                _sav_c1, _esc_c1 = st.columns(2)
+                with _sav_c1:
+                    _prop_sav_1 = st.number_input(
+                        "Customer Savings (%)",
+                        min_value=0.0, max_value=99.0,
+                        value=float(_it_savings), step=0.5,
+                        key="prop_savings_regime_1",
+                    )
+                _prop_sav_2 = _prop_sav_1
+                with _esc_c1:
+                    _prop_ppa_esc = st.number_input(
+                        "PPA Rate Escalator (%/yr)",
+                        min_value=0.0, max_value=10.0,
+                        value=float(st.session_state.get("it_ppa_esc_1", 2.9)),
+                        step=0.1, format="%.1f", key="prop_ppa_esc_1",
+                    )
                 _prop_ppa_esc_2 = _prop_ppa_esc
+
+            # Custom savings is always on now — use the inputs above
+            _prop_custom_savings = True
 
             # --- Y1 Savings & PPA Summary ---
             try:
                 _sum_it_df = build_indexed_tariff_annual(
                     _main_projection,
-                    base_savings_pct=_it_savings,
+                    base_savings_pct=_prop_sav_1,
                     savings_escalator_pct=_it_sav_esc,
+                    regime_1_savings_pct=_prop_sav_1,
+                    regime_2_savings_pct=_prop_sav_2 if nem_switch else None,
                     ppa_escalator_pct=_prop_ppa_esc,
                     ppa_escalator_pct_2=_prop_ppa_esc_2 if nem_switch else None,
                     nem_regime_2=nem_regime_2 if nem_switch else None,
@@ -4904,68 +4934,6 @@ if st.session_state["billing_result"] is not None:
                     "Proposed Tariff (if switching)", key="prop_new_tariff",
                     help="Leave blank to keep current tariff.",
                 )
-
-            # --- Custom per-regime savings toggle ---
-            _prop_custom_savings = st.toggle(
-                "Customize Customer Savings", key="prop_custom_savings",
-                help="Override the PPA Rate tab savings target with per-regime values.",
-            )
-            _prop_sav_1 = _it_savings
-            _prop_sav_2 = _it_savings
-            if _prop_custom_savings:
-                _cs_c1, _cs_c2 = st.columns(2)
-                with _cs_c1:
-                    _prop_sav_1 = st.number_input(
-                        f"{nem_regime_1} Savings (%)",
-                        min_value=0.0, max_value=99.0,
-                        value=float(_it_savings), step=0.5,
-                        key="prop_savings_regime_1",
-                    )
-                with _cs_c2:
-                    if nem_switch:
-                        _prop_sav_2 = st.number_input(
-                            f"{nem_regime_2} Savings (%)",
-                            min_value=0.0, max_value=99.0,
-                            value=float(_it_savings), step=0.5,
-                            key="prop_savings_regime_2",
-                        )
-                # Recompute with custom savings and local escalators
-                try:
-                    _cs_it_df = build_indexed_tariff_annual(
-                        _main_projection,
-                        base_savings_pct=_prop_sav_1,
-                        savings_escalator_pct=_it_sav_esc,
-                        regime_1_savings_pct=_prop_sav_1,
-                        regime_2_savings_pct=_prop_sav_2 if nem_switch else None,
-                        nem_regime_2=nem_regime_2 if nem_switch else None,
-                        num_years_1=num_years_1 if nem_switch else None,
-                        ppa_escalator_pct=_prop_ppa_esc,
-                        ppa_escalator_pct_2=_prop_ppa_esc_2 if nem_switch else None,
-                    )
-                    if len(_cs_it_df) >= 1 and "PPA Rate ($/kWh)" in _cs_it_df.columns:
-                        _cs_r1 = _cs_it_df["PPA Rate ($/kWh)"].iloc[0]
-                        _cs_sav1 = _cs_it_df["Customer Savings ($)"].iloc[0] if "Customer Savings ($)" in _cs_it_df.columns else 0
-                        _cs_bill_no = _cs_it_df["Bill w/o Solar ($)"].iloc[0] if "Bill w/o Solar ($)" in _cs_it_df.columns else 0
-                        _cs_sav1_pct = (_cs_sav1 / _cs_bill_no * 100) if _cs_bill_no else 0
-                        _prop_ppa_rate = round(_cs_r1, 4) if _cs_r1 > 0 else _prop_ppa_rate
-                        if nem_switch and num_years_1:
-                            _mc1, _mc2, _mc3 = st.columns(3)
-                            with _mc1:
-                                st.metric("Y1 Savings (Custom)", f"${_cs_sav1:,.0f} ({_cs_sav1_pct:.1f}%)")
-                            with _mc2:
-                                st.metric(f"{nem_regime_1} PPA Rate (Yr 1)", f"${_cs_r1:.4f}/kWh")
-                            if len(_cs_it_df) > num_years_1:
-                                _cs_r2 = _cs_it_df["PPA Rate ($/kWh)"].iloc[num_years_1]
-                                with _mc3:
-                                    st.metric(f"{nem_regime_2} PPA Rate (Yr {num_years_1 + 1})", f"${_cs_r2:.4f}/kWh")
-                        else:
-                            _mc1, _mc2 = st.columns(2)
-                            with _mc1:
-                                st.metric("Y1 Savings (Custom)", f"${_cs_sav1:,.0f} ({_cs_sav1_pct:.1f}%)")
-                            with _mc2:
-                                st.metric(f"PPA Rate (Yr 1)", f"${_cs_r1:.4f}/kWh")
-                except Exception as e:
-                    logger.warning("Failed to compute per-regime PPA rates: %s", e)
 
             _prop_date = date.today().strftime("%B %Y")
             _batt_cap = st.session_state.get("battery_capacity_kwh", 0) or 0
