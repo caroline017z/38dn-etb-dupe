@@ -415,7 +415,7 @@ def _add_hedge_chart(sl, left, top, width, height,
                      solar_kwh=0, ppa_rate_val=None,
                      proj_df=None, proj_df_original=None,
                      nem_regime_2=None, num_years_1=None,
-                     savings_pct=10.0):
+                     savings_pct=10.0, rate_esc_pct=4.0):
     """Add a native line chart: PPA cost vs utility at 4%, 7%, 10%.
 
     When *proj_df_original* is provided, the 'With PPA + Solar' curve is
@@ -466,7 +466,7 @@ def _add_hedge_chart(sl, left, top, width, height,
             ppa_energy = ppa_energy_yr1 * ((1 + ppa_esc_pct / 100) ** (years - 1))
         else:
             ppa_energy = np.zeros_like(years, dtype=float)
-        grid_residual = grid_residual_yr1 * (1.04 ** (years - 1))
+        grid_residual = grid_residual_yr1 * ((1 + rate_esc_pct / 100) ** (years - 1))
         ppa_total = grid_residual + ppa_energy
 
     chart_data = CategoryChartData()
@@ -526,7 +526,7 @@ def _add_savings_components_chart(sl, left, top, width, height,
         df.insert(0, "Year", range(1, len(df) + 1))
     years = df["Year"].values
 
-    rate_factors = 1.0 + (rate_esc_pct / 100) * (years - 1)
+    rate_factors = (1.0 + rate_esc_pct / 100) ** (years - 1)
     base_energy = yr1_base_energy * rate_factors
     base_demand = np.full_like(years, yr1_base_demand, dtype=float)
 
@@ -629,14 +629,15 @@ def _slide_exec_summary(prs, pg, total, name, result, tariff, utility,
                         sys_kw, batt_kwh, ppa_rate, esc_pct, term,
                         customer_savings_pct=None, customer_savings_pct_2=None,
                         nem_regime_1=None, nem_regime_2=None,
-                        ppa_rate_regime_2=None):
+                        ppa_rate_regime_2=None, ppa_cost=None):
     """Executive Summary — two-column financial + technical overview."""
     sl = prs.slides.add_slide(prs.slide_layouts[6])
     _accent_rule(sl)
 
     bill = result.annual_bill_without_solar
-    sav = result.annual_savings
-    pct = customer_savings_pct if customer_savings_pct is not None else result.savings_pct
+    bw = result.annual_bill_with_solar + (ppa_cost or 0)
+    sav = bill - bw
+    pct = customer_savings_pct if customer_savings_pct is not None else (sav / bill * 100 if bill else 0)
     offset = result.annual_solar_kwh / result.annual_load_kwh * 100 if result.annual_load_kwh else 0
 
     _action_title(sl, "Executive Summary")
@@ -657,9 +658,12 @@ def _slide_exec_summary(prs, pg, total, name, result, tariff, utility,
     peak = result.monthly_summary["peak_demand_kw"].max() if "peak_demand_kw" in result.monthly_summary.columns else 0
     fin = [
         ("Current Annual Utility Bill", _fd(bill)),
-        ("Projected Year 1 Cost (w/ Solar)", _fd(result.annual_bill_with_solar)),
-        ("Year 1 Net Savings", _fd(sav)),
+        ("Utility Bill w/ Solar", _fd(result.annual_bill_with_solar)),
     ]
+    if ppa_cost and ppa_cost > 0:
+        fin.append(("PPA Cost (Year 1)", _fd(ppa_cost)))
+        fin.append(("Total Year 1 Cost (w/ Solar + PPA)", _fd(bw)))
+    fin.append(("Year 1 Net Savings", _fd(sav)))
     if customer_savings_pct_2 is not None and nem_regime_1 and nem_regime_2:
         fin.append((f"{nem_regime_1} Savings Target", f"{pct:.1f}%"))
         fin.append((f"{nem_regime_2} Savings Target", f"{customer_savings_pct_2:.1f}%"))
@@ -680,12 +684,14 @@ def _slide_exec_summary(prs, pg, total, name, result, tariff, utility,
         total_sav = sav + result.rate_shift_annual_savings
         fin.append(("Total Combined Savings", _fd(total_sav)))
 
+    _fin_spacing = 0.30 if len(fin) > 10 else 0.36
+    _fin_sz = Pt(9) if len(fin) > 10 else Pt(10)
     for i, (lbl, val) in enumerate(fin):
-        y = sy + Inches(0.40 + i * 0.36)
+        y = sy + Inches(0.40 + i * _fin_spacing)
         _txt(sl, cx1 + Inches(0.1), y, Inches(3.5), Inches(0.26),
-             text=lbl, sz=Pt(10), color=GRAY50)
+             text=lbl, sz=_fin_sz, color=GRAY50)
         _txt(sl, cx1 + Inches(3.7), y, Inches(1.7), Inches(0.26),
-             text=val, sz=Pt(10), bold=True, color=DK1, align=PP_ALIGN.RIGHT)
+             text=val, sz=_fin_sz, bold=True, color=DK1, align=PP_ALIGN.RIGHT)
 
     # ── Right column: Technical ──
     _txt(sl, cx2, sy, Inches(5.5), Inches(0.22),
@@ -725,17 +731,34 @@ def _slide_current_cost(prs, pg, total, ex, name, result, tariff, utility):
     _accent_rule(sl)
 
     bill = result.annual_bill_without_solar
-    peak = result.monthly_summary["peak_demand_kw"].max() if "peak_demand_kw" in result.monthly_summary.columns else 0
+    # Use baseline (no-solar) peak demand when available
+    if result.monthly_baseline_details:
+        peak = max(d.get("peak_demand_kw", 0) for d in result.monthly_baseline_details)
+    else:
+        peak = result.monthly_summary["peak_demand_kw"].max() if "peak_demand_kw" in result.monthly_summary.columns else 0
     blended = bill / result.annual_load_kwh if result.annual_load_kwh else 0
+
+    # Dynamic demand share for takeaway
+    if result.monthly_baseline_details:
+        _base_demand = sum(d.get("demand", 0) for d in result.monthly_baseline_details)
+        _demand_share = _base_demand / bill * 100 if bill else 0
+    else:
+        _demand_share = 0
 
     _action_title(sl,
         f"{name} spends {_fd(bill)}/yr on electricity ({tariff})", exhibit=ex)
     _subtitle(sl,
         f"{utility}  |  {result.annual_load_kwh/1e3:,.0f} MWh annual load  |  "
         f"{peak:,.0f} kW peak demand  |  ${blended:.4f}/kWh blended rate")
-    _takeaway(sl,
-        f"All-in blended rate of ${blended:.4f}/kWh. Demand charges represent a "
-        f"significant cost component. Rising utility rates compound exposure annually.")
+    if _demand_share > 20:
+        _takeaway_text = (
+            f"All-in blended rate of ${blended:.4f}/kWh. Demand charges account for "
+            f"{_demand_share:.0f}% of the total bill. Rising utility rates compound exposure annually.")
+    else:
+        _takeaway_text = (
+            f"All-in blended rate of ${blended:.4f}/kWh. Energy charges drive the majority of costs. "
+            f"Rising utility rates compound exposure annually.")
+    _takeaway(sl, _takeaway_text)
 
     # KPI row
     tiles = [
@@ -764,7 +787,7 @@ def _slide_current_cost(prs, pg, total, ex, name, result, tariff, utility):
             rows_data.append([
                 months[i],
                 f"{r.get('load_kwh',0)/1e3:,.1f}",
-                f"{r.get('peak_demand_kw',0):,.0f}",
+                f"{d.get('peak_demand_kw', r.get('peak_demand_kw', 0)):,.0f}",
                 f"${d.get('energy',0):,.0f}",
                 f"${d.get('demand',0):,.0f}",
                 f"${d.get('fixed',0):,.0f}",
@@ -859,7 +882,8 @@ def _slide_system(prs, pg, total, ex, sys_kw, dc_ac, batt_kwh, batt_kw,
 
 
 def _slide_year1(prs, pg, total, ex, result, tariff, proj_df=None,
-                 rate_esc_pct=4.0, ppa_cost=None, customer_savings_pct=None):
+                 rate_esc_pct=4.0, ppa_cost=None, customer_savings_pct=None,
+                 battery_kwh=0, nem_regime=None):
     """Year 1 cost comparison (left) + savings components chart (right)."""
     sl = prs.slides.add_slide(prs.slide_layouts[6])
     _accent_rule(sl)
@@ -868,9 +892,11 @@ def _slide_year1(prs, pg, total, ex, result, tariff, proj_df=None,
     bw = result.annual_bill_with_solar + (ppa_cost or 0)
     sav = bn - bw
     pct = customer_savings_pct if customer_savings_pct is not None else (sav / bn * 100 if bn else 0)
+    _has_batt = battery_kwh > 0
+    _nem_tag = f"  |  {nem_regime}" if nem_regime else ""
 
     _action_title(sl, f"Solar reduces Year 1 electricity cost by {_fd(sav)} ({pct:.1f}%)", exhibit=ex)
-    _subtitle(sl, f"Comparison at current {tariff} rates  |  Savings accrue from Day 1")
+    _subtitle(sl, f"Comparison at current {tariff} rates  |  Savings accrue from Day 1{_nem_tag}")
 
     # ── LEFT HALF: stacked comparison boxes ──
     lx = ML; lw = Inches(5.0)
@@ -894,16 +920,26 @@ def _slide_year1(prs, pg, total, ex, result, tariff, proj_df=None,
     # With Solar box
     bx2 = lx + Inches(2.6)
     ratio = bw / bn if bn else 1; sh = box_h * ratio; yo = box_h - sh
+    _with_label = "With Solar + Storage" if _has_batt else "With Solar"
+    if ppa_cost and ppa_cost > 0:
+        _with_label += " + PPA"
     _txt(sl, bx2, by1, box_w, Inches(0.20),
-         text="With Solar + Storage", sz=Pt(8), color=GRAY50, align=PP_ALIGN.CENTER)
+         text=_with_label, sz=Pt(8), color=GRAY50, align=PP_ALIGN.CENTER)
     _rect(sl, bx2, by1 + Inches(0.22) + yo, box_w, sh, fill=ACCENT1)
     _txt(sl, bx2, by1 + Inches(0.22) + yo + sh * 0.25, box_w, Inches(0.40),
          text=_fd(bw), sz=Pt(22), bold=True, color=WHITE, align=PP_ALIGN.CENTER)
     _txt(sl, bx2, by1 + Inches(0.22) + yo + sh * 0.55, box_w, Inches(0.25),
          text="per year", sz=Pt(8), color=GRAY85, align=PP_ALIGN.CENTER)
 
-    # Savings callout below boxes
-    _txt(sl, lx, Inches(3.65), lw, Inches(0.35),
+    # Step-change savings callout: show utility savings → PPA cost → net savings
+    _callout_y = Inches(3.55)
+    if ppa_cost and ppa_cost > 0:
+        _util_sav = bn - result.annual_bill_with_solar
+        _txt(sl, lx, _callout_y, lw, Inches(0.22),
+             text=f"Utility Savings: {_fd(_util_sav)}   \u2192   PPA Cost: ({_fd(ppa_cost)})   \u2192   NET: {_fd(sav)} ({pct:.1f}%)",
+             sz=Pt(11), bold=True, color=DK1, align=PP_ALIGN.CENTER)
+        _callout_y += Inches(0.25)
+    _txt(sl, lx, _callout_y, lw, Inches(0.35),
          text=f"NET SAVINGS:  {_fd(sav)} / YEAR  ({pct:.1f}%)",
          sz=Pt(16), bold=True, color=ACCENT1, align=PP_ALIGN.CENTER)
 
@@ -921,9 +957,10 @@ def _slide_year1(prs, pg, total, ex, result, tariff, proj_df=None,
     energy_delta = base_en - en_sav
     demand_delta = base_dm - dm_sav
 
-    _txt(sl, lx, Inches(4.10), lw, Inches(0.22),
+    _bk_top = Inches(4.10) if not (ppa_cost and ppa_cost > 0) else Inches(4.30)
+    _txt(sl, lx, _bk_top, lw, Inches(0.22),
          text="YEAR 1 SAVINGS BREAKDOWN", sz=Pt(11), bold=True, color=DK1)
-    _divider_line(sl, Inches(4.35), lw)
+    _divider_line(sl, _bk_top + Inches(0.25), lw)
 
     breakdown = [
         ("Energy charge reduction", _fd(energy_delta), ACCENT1),
@@ -933,11 +970,15 @@ def _slide_year1(prs, pg, total, ex, result, tariff, proj_df=None,
     nbc = getattr(result, "annual_nbc_cost", 0) or 0
     if nbc > 0:
         breakdown.append(("NBC charges (NEM-2)", f"({_fd(nbc)})", RGBColor(0xCC, 0x44, 0x44)))
+    if ppa_cost and ppa_cost > 0:
+        breakdown.append(("PPA cost", f"({_fd(ppa_cost)})", RGBColor(0xCC, 0x44, 0x44)))
     if result.rate_shift_annual_savings is not None:
         breakdown.append(("Rate shift savings", _fd(result.rate_shift_annual_savings), RGBColor(0x1D, 0x6F, 0xA9)))
 
+    _bk_item_y = _bk_top + Inches(0.37)
+    _bk_spacing = 0.26 if len(breakdown) > 5 else 0.30
     for i, (lbl, val, clr) in enumerate(breakdown):
-        y = Inches(4.47 + i * 0.30)
+        y = _bk_item_y + Inches(i * _bk_spacing)
         _rect(sl, lx + Inches(0.1), y + Inches(0.06), Inches(0.12), Inches(0.12), fill=clr)
         _txt(sl, lx + Inches(0.30), y, Inches(2.8), Inches(0.24),
              text=lbl, sz=Pt(9), color=GRAY50)
@@ -983,7 +1024,8 @@ def _slide_year1(prs, pg, total, ex, result, tariff, proj_df=None,
 
 
 def _slide_projections(prs, pg, total, ex, proj_df, rate_esc, ppa=None, esc=None,
-                       nem_regime_1=None, nem_regime_2=None, num_years_1=None):
+                       nem_regime_1=None, nem_regime_2=None, num_years_1=None,
+                       ppa_esc_2=None):
     """Multi-year savings projection table."""
     sl = prs.slides.add_slide(prs.slide_layouts[6])
     _accent_rule(sl)
@@ -1015,8 +1057,44 @@ def _slide_projections(prs, pg, total, ex, proj_df, rate_esc, ppa=None, esc=None
         f"At a conservative {rate_esc:.0f}%/yr utility escalation, cumulative savings exceed "
         f"{_fd(cum)}. Actual historical rate growth has been materially higher.")
 
-    hdrs = ["Year", "NEM", "Utility Cost\n(No Solar)", "Total Cost\n(w/ Solar)",
-            "Annual\nSavings", "Savings\n%", "Cumulative\nSavings"]
+    has_ppa = ppa is not None and ppa > 0
+    # Check if PPA cost is already baked into the dataframe
+    ppa_baked_in = has_ppa and "PPA Cost ($)" in df.columns and df["PPA Cost ($)"].sum() > 0
+    if has_ppa:
+        hdrs = ["Year", "NEM", "Utility Cost\n(No Solar)", "Grid Cost\n(w/ Solar)",
+                "PPA\nCost", "Total Cost\n(w/ Solar+PPA)",
+                "Annual\nSavings", "Savings\n%", "Cumulative\nSavings"]
+    else:
+        hdrs = ["Year", "NEM", "Utility Cost\n(No Solar)", "Total Cost\n(w/ Solar)",
+                "Annual\nSavings", "Savings\n%", "Cumulative\nSavings"]
+
+    # When PPA is not baked in, pre-compute per-year PPA costs so we can
+    # derive correct cumulative savings with PPA included.
+    _has_regime_switch = nem_regime_2 is not None and num_years_1 is not None
+    ppa_costs_by_yr = {}
+    if has_ppa and not ppa_baked_in:
+        esc_rate_1 = (esc / 100.0) if esc else 0.0
+        esc_rate_2 = (ppa_esc_2 / 100.0) if ppa_esc_2 else esc_rate_1
+        cum_sav = 0.0
+        for _, r in df.iterrows():
+            yr = int(r.get("Year", 0))
+            solar_kwh = r.get("Solar (kWh)", 0)
+            if _has_regime_switch and yr > num_years_1:
+                regime_yr = yr - num_years_1
+                ppa_rate_yr = ppa * ((1 + esc_rate_2) ** (regime_yr - 1))
+            else:
+                ppa_rate_yr = ppa * ((1 + esc_rate_1) ** (yr - 1))
+            ppa_cost_yr = ppa_rate_yr * solar_kwh
+            ns = r.get("Bill w/o Solar ($)", 0)
+            grid_cost = r.get("Bill w/ Solar ($)", 0)
+            total = grid_cost + ppa_cost_yr
+            asv = ns - total
+            cum_sav += asv
+            ppa_costs_by_yr[yr] = {
+                "ppa_cost": ppa_cost_yr, "grid_cost": grid_cost,
+                "total": total, "asv": asv, "cum_sav": cum_sav,
+            }
+
     rows = []
     for _, r in df.iterrows():
         yr = int(r.get("Year", 0))
@@ -1025,10 +1103,32 @@ def _slide_projections(prs, pg, total, ex, proj_df, rate_esc, ppa=None, esc=None
         asv = r.get("Annual Savings ($)", ns - ws)
         p = asv / ns * 100 if ns else 0
         c = r.get("Cumulative Savings ($)", 0)
-        rows.append([str(yr), _nem_label(yr), _fd(ns), _fd(ws), _fd(asv), f"{p:.1f}%", _fd(c)])
+        if has_ppa:
+            if ppa_baked_in:
+                # PPA already included in "Bill w/ Solar ($)"; split it out
+                ppa_cost_yr = r.get("PPA Cost ($)", 0)
+                grid_cost = ws - ppa_cost_yr
+            else:
+                # Use pre-computed PPA costs
+                d = ppa_costs_by_yr[yr]
+                ppa_cost_yr = d["ppa_cost"]
+                grid_cost = d["grid_cost"]
+                ws = d["total"]
+                asv = d["asv"]
+                p = asv / ns * 100 if ns else 0
+                c = d["cum_sav"]
+            rows.append([str(yr), _nem_label(yr), _fd(ns), _fd(grid_cost),
+                         _fd(ppa_cost_yr), _fd(ws), _fd(asv), f"{p:.1f}%", _fd(c)])
+        else:
+            rows.append([str(yr), _nem_label(yr), _fd(ns), _fd(ws), _fd(asv), f"{p:.1f}%", _fd(c)])
 
-    cws = [Inches(0.5), Inches(0.5), Inches(1.7), Inches(1.7), Inches(1.5), Inches(0.8), Inches(1.7)]
-    _table(sl, ML, Inches(1.80), Inches(8.4), cws, hdrs, rows, bold_last=True, sz=Pt(7))
+    if has_ppa:
+        cws = [Inches(0.45), Inches(0.45), Inches(1.4), Inches(1.2),
+               Inches(1.0), Inches(1.4), Inches(1.2), Inches(0.7), Inches(1.4)]
+        _table(sl, ML, Inches(1.80), Inches(9.2), cws, hdrs, rows, bold_last=True, sz=Pt(7))
+    else:
+        cws = [Inches(0.5), Inches(0.5), Inches(1.7), Inches(1.7), Inches(1.5), Inches(0.8), Inches(1.7)]
+        _table(sl, ML, Inches(1.80), Inches(8.4), cws, hdrs, rows, bold_last=True, sz=Pt(7))
 
     note = f"Assumes {rate_esc:.0f}%/yr linear utility rate escalation."
     if ppa and esc:
@@ -1037,7 +1137,8 @@ def _slide_projections(prs, pg, total, ex, proj_df, rate_esc, ppa=None, esc=None
     _footer(sl, pg, total)
 
 
-def _slide_energy(prs, pg, total, ex, result, sys_kw):
+def _slide_energy(prs, pg, total, ex, result, sys_kw, battery_kwh=0,
+                  nem_regime=None, ppa_cost=None):
     """Monthly energy and billing detail."""
     sl = prs.slides.add_slide(prs.slide_layouts[6])
     _accent_rule(sl)
@@ -1046,9 +1147,10 @@ def _slide_energy(prs, pg, total, ex, result, sys_kw):
     yld = result.annual_solar_kwh / sys_kw if sys_kw else 0
     sc = ((result.annual_solar_kwh - result.annual_export_kwh) /
           result.annual_solar_kwh * 100 if result.annual_solar_kwh else 0)
+    _nem_tag = f"  |  {nem_regime}" if nem_regime else ""
 
     _action_title(sl, f"System produces {_fk(result.annual_solar_kwh)}/yr, offsetting {offset:.0f}% of site load", exhibit=ex)
-    _subtitle(sl, f"Yield: {yld:,.0f} kWh/kW  |  Self-consumption: {sc:.0f}%  |  Export: {_fk(result.annual_export_kwh)}")
+    _subtitle(sl, f"Yield: {yld:,.0f} kWh/kW  |  Self-consumption: {sc:.0f}%  |  Export: {_fk(result.annual_export_kwh)}{_nem_tag}")
 
     tiles = [
         {"value": _fk(result.annual_solar_kwh), "label": "Annual Production", "accent": ACCENT1},
@@ -1064,37 +1166,78 @@ def _slide_energy(prs, pg, total, ex, result, sys_kw):
 
     months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
     ms = result.monthly_summary
-    hdrs = ["Month", "Load\n(MWh)", "Solar\n(MWh)", "Import\n(MWh)", "Export\n(MWh)",
-            "Peak\nkW", "Energy\n($)", "Demand\n($)", "Export Cr.\n($)", "Net Bill\n($)"]
+    hd = result.hourly_detail
+    _has_batt = battery_kwh > 0 and "batt_charge_kwh" in hd.columns
+
+    # Build monthly battery aggregates if available
+    batt_monthly_charge = {}
+    batt_monthly_discharge = {}
+    if _has_batt:
+        for m in range(1, 13):
+            mask = hd.index.month == m
+            batt_monthly_charge[m] = float(hd.loc[mask, "batt_charge_kwh"].sum())
+            _discharge_cols = [c for c in ("batt_to_load_kwh", "batt_to_grid_kwh") if c in hd.columns]
+            batt_monthly_discharge[m] = float(hd.loc[mask, _discharge_cols].sum().sum())
+
+    # Build header — adapt columns based on battery presence
+    if _has_batt:
+        hdrs = ["Month", "Load\n(MWh)", "Solar\n(MWh)", "Import\n(MWh)", "Export\n(MWh)",
+                "Charge\n(MWh)", "Disch.\n(MWh)", "Peak\nkW",
+                "Energy\n($)", "Demand\n($)", "Exp. Cr.\n($)", "Utility\nBill ($)"]
+    else:
+        hdrs = ["Month", "Load\n(MWh)", "Solar\n(MWh)", "Import\n(MWh)", "Export\n(MWh)",
+                "Peak\nkW", "Energy\n($)", "Demand\n($)", "Exp. Cr.\n($)", "Utility\nBill ($)"]
     rows = []
     for i in range(min(12, len(ms))):
         r = ms.iloc[i]
         ec = r.get('export_credit', 0)
-        rows.append([
+        row = [
             months[i],
             f"{r.get('load_kwh',0)/1e3:,.1f}", f"{r.get('solar_kwh',0)/1e3:,.1f}",
             f"{r.get('import_kwh',0)/1e3:,.1f}", f"{r.get('export_kwh',0)/1e3:,.1f}",
+        ]
+        if _has_batt:
+            m_num = i + 1
+            row.append(f"{batt_monthly_charge.get(m_num, 0)/1e3:,.1f}")
+            row.append(f"{batt_monthly_discharge.get(m_num, 0)/1e3:,.1f}")
+        row += [
             f"{r.get('peak_demand_kw',0):,.0f}",
             f"${r.get('energy_cost',0):,.0f}", f"${r.get('total_demand_charge',0):,.0f}",
             f"(${ec:,.0f})" if ec > 0 else "$0",
             f"${r.get('net_bill',0):,.0f}",
-        ])
+        ]
+        rows.append(row)
 
     ect = float(ms.get("export_credit", pd.Series([0])).sum())
-    rows.append([
+    total_row = [
         "TOTAL",
         f"{result.annual_load_kwh/1e3:,.1f}", f"{result.annual_solar_kwh/1e3:,.1f}",
         f"{result.annual_import_kwh/1e3:,.1f}", f"{result.annual_export_kwh/1e3:,.1f}",
+    ]
+    if _has_batt:
+        total_row.append(f"{sum(batt_monthly_charge.values())/1e3:,.1f}")
+        total_row.append(f"{sum(batt_monthly_discharge.values())/1e3:,.1f}")
+    total_row += [
         f"{ms['peak_demand_kw'].max():,.0f}" if 'peak_demand_kw' in ms.columns else "\u2014",
         f"${result.annual_energy_cost:,.0f}", f"${result.annual_demand_cost:,.0f}",
         f"(${ect:,.0f})" if ect > 0 else "$0",
         f"${result.annual_bill_with_solar:,.0f}",
-    ])
+    ]
+    rows.append(total_row)
 
-    cws = [Inches(0.65)] + [Inches(1.05)] * 4 + [Inches(0.75)] + [Inches(1.05)] * 4
-    _table(sl, ML, Inches(2.45), Inches(10.0), cws, hdrs, rows, bold_last=True)
+    if _has_batt:
+        cws = ([Inches(0.55)] + [Inches(0.85)] * 4 + [Inches(0.80)] * 2 +
+               [Inches(0.65)] + [Inches(0.90)] * 4)
+        _table(sl, ML, Inches(2.45), Inches(10.5), cws, hdrs, rows, bold_last=True, sz=Pt(7))
+    else:
+        cws = [Inches(0.65)] + [Inches(1.05)] * 4 + [Inches(0.75)] + [Inches(1.05)] * 4
+        _table(sl, ML, Inches(2.45), Inches(10.0), cws, hdrs, rows, bold_last=True)
 
-    _source(sl, "38DN 8,760-hour billing simulation  |  All values Year 1")
+    # PPA annotation below table
+    _src_note = "38DN 8,760-hour billing simulation  |  All values Year 1"
+    if ppa_cost and ppa_cost > 0:
+        _src_note += f"  |  Utility bill shown; PPA cost of {_fd(ppa_cost)}/yr not included in table"
+    _source(sl, _src_note)
     _footer(sl, pg, total)
 
 
@@ -1142,7 +1285,7 @@ def _slide_rate_hedge(prs, pg, total, ex, utility, ppa, ppa_esc, term,
                       baseline_bill, ppa_bill_yr1, solar_kwh, ppa_rate,
                       proj_df=None, proj_df_original=None,
                       nem_regime_2=None, num_years_1=None,
-                      savings_pct=10.0):
+                      savings_pct=10.0, rate_esc_pct=4.0):
     """Rate hedge analysis with multi-scenario chart."""
     sl = prs.slides.add_slide(prs.slide_layouts[6])
     _accent_rule(sl)
@@ -1167,7 +1310,8 @@ def _slide_rate_hedge(prs, pg, total, ex, utility, ppa, ppa_esc, term,
                      proj_df_original=proj_df_original,
                      nem_regime_2=nem_regime_2,
                      num_years_1=num_years_1,
-                     savings_pct=savings_pct)
+                     savings_pct=savings_pct,
+                     rate_esc_pct=rate_esc_pct)
 
     # Right side: key points (aligned with chart top)
     rx = ML + Inches(7.8)
@@ -1177,9 +1321,9 @@ def _slide_rate_hedge(prs, pg, total, ex, utility, ppa, ppa_esc, term,
          text="SCENARIO ASSUMPTIONS", sz=Pt(11), bold=True, color=DK1)
 
     points = [
-        f"Middle case: 4%/yr utility escalation",
-        f"Upper case: 7%/yr utility escalation",
-        f"Stress case: 10%/yr utility escalation",
+        f"Conservative: 4%/yr utility escalation",
+        f"Moderate: 7%/yr utility escalation",
+        f"High: 10%/yr utility escalation",
     ]
     if ppa:
         points.append(f"PPA: ${ppa:.3f}/kWh, {ppa_esc:.1f}%/yr escalator")
@@ -1253,16 +1397,175 @@ def _savings_matrix_table(sl, l, t, w, col_ws, group_hdrs, sub_hdrs, rows,
     return sh
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# NEM REGIME DESCRIPTIONS
+# ═══════════════════════════════════════════════════════════════════════════
+
+_NEM_INFO = {
+    "NEM-1": {
+        "title": "Net Energy Metering 1.0 (NEM-1)",
+        "summary": "Full retail-rate credits for all exported energy — the most favorable net metering program.",
+        "how_it_works": [
+            "Solar exports are credited at the full retail rate, including generation, transmission, and distribution components.",
+            "Credits are netted against imports within each TOU period on a monthly basis.",
+            "Excess monthly credits roll forward to offset future bills within the annual true-up cycle.",
+            "At annual true-up, remaining export credits are paid out at a wholesale rate (Net Surplus Compensation).",
+            "Customer pays only non-bypassable charges on net consumed kWh.",
+        ],
+        "billing": [
+            "Monthly billing: TOU-period netting at full retail rate",
+            "Export credits offset energy and delivery charges",
+            "Demand charges based on peak import kW after solar offset",
+            "Annual true-up settles any remaining credits",
+        ],
+    },
+    "NEM-2": {
+        "title": "Net Energy Metering 2.0 (NEM-2)",
+        "summary": "Retail-rate credits minus non-bypassable charges — strong economics with modest cost adjustments.",
+        "how_it_works": [
+            "Solar exports are credited at the retail TOU rate, similar to NEM-1.",
+            "Non-Bypassable Charges (NBCs) of ~$0.02-0.03/kWh are assessed on all imported kWh.",
+            "Credits are netted against imports within each TOU period on a monthly basis.",
+            "Excess monthly credits roll forward within the annual true-up cycle.",
+            "Time-of-use rates apply — exports during peak periods earn higher credits.",
+        ],
+        "billing": [
+            "Monthly billing: TOU-period netting at retail rate",
+            "NBC charges applied to all grid imports (not netted)",
+            "Demand charges based on peak import kW after solar offset",
+            "Annual true-up with Net Surplus Compensation for excess",
+        ],
+    },
+    "NEM-3 / NVBT": {
+        "title": "Net Billing Tariff (NBT / NEM-3)",
+        "summary": "Exports valued at avoided cost — emphasizes self-consumption and storage optimization.",
+        "how_it_works": [
+            "Solar exports are valued at the Avoided Cost Calculator (ACC) rate, which varies hourly.",
+            "No monthly kWh netting — imports and exports are tracked independently.",
+            "Export values are typically 25-75% lower than retail rates, incentivizing self-consumption.",
+            "Battery storage adds significant value by shifting solar to high-value peak hours.",
+            "Adders for low-income communities and environmental justice areas may apply.",
+        ],
+        "billing": [
+            "Monthly billing: imports charged at full retail TOU rate",
+            "Exports credited at hourly ACC-based rate (no netting)",
+            "Demand charges based on peak import kW",
+            "No annual true-up — monthly settlement",
+        ],
+    },
+    "NEM-A (NEM-1)": {
+        "title": "NEM Aggregation — NEM-1 (NEM-A)",
+        "summary": "Aggregated metering across multiple service points under NEM-1 retail credits.",
+        "how_it_works": [
+            "A generating meter with solar exports to multiple benefiting meters on the same property.",
+            "Excess generation from the solar meter is allocated to benefiting meters.",
+            "Each benefiting meter receives retail-rate credits under NEM-1 rules.",
+            "Allocation is proportional to each meter's share of total load.",
+            "All meters must be on the same rate schedule and property.",
+        ],
+        "billing": [
+            "Generating meter: TOU-period netting at full retail rate",
+            "Benefiting meters: credits allocated from excess generation",
+            "Each meter billed independently with allocated credits applied",
+            "Demand charges per meter based on individual peak import kW",
+        ],
+    },
+    "NEM-A (NEM-2)": {
+        "title": "NEM Aggregation — NEM-2 (NEM-A)",
+        "summary": "Aggregated metering across multiple service points under NEM-2 with NBC charges.",
+        "how_it_works": [
+            "A generating meter with solar exports to multiple benefiting meters on the same property.",
+            "Excess generation is allocated proportionally to benefiting meters.",
+            "Each meter receives retail-rate credits under NEM-2 rules.",
+            "Non-Bypassable Charges apply to all imported kWh on each meter.",
+            "TOU rates reward exports during high-value peak periods.",
+        ],
+        "billing": [
+            "Generating meter: TOU-period netting at retail rate with NBCs",
+            "Benefiting meters: credits allocated with NBC applied to imports",
+            "Monthly billing per meter; annual true-up for credit rollover",
+            "Demand charges per meter based on individual peak import kW",
+        ],
+    },
+}
+
+
+def _slide_nem_detail(prs, pg, total, ex, regime_name, start_year, end_year,
+                      result, proj_df=None):
+    """NEM regime detail slide — program description and key metrics."""
+    sl = prs.slides.add_slide(prs.slide_layouts[6])
+    _accent_rule(sl)
+
+    info = _NEM_INFO.get(regime_name, _NEM_INFO.get("NEM-3 / NVBT"))
+    duration = f"Years {start_year}\u2013{end_year}"
+
+    _action_title(sl, f"{info['title']}  ({duration})", exhibit=ex)
+    _subtitle(sl, f"How the billing program works during this period")
+    _takeaway(sl, info["summary"])
+
+    # ── Left column: How It Works ──
+    lx = ML; lw = Inches(5.8)
+    _txt(sl, lx, Inches(1.70), lw, Inches(0.22),
+         text="HOW IT WORKS", sz=Pt(11), bold=True, color=DK1)
+    _divider_line(sl, Inches(1.95), lw)
+    _bullets(sl, lx + Inches(0.05), Inches(2.05), lw - Inches(0.1),
+             info["how_it_works"], sz=Pt(9), color=DK1, spacing=Pt(4))
+
+    # ── Right column: Billing Mechanics + Metrics ──
+    rx = ML + Inches(6.2); rw = Inches(5.5)
+    _txt(sl, rx, Inches(1.70), rw, Inches(0.22),
+         text="BILLING MECHANICS", sz=Pt(11), bold=True, color=DK1)
+    _divider_line(sl, Inches(1.95), rw, x=rx)
+    _bullets(sl, rx + Inches(0.05), Inches(2.05), rw - Inches(0.1),
+             info["billing"], sz=Pt(9), color=DK1, spacing=Pt(4))
+
+    # Key metrics for this regime period
+    _txt(sl, rx, Inches(3.70), rw, Inches(0.22),
+         text="KEY METRICS (THIS PERIOD)", sz=Pt(11), bold=True, color=DK1)
+    _divider_line(sl, Inches(3.95), rw, x=rx)
+
+    metrics = []
+    if proj_df is not None and len(proj_df) > 0:
+        pdf = proj_df.copy()
+        if "Year" not in pdf.columns:
+            pdf.insert(0, "Year", range(1, len(pdf) + 1))
+        period = pdf[(pdf["Year"] >= start_year) & (pdf["Year"] <= end_year)]
+        if len(period) > 0:
+            total_solar = period["Solar (kWh)"].sum() if "Solar (kWh)" in period.columns else 0
+            total_export = period["Export (kWh)"].sum() if "Export (kWh)" in period.columns else 0
+            total_bill_no = period["Bill w/o Solar ($)"].sum() if "Bill w/o Solar ($)" in period.columns else 0
+            total_bill_w = period["Bill w/ Solar ($)"].sum() if "Bill w/ Solar ($)" in period.columns else 0
+            total_export_cr = period["Export Credit ($)"].sum() if "Export Credit ($)" in period.columns else 0
+            total_savings = total_bill_no - total_bill_w
+            n_years = len(period)
+            metrics = [
+                ("Duration", f"{n_years} years"),
+                ("Total Solar Production", _fk(total_solar)),
+                ("Total Exports", _fk(total_export)),
+                ("Cumulative Export Credits", _fd(abs(total_export_cr))),
+                ("Cumulative Utility Savings", _fd(total_savings)),
+                ("Avg Annual Savings", _fd(total_savings / n_years) if n_years else "$0"),
+            ]
+
+    for i, (lbl, val) in enumerate(metrics):
+        y = Inches(4.10 + i * 0.32)
+        _txt(sl, rx + Inches(0.1), y, Inches(3.2), Inches(0.24),
+             text=lbl, sz=Pt(9), color=GRAY50)
+        _txt(sl, rx + Inches(3.4), y, Inches(2.0), Inches(0.24),
+             text=val, sz=Pt(9), bold=True, color=DK1, align=PP_ALIGN.RIGHT)
+
+    _source(sl, "38DN billing simulation and projection model")
+    _footer(sl, pg, total)
+
+
 def _slide_savings_matrix(prs, pg, total, ex, proj_df,
                           nem_regime_1=None, nem_regime_2=None,
                           num_years_1=None, term_years=25,
-                          ppa_escalator_pct=0.0):
+                          ppa_escalator_pct=0.0, ppa_escalator_pct_2=None):
     """Customer Savings Matrix — PPA rates for 5%, 10%, 15% savings targets.
 
-    When ppa_escalator_pct > 0, the backsolve incorporates the escalator:
-    a single Year 1 PPA rate is computed such that when escalated annually,
-    total PPA revenue = total utility savings × (1 - target%).  Each year
-    then shows the escalated rate and the actual savings for that year.
+    Supports per-regime PPA escalators when a NEM regime switch exists.
+    Each regime backsolves its own Year 1 PPA rate independently.
     """
     sl = prs.slides.add_slide(prs.slide_layouts[6])
     _accent_rule(sl)
@@ -1273,17 +1576,23 @@ def _slide_savings_matrix(prs, pg, total, ex, proj_df,
 
     targets = [5, 10, 15]
     target_colors = [ACCENT1, ACCENT3, ACCENT4]  # green, teal, blue
-    esc_frac = (ppa_escalator_pct or 0.0) / 100.0
+    esc_frac_1 = (ppa_escalator_pct or 0.0) / 100.0
+    esc_frac_2 = ((ppa_escalator_pct_2 if ppa_escalator_pct_2 is not None
+                    else ppa_escalator_pct) or 0.0) / 100.0
+    _has_regime_switch = nem_regime_2 is not None and num_years_1 is not None
 
     def _nem_label(yr):
         regime = nem_regime_1 or "NEM-3 / NVBT"
-        if nem_regime_2 and num_years_1 and yr > num_years_1:
+        if _has_regime_switch and yr > num_years_1:
             regime = nem_regime_2
         if "NEM-1" in regime or regime == "NEM-1":
             return "1"
         if "NEM-2" in regime or regime == "NEM-2":
             return "2"
         return "3"
+
+    def _is_regime_2(yr):
+        return _has_regime_switch and yr > num_years_1
 
     # Collect per-year data first
     year_data = []
@@ -1295,19 +1604,26 @@ def _slide_savings_matrix(prs, pg, total, ex, proj_df,
         util_savings = bill_no - bill_w
         year_data.append((yr, util_savings, solar_kwh))
 
-    # Backsolve Year 1 PPA rates for each target.
-    # With escalator: sum(ppa_yr1 × (1+esc)^(yr-1) × solar_kwh_yr) = sum(util_sav_yr × (1 - target%))
-    # ppa_yr1 = sum(util_sav × (1-t%)) / sum((1+esc)^(yr-1) × solar_kwh)
-    esc_weighted_solar = sum(
-        ((1 + esc_frac) ** (yr - 1)) * skwh for yr, _, skwh in year_data
-    )
-    yr1_ppa_rates = {}
+    # Backsolve Year 1 PPA rates PER REGIME for each target.
+    r1_data = [(yr, us, skwh) for yr, us, skwh in year_data if not _is_regime_2(yr)]
+    r2_data = [(yr, us, skwh) for yr, us, skwh in year_data if _is_regime_2(yr)]
+
+    yr1_ppa_rates_r1 = {}
+    yr1_ppa_rates_r2 = {}
     for t in targets:
         frac = t / 100.0
-        total_ppa_revenue = sum(us * (1.0 - frac) for _, us, _ in year_data)
-        yr1_ppa_rates[t] = (
-            total_ppa_revenue / esc_weighted_solar if esc_weighted_solar > 0 else 0.0
-        )
+        # Regime 1 backsolve
+        r1_num = sum(us * (1.0 - frac) for _, us, _ in r1_data)
+        r1_den = sum(((1 + esc_frac_1) ** (yr - 1)) * skwh for yr, _, skwh in r1_data)
+        yr1_ppa_rates_r1[t] = r1_num / r1_den if r1_den > 0 else 0.0
+        # Regime 2 backsolve
+        if r2_data:
+            r2_start = num_years_1 + 1
+            r2_num = sum(us * (1.0 - frac) for _, us, _ in r2_data)
+            r2_den = sum(((1 + esc_frac_2) ** (yr - r2_start)) * skwh for yr, _, skwh in r2_data)
+            yr1_ppa_rates_r2[t] = r2_num / r2_den if r2_den > 0 else 0.0
+        else:
+            yr1_ppa_rates_r2[t] = 0.0
 
     # Build table rows with escalated rates and actual savings
     rows = []
@@ -1318,20 +1634,33 @@ def _slide_savings_matrix(prs, pg, total, ex, proj_df,
         total_util_savings += util_savings
         row_data = [str(yr), _nem_label(yr), _fd(util_savings)]
         for t in targets:
-            esc_mult = (1 + esc_frac) ** (yr - 1)
-            ppa_rate = yr1_ppa_rates[t] * esc_mult
+            if _is_regime_2(yr):
+                regime_yr = yr - num_years_1
+                esc_mult = (1 + esc_frac_2) ** (regime_yr - 1)
+                ppa_rate = yr1_ppa_rates_r2[t] * esc_mult
+            else:
+                esc_mult = (1 + esc_frac_1) ** (yr - 1)
+                ppa_rate = yr1_ppa_rates_r1[t] * esc_mult
             cust_savings = util_savings - ppa_rate * solar_kwh
             lifetime_sums[t] += cust_savings
             row_data.append(f"${ppa_rate:.4f}")
             row_data.append(_fd(cust_savings))
         rows.append(row_data)
 
-    # Totals row — Year 1 PPA rate (pre-escalation) and lifetime savings
+    # Totals row — show regime-1 Year 1 PPA rate and lifetime savings
     totals = ["TOTAL", "", _fd(total_util_savings)]
     for t in targets:
-        totals.append(f"${yr1_ppa_rates[t]:.4f}")
+        totals.append(f"${yr1_ppa_rates_r1[t]:.4f}")
         totals.append(_fd(lifetime_sums[t]))
     rows.append(totals)
+
+    # If regime switch exists, add a second annotation row for regime-2 rates
+    if r2_data:
+        r2_row = [f"R2 Yr1", "", ""]
+        for t in targets:
+            r2_row.append(f"${yr1_ppa_rates_r2[t]:.4f}")
+            r2_row.append("")
+        rows.append(r2_row)
 
     # KPI tiles positioned to the right of the table
     cum_label = lambda t: f"Lifetime @ {t}%"
@@ -1341,13 +1670,22 @@ def _slide_savings_matrix(prs, pg, total, ex, proj_df,
     ]
 
     _action_title(sl, "Savings scenarios across 5%, 10%, and 15% customer targets", exhibit=ex)
-    esc_note = f"  |  PPA escalator: {ppa_escalator_pct:.1f}%/yr" if esc_frac > 0 else ""
+    if _has_regime_switch:
+        esc_note = (f"  |  {nem_regime_1} esc: {ppa_escalator_pct:.1f}%/yr"
+                    f", {nem_regime_2} esc: {ppa_escalator_pct_2 or ppa_escalator_pct:.1f}%/yr")
+    elif esc_frac_1 > 0:
+        esc_note = f"  |  PPA escalator: {ppa_escalator_pct:.1f}%/yr"
+    else:
+        esc_note = ""
     _subtitle(sl, f"PPA rate backsolve and annual customer savings by NEM regime{esc_note}")
-    _takeaway(sl,
+    _takeaway_text = (
         "Higher savings targets reduce the PPA rate the developer can charge; "
-        "the matrix shows exact trade-offs across the full project life."
-        + (f" PPA rates escalate at {ppa_escalator_pct:.1f}%/yr; Year 1 rate shown in TOTAL row."
-           if esc_frac > 0 else ""))
+        "the matrix shows exact trade-offs across the full project life.")
+    if esc_frac_1 > 0:
+        _takeaway_text += f" PPA rates escalate per regime; Year 1 rate shown in TOTAL row."
+        if r2_data:
+            _takeaway_text += f" R2 Yr1 row shows the {nem_regime_2} starting rate."
+    _takeaway(sl, _takeaway_text)
 
     # ── LAYOUT: table on left, KPI tiles stacked on right ──
     tbl_w = Inches(8.2)
@@ -1389,10 +1727,10 @@ def _slide_savings_matrix(prs, pg, total, ex, proj_df,
              text=f"Lifetime Savings @ {t}%", sz=Pt(9), color=GRAY50)
         # Year 1 PPA rate sub-label
         _txt(sl, kpi_x + Inches(0.20), ty + Inches(0.85), kpi_w - Inches(0.30), Inches(0.25),
-             text=f"Yr 1 PPA: ${yr1_ppa_rates[t]:.4f}/kWh", sz=Pt(8), color=GRAY70)
+             text=f"Yr 1 PPA: ${yr1_ppa_rates_r1[t]:.4f}/kWh", sz=Pt(8), color=GRAY70)
 
     _source(sl, "38DN projection model  |  PPA rates backsolve from utility savings at stated customer savings targets"
-            + (f"  |  {ppa_escalator_pct:.1f}%/yr escalator" if esc_frac > 0 else ""))
+            + (f"  |  {ppa_escalator_pct:.1f}%/yr escalator" if esc_frac_1 > 0 else ""))
     _footer(sl, pg, total)
 
 
@@ -1501,6 +1839,7 @@ def generate_proposal_pptx(
     battery_kw: float = 0,
     ppa_rate: float | None = None,
     ppa_escalator_pct: float | None = None,
+    ppa_escalator_pct_2: float | None = None,
     term_years: int = 25,
     rate_escalator_pct: float = 4.0,
     result: BillingResult | None = None,
@@ -1519,15 +1858,29 @@ def generate_proposal_pptx(
 
     has_r = result is not None
     has_p = annual_proj_df is not None and len(annual_proj_df) > 0
+    _nem_switch = nem_regime_2 is not None and num_years_1 is not None
 
-    total = 3  # cover + process + next steps
-    if has_r: total += 5  # exec summary, current cost, year1, energy detail, production/load
+    # Dynamic page count
+    total = 1  # cover (not numbered but counted)
+    if has_r: total += 2  # exec summary, current cost
     total += 1  # system design
+    if has_r: total += 3  # year1, production/load, energy detail
+    # NEM regime detail slides
+    if has_r:
+        total += 1  # regime 1 detail
+        if _nem_switch: total += 1  # regime 2 detail
     if has_p: total += 1  # projections
+    total += 1  # process
     total += 1  # rate hedge
     if has_p: total += 1  # savings matrix
+    total += 1  # next steps
 
     pg = 0; ex = 0
+
+    # Compute PPA cost once
+    _yr1_ppa_cost = None
+    if ppa_rate is not None and has_r:
+        _yr1_ppa_cost = ppa_rate * result.annual_solar_kwh
 
     # Cover
     _slide_cover(prs, customer_name, address, utility_account, date_str, total)
@@ -1542,7 +1895,8 @@ def generate_proposal_pptx(
                             customer_savings_pct_2=customer_savings_pct_2,
                             nem_regime_1=nem_regime_1,
                             nem_regime_2=nem_regime_2,
-                            ppa_rate_regime_2=ppa_rate_regime_2)
+                            ppa_rate_regime_2=ppa_rate_regime_2,
+                            ppa_cost=_yr1_ppa_cost)
 
     # Current Cost
     if has_r:
@@ -1559,14 +1913,12 @@ def generate_proposal_pptx(
     # Year 1 Comparison
     if has_r:
         pg += 1; ex += 1
-        # Compute Year 1 PPA cost if PPA rate is set
-        _yr1_ppa_cost = None
-        if ppa_rate is not None and result is not None:
-            _yr1_ppa_cost = ppa_rate * result.annual_solar_kwh
         _slide_year1(prs, pg, total, ex, result, tariff_name,
                      proj_df=annual_proj_df, rate_esc_pct=rate_escalator_pct,
                      ppa_cost=_yr1_ppa_cost,
-                     customer_savings_pct=customer_savings_pct)
+                     customer_savings_pct=customer_savings_pct,
+                     battery_kwh=battery_kwh,
+                     nem_regime=nem_regime_1)
 
     # Projections
     if has_p:
@@ -1574,7 +1926,8 @@ def generate_proposal_pptx(
         _slide_projections(prs, pg, total, ex, annual_proj_df,
                            rate_escalator_pct, ppa_rate, ppa_escalator_pct,
                            nem_regime_1=nem_regime_1, nem_regime_2=nem_regime_2,
-                           num_years_1=num_years_1)
+                           num_years_1=num_years_1,
+                           ppa_esc_2=ppa_escalator_pct_2)
 
     # Production vs Load
     if has_r:
@@ -1584,7 +1937,26 @@ def generate_proposal_pptx(
     # Energy Detail
     if has_r:
         pg += 1; ex += 1
-        _slide_energy(prs, pg, total, ex, result, system_size_kw)
+        _slide_energy(prs, pg, total, ex, result, system_size_kw,
+                      battery_kwh=battery_kwh,
+                      nem_regime=nem_regime_1,
+                      ppa_cost=_yr1_ppa_cost)
+
+    # NEM Regime Detail Slides
+    _orig_df = annual_proj_df_original if annual_proj_df_original is not None else annual_proj_df
+    if has_r:
+        pg += 1; ex += 1
+        _r1_end = num_years_1 if _nem_switch else term_years
+        _slide_nem_detail(prs, pg, total, ex,
+                          nem_regime_1 or "NEM-3 / NVBT",
+                          1, _r1_end, result,
+                          proj_df=_orig_df)
+        if _nem_switch:
+            pg += 1; ex += 1
+            _slide_nem_detail(prs, pg, total, ex,
+                              nem_regime_2,
+                              num_years_1 + 1, term_years, result,
+                              proj_df=_orig_df)
 
     # Process
     pg += 1
@@ -1592,7 +1964,6 @@ def generate_proposal_pptx(
                    ppa_rate, ppa_escalator_pct, utility_name, tariff_name, term_years)
 
     # Rate Hedge — use original projection for accurate per-year PPA curve
-    _hedge_orig = annual_proj_df_original if annual_proj_df_original is not None else annual_proj_df
     _hedge_sav = customer_savings_pct if customer_savings_pct is not None else 10.0
     pg += 1; ex += 1
     _slide_rate_hedge(prs, pg, total, ex, utility_name,
@@ -1602,10 +1973,11 @@ def generate_proposal_pptx(
                       solar_kwh=result.annual_solar_kwh if has_r else 0,
                       ppa_rate=ppa_rate,
                       proj_df=annual_proj_df if has_p else None,
-                      proj_df_original=_hedge_orig if has_p else None,
+                      proj_df_original=_orig_df if has_p else None,
                       nem_regime_2=nem_regime_2,
                       num_years_1=num_years_1,
-                      savings_pct=_hedge_sav)
+                      savings_pct=_hedge_sav,
+                      rate_esc_pct=rate_escalator_pct)
 
     # Savings Matrix — always use the original (utility-only) projection so
     # PPA rate backsolve reflects true utility savings, not post-PPA bills.
@@ -1617,7 +1989,8 @@ def generate_proposal_pptx(
                               nem_regime_2=nem_regime_2,
                               num_years_1=num_years_1,
                               term_years=term_years,
-                              ppa_escalator_pct=ppa_escalator_pct or 0.0)
+                              ppa_escalator_pct=ppa_escalator_pct or 0.0,
+                              ppa_escalator_pct_2=ppa_escalator_pct_2)
 
     # Next Steps
     pg += 1
