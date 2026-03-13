@@ -544,7 +544,7 @@ def _add_savings_components_chart(sl, left, top, width, height,
 
     rate_factors = (1.0 + rate_esc_pct / 100) ** (years - 1)
     base_energy = yr1_base_energy * rate_factors
-    base_demand = np.full_like(years, yr1_base_demand, dtype=float)
+    base_demand = yr1_base_demand * rate_factors
 
     solar_energy = df["Energy ($)"].values.astype(float)
     solar_demand = df["Demand ($)"].values.astype(float)

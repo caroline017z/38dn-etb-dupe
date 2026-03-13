@@ -535,9 +535,9 @@ def build_annual_projection(
         yr_demand_kw_pv = year1_demand_kw_pv * load_factor
         yr_demand_kw_bess = year1_demand_kw_bess * load_factor
 
-        # Demand cost: higher peaks from load growth
-        yr_demand = year1_demand * load_factor
-        yr_fixed = year1_fixed
+        # Demand cost: peaks grow with load, rates escalate with utility rates
+        yr_demand = year1_demand * load_factor * rate_factor
+        yr_fixed = year1_fixed * rate_factor
         # Export credit: rates escalate, but export volume may shrink
         volume_ratio = yr_export_kwh / year1_export_kwh if year1_export_kwh > 0 else 0.0
         # Import volume ratio (for scaling raw energy cost under NEM-3)
@@ -640,10 +640,11 @@ def build_annual_projection(
         else:
             yr_bill_solar = yr_bill_solar_raw
 
-        # Baseline (no solar): load grows and rates increase
+        # Baseline (no solar): load grows and all rates increase
         yr_baseline_energy = year1_baseline_energy * load_factor * rate_factor
-        yr_baseline_demand = year1_baseline_demand * load_factor
-        yr_bill_no_solar_raw = yr_baseline_energy + yr_baseline_demand + year1_baseline_fixed
+        yr_baseline_demand = year1_baseline_demand * load_factor * rate_factor
+        yr_baseline_fixed = year1_baseline_fixed * rate_factor
+        yr_bill_no_solar_raw = yr_baseline_energy + yr_baseline_demand + yr_baseline_fixed
         if yr == 1:
             yr_bill_no_solar = year1_bill_no_solar
         else:
@@ -945,8 +946,8 @@ def _build_multiyear_monthly_df(
                 r["Energy ($)"] = round(month_tou_energy[m] * load_factor * rate_factor * _prorate, 2)
             else:
                 r["Energy ($)"] = round(raw_month_energy[m] * import_ratio * rate_factor * _prorate, 2)
-            r["Demand ($)"] = round(mrow["total_demand_charge"] * load_factor, 2)
-            r["Fixed ($)"] = round(mrow["fixed_charge"] * _prorate, 2)
+            r["Demand ($)"] = round(mrow["total_demand_charge"] * load_factor * rate_factor, 2)
+            r["Fixed ($)"] = round(mrow["fixed_charge"] * rate_factor * _prorate, 2)
 
             # NBC: only applies during NEM-2 regime years (including NEM-A (NEM-2))
             _m_nbc = 0.0
@@ -975,8 +976,8 @@ def _build_multiyear_monthly_df(
                 _bd = result.monthly_baseline_details[m - 1]
                 r["Baseline Bill ($)"] = round(
                     _bd["energy"] * load_factor * rate_factor * _prorate
-                    + _bd["demand"] * load_factor
-                    + _bd["fixed"] * _prorate, 2)
+                    + _bd["demand"] * load_factor * rate_factor
+                    + _bd["fixed"] * rate_factor * _prorate, 2)
 
             rows.append(r)
 
