@@ -910,12 +910,12 @@ def _build_multiyear_monthly_df(
                 _prorate = (_days - _cod_day + 1) / _days
                 r["Month"] = f"{MONTH_NAMES[m - 1]} (partial)"
 
-            r["Load (kWh)"] = round(mrow["load_kwh"] * load_factor * _prorate, 1)
-            r["Solar (kWh)"] = round(mrow["solar_kwh"] * solar_factor * _prorate, 1)
-            r["Import (kWh)"] = round(mrow["import_kwh"] * load_factor * _prorate, 1)
-            r["Export (kWh)"] = round(mrow["export_kwh"] * volume_ratio * _prorate, 1)
-            r["Export Peak (kWh)"] = round(mrow["export_peak_kwh"] * volume_ratio * _prorate, 1)
-            r["Export Off-Peak (kWh)"] = round(mrow["export_offpeak_kwh"] * volume_ratio * _prorate, 1)
+            r["Load (kWh)"] = float(mrow["load_kwh"] * load_factor * _prorate)
+            r["Solar (kWh)"] = float(mrow["solar_kwh"] * solar_factor * _prorate)
+            r["Import (kWh)"] = float(mrow["import_kwh"] * load_factor * _prorate)
+            r["Export (kWh)"] = float(mrow["export_kwh"] * volume_ratio * _prorate)
+            r["Export Peak (kWh)"] = float(mrow["export_peak_kwh"] * volume_ratio * _prorate)
+            r["Export Off-Peak (kWh)"] = float(mrow["export_offpeak_kwh"] * volume_ratio * _prorate)
 
             if result_pv_only is not None:
                 pv_row = result_pv_only.monthly_summary[result_pv_only.monthly_summary["month"] == m].iloc[0]
