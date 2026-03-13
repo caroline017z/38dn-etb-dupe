@@ -960,9 +960,15 @@ def _build_multiyear_monthly_df(
             else:
                 r["Export Credit ($)"] = -round(mrow["export_credit"] * rate_factor * volume_ratio * _prorate, 2)
 
-            r["Net Bill ($)"] = round(
-                r["Energy ($)"] + r["Demand ($)"] + r["Fixed ($)"] + _m_nbc + r["Export Credit ($)"], 2
-            )
+            if yr == 1 and _prorate == 1.0:
+                # Year 1: use actual monthly net_bill from billing result
+                # (includes min_monthly_charge floors, MBO/ABO credit banking,
+                # and NSC true-ups that component reconstruction misses)
+                r["Net Bill ($)"] = round(float(mrow["net_bill"]), 2)
+            else:
+                r["Net Bill ($)"] = round(
+                    r["Energy ($)"] + r["Demand ($)"] + r["Fixed ($)"] + _m_nbc + r["Export Credit ($)"], 2
+                )
 
             # Baseline bill (no-solar) per month — for Indexed Tariff PPA rate calc
             if result.monthly_baseline_details is not None:
