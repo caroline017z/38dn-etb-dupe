@@ -688,11 +688,13 @@ def _calc_baseline_bill(load_8760: pd.Series, tariff: TariffSchedule) -> tuple[f
         m_energy = float(energy_by_hour[month_mask].sum())
         demand_row = demand_df[demand_df["month"] == month_num].iloc[0]
         m_demand = float(demand_row["total_demand_charge"])
+        m_peak_kw = float(demand_row["flat_demand_kw"])
         m_fixed = tariff.fixed_monthly_charge
         monthly_details.append({
             "energy": m_energy,
             "demand": m_demand,
             "fixed": m_fixed,
+            "peak_demand_kw": m_peak_kw,
             "total": m_energy + m_demand + m_fixed,
         })
 
