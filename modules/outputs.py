@@ -976,7 +976,7 @@ def _build_multiyear_monthly_df(
                 _bd = result.monthly_baseline_details[m - 1]
                 r["Baseline Bill ($)"] = round(
                     _bd["energy"] * load_factor * rate_factor * _prorate
-                    + _bd["demand"] * load_factor * rate_factor
+                    + _bd["demand"] * load_factor * rate_factor * _prorate
                     + _bd["fixed"] * rate_factor * _prorate, 2)
 
             rows.append(r)
