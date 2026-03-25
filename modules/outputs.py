@@ -978,6 +978,15 @@ def _build_multiyear_monthly_df(
                     _bd["energy"] * load_factor * rate_factor * _prorate
                     + _bd["demand"] * load_factor * rate_factor * _prorate
                     + _bd["fixed"] * rate_factor * _prorate, 2)
+            else:
+                # Fallback: distribute annual no-solar bill by monthly load share
+                _mo_load_share = (
+                    mrow["load_kwh"] / result.annual_load_kwh
+                    if result.annual_load_kwh > 0 else 1.0 / 12
+                )
+                r["Baseline Bill ($)"] = round(
+                    result.annual_bill_without_solar * _mo_load_share
+                    * load_factor * rate_factor * _prorate, 2)
 
             rows.append(r)
 
