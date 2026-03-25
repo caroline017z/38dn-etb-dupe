@@ -4546,7 +4546,8 @@ if st.session_state["billing_result"] is not None:
                 st.markdown(render_styled_table(sz_display), unsafe_allow_html=True)
 
     # --- Indexed Tariff tab ---
-    with tab_indexed:
+    @st.fragment
+    def _ppa_dashboard():
         st.subheader("Indicative PPA Rate")
         st.caption("Calculates the maximum PPA rate ($/kWh) the customer can pay while achieving a target savings percentage vs. their utility-only bill.")
 
@@ -4607,21 +4608,104 @@ if st.session_state["billing_result"] is not None:
                         key="it_r2_sav",
                     )
 
-        # Build projection & render table
+        # Shared kwargs for indexed tariff builders
+        _it_kw = dict(
+            base_savings_pct=it_savings_pct,
+            savings_escalator_pct=it_savings_esc,
+            regime_1_savings_pct=it_regime_1_savings,
+            regime_2_savings_pct=it_regime_2_savings,
+            nem_regime_2=nem_regime_2 if nem_switch else None,
+            num_years_1=num_years_1 if nem_switch else None,
+            ppa_escalator_pct=it_ppa_esc_1,
+            ppa_escalator_pct_2=it_ppa_esc_2 if nem_switch else None,
+        )
+
+        # Always compute annual indexed tariff (drives dashboard + annual table)
+        it_annual_df = build_indexed_tariff_annual(_main_projection, **_it_kw)
+
+        # ── PPA Dashboard ──────────────────────────────────────────
+        _cd = it_annual_df
+        _ppa_cost_yr = _cd["PPA Rate ($/kWh)"] * _cd["Solar (kWh)"]
+        _total_ppa = _cd["Bill w/ Solar ($)"] + _ppa_cost_yr
+        _bill_no = _cd["Bill w/o Solar ($)"]
+        _cust_sav = _cd["Customer Savings ($)"]
+        _life_sav = _cust_sav.sum()
+        _yr1_rate = float(_cd["PPA Rate ($/kWh)"].iloc[0]) if len(_cd) else 0.0
+        _yr1_sav = float(_cust_sav.iloc[0]) if len(_cd) else 0.0
+        _yr1_bno = float(_bill_no.iloc[0]) if len(_cd) else 1.0
+        _yr1_pct = (_yr1_sav / _yr1_bno * 100) if _yr1_bno else 0.0
+        _avg_sav = _life_sav / len(_cd) if len(_cd) else 0.0
+
+        _k1, _k2, _k3, _k4 = st.columns(4)
+        with _k1:
+            st.metric("Year 1 PPA Rate", f"${_yr1_rate:.4f}/kWh")
+        with _k2:
+            st.metric("Year 1 Savings", f"${_yr1_sav:,.0f}")
+        with _k3:
+            st.metric("Savings %", f"{_yr1_pct:.1f}%")
+        with _k4:
+            st.metric("Lifetime Savings", f"${_life_sav:,.0f}")
+
+        _x = _cd["Calendar Year"].astype(int) if "Calendar Year" in _cd.columns else _cd["Year"]
+        import plotly.graph_objects as go
+        _fig = go.Figure()
+
+        # Utility-only trajectory (plotted first as the upper boundary)
+        _fig.add_trace(go.Scatter(
+            x=_x, y=(_bill_no / 1000).round(1),
+            name="Utility Only",
+            mode="lines",
+            line=dict(color="#D94F3B", width=2.5, dash="dot"),
+            hovertemplate="%{x}<br><b>$%{y:.1f}K</b><extra>Utility Only</extra>",
+        ))
+        # PPA + Solar trajectory with savings fill to upper curve
+        _fig.add_trace(go.Scatter(
+            x=_x, y=(_total_ppa / 1000).round(1),
+            name="With Solar + PPA",
+            mode="lines+markers",
+            line=dict(color="#00897B", width=3),
+            marker=dict(size=4, color="#00897B"),
+            fill="tonexty",
+            fillcolor="rgba(0,137,123,0.13)",
+            hovertemplate="%{x}<br><b>$%{y:.1f}K</b><extra>Solar + PPA</extra>",
+        ))
+
+        _fig.update_layout(
+            title=dict(text="Annual Bill: Utility Only vs. Solar + PPA",
+                       font=dict(size=15, color="#0E2841")),
+            xaxis_title="Year",
+            yaxis_title="Annual Cost ($K)",
+            yaxis=dict(rangemode="tozero"),
+            template="plotly_white",
+            height=370,
+            margin=dict(l=50, r=30, t=50, b=40),
+            font=dict(family="Aptos Narrow, Aptos, Calibri, Arial Narrow, sans-serif",
+                      size=12),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                        xanchor="right", x=1),
+            hovermode="x unified",
+            transition=dict(duration=350, easing="cubic-in-out"),
+        )
+        # Annotate the savings band at the midpoint year
+        _mid = len(_cd) // 2
+        if _mid > 0 and _mid < len(_cd):
+            _gap = float(_bill_no.iloc[_mid] - _total_ppa.iloc[_mid])
+            _mid_y = float((_bill_no.iloc[_mid] + _total_ppa.iloc[_mid]) / 2 / 1000)
+            if _gap > 0:
+                _fig.add_annotation(
+                    x=_x.iloc[_mid], y=_mid_y,
+                    text=f"<b>${_gap / 1000:.1f}K savings</b>",
+                    showarrow=False,
+                    font=dict(size=11, color="#00695C"),
+                    bgcolor="rgba(255,255,255,0.85)",
+                    borderpad=3,
+                )
+
+        st.plotly_chart(_fig, use_container_width=True, key="ppa_dashboard_chart")
+
+        # ── Data Table (Annual / Monthly) ──────────────────────────
         if it_view == "Annual":
-            it_proj = _main_projection
-            it_df = build_indexed_tariff_annual(
-                it_proj,
-                base_savings_pct=it_savings_pct,
-                savings_escalator_pct=it_savings_esc,
-                regime_1_savings_pct=it_regime_1_savings,
-                regime_2_savings_pct=it_regime_2_savings,
-                nem_regime_2=nem_regime_2 if nem_switch else None,
-                num_years_1=num_years_1 if nem_switch else None,
-                ppa_escalator_pct=it_ppa_esc_1,
-                ppa_escalator_pct_2=it_ppa_esc_2 if nem_switch else None,
-            )
-            # Format for display
+            it_df = it_annual_df
             it_display = it_df.copy()
             for col in ["Bill w/o Solar ($)", "Bill w/ Solar ($)"]:
                 if col in it_display.columns:
@@ -4657,18 +4741,7 @@ if st.session_state["billing_result"] is not None:
                 degradation_pct=annual_degradation_pct,
                 compound_escalation=compound_escalation,
             )
-            it_df = build_indexed_tariff_monthly(
-                it_monthly,
-                base_savings_pct=it_savings_pct,
-                savings_escalator_pct=it_savings_esc,
-                regime_1_savings_pct=it_regime_1_savings,
-                regime_2_savings_pct=it_regime_2_savings,
-                nem_regime_2=nem_regime_2 if nem_switch else None,
-                num_years_1=num_years_1 if nem_switch else None,
-                ppa_escalator_pct=it_ppa_esc_1,
-                ppa_escalator_pct_2=it_ppa_esc_2 if nem_switch else None,
-            )
-            # Format for display
+            it_df = build_indexed_tariff_monthly(it_monthly, **_it_kw)
             it_display = it_df.copy()
             for col in ["Bill w/o Solar ($)", "Net Bill ($)"]:
                 if col in it_display.columns:
@@ -4696,6 +4769,9 @@ if st.session_state["billing_result"] is not None:
                 "This gives the maximum $/kWh a customer can pay for solar and still achieve "
                 "their savings target relative to the utility-only bill."
             )
+
+    with tab_indexed:
+        _ppa_dashboard()
 
     # --- Downloads tab (always last) ---
     with tab5:
@@ -4878,45 +4954,6 @@ if st.session_state["billing_result"] is not None:
 
             # Custom savings is always active via the primary inputs above
 
-            # --- Y1 Savings & PPA Summary ---
-            try:
-                _sum_it_df = build_indexed_tariff_annual(
-                    _main_projection,
-                    base_savings_pct=_prop_sav_1,
-                    savings_escalator_pct=_it_sav_esc,
-                    regime_1_savings_pct=_prop_sav_1,
-                    regime_2_savings_pct=_prop_sav_2 if nem_switch else None,
-                    ppa_escalator_pct=_prop_ppa_esc,
-                    ppa_escalator_pct_2=_prop_ppa_esc_2 if nem_switch else None,
-                    nem_regime_2=nem_regime_2 if nem_switch else None,
-                    num_years_1=num_years_1 if nem_switch else None,
-                )
-                if len(_sum_it_df) >= 1 and "PPA Rate ($/kWh)" in _sum_it_df.columns:
-                    _sum_r1 = _sum_it_df["PPA Rate ($/kWh)"].iloc[0]
-                    _sum_sav1 = _sum_it_df["Customer Savings ($)"].iloc[0] if "Customer Savings ($)" in _sum_it_df.columns else 0
-                    _sum_bill_no = _sum_it_df["Bill w/o Solar ($)"].iloc[0] if "Bill w/o Solar ($)" in _sum_it_df.columns else 0
-                    _sum_sav1_pct = (_sum_sav1 / _sum_bill_no * 100) if _sum_bill_no else 0
-                    if _sum_r1 > 0:
-                        _prop_ppa_rate = round(_sum_r1, 4)
-                    if nem_switch and num_years_1:
-                        _mc1, _mc2, _mc3 = st.columns(3)
-                        with _mc1:
-                            st.metric("Y1 Savings", f"${_sum_sav1:,.0f} ({_sum_sav1_pct:.1f}%)")
-                        with _mc2:
-                            st.metric(f"{nem_regime_1} PPA Rate (Yr 1)", f"${_sum_r1:.4f}/kWh")
-                        if len(_sum_it_df) > num_years_1:
-                            _sum_r2 = _sum_it_df["PPA Rate ($/kWh)"].iloc[num_years_1]
-                            with _mc3:
-                                st.metric(f"{nem_regime_2} PPA Rate (Yr {num_years_1 + 1})", f"${_sum_r2:.4f}/kWh")
-                    else:
-                        _mc1, _mc2 = st.columns(2)
-                        with _mc1:
-                            st.metric("Y1 Savings", f"${_sum_sav1:,.0f} ({_sum_sav1_pct:.1f}%)")
-                        with _mc2:
-                            st.metric("PPA Rate (Yr 1)", f"${_sum_r1:.4f}/kWh")
-            except Exception as e:
-                logger.warning("Failed to compute proposal PPA summary: %s", e)
-
             col_p1, col_p2 = st.columns(2)
             with col_p1:
                 prop_customer = st.text_input("Customer / Facility Name", key="prop_customer")
@@ -4934,6 +4971,66 @@ if st.session_state["billing_result"] is not None:
                     help="Leave blank to keep current tariff.",
                 )
 
+            # --- Y1 Savings & PPA Summary ---
+            # Build a term-length projection so the PPA backsolve matches
+            # the PPTX output (avoids rate mismatch when prop_term != system_life_years).
+            _prop_base_proj = build_annual_projection(
+                result=result,
+                system_cost=system_cost,
+                rate_escalator_pct=rate_escalator,
+                load_escalator_pct=load_escalator,
+                years=prop_term,
+                export_rates_multiyear=st.session_state.get("export_rates_multiyear"),
+                result_pv_only=pv_only_for_display,
+                compound_escalation=compound_escalation,
+                rate_shift_old_baseline=_rs_old_baseline_for_proj,
+                existing_solar_offset_kwh=_es_offset_annual,
+                **_common_nem_kw,
+            )
+            _prop_ppa_rate_r2 = None
+            _sum_it_df = None
+            try:
+                _sum_it_df = build_indexed_tariff_annual(
+                    _prop_base_proj,
+                    base_savings_pct=_prop_sav_1,
+                    savings_escalator_pct=_it_sav_esc,
+                    regime_1_savings_pct=_prop_sav_1,
+                    regime_2_savings_pct=_prop_sav_2 if nem_switch else None,
+                    ppa_escalator_pct=_prop_ppa_esc,
+                    ppa_escalator_pct_2=_prop_ppa_esc_2 if nem_switch else None,
+                    nem_regime_2=nem_regime_2 if nem_switch else None,
+                    num_years_1=num_years_1 if nem_switch else None,
+                )
+                if len(_sum_it_df) >= 1 and "PPA Rate ($/kWh)" in _sum_it_df.columns:
+                    _sum_r1 = _sum_it_df["PPA Rate ($/kWh)"].iloc[0]
+                    _sum_sav1 = _sum_it_df["Customer Savings ($)"].iloc[0] if "Customer Savings ($)" in _sum_it_df.columns else 0
+                    _sum_bill_no = _sum_it_df["Bill w/o Solar ($)"].iloc[0] if "Bill w/o Solar ($)" in _sum_it_df.columns else 0
+                    _sum_sav1_pct = (_sum_sav1 / _sum_bill_no * 100) if _sum_bill_no else 0
+                    if _sum_r1 > 0:
+                        _prop_ppa_rate = round(_sum_r1, 4)
+                    # Extract regime-2 PPA rate from the same backsolve
+                    if nem_switch and num_years_1 and len(_sum_it_df) > num_years_1:
+                        _r2_val = _sum_it_df["PPA Rate ($/kWh)"].iloc[num_years_1]
+                        if _r2_val > 0:
+                            _prop_ppa_rate_r2 = round(float(_r2_val), 4)
+                    if nem_switch and num_years_1:
+                        _mc1, _mc2, _mc3 = st.columns(3)
+                        with _mc1:
+                            st.metric("Y1 Savings", f"${_sum_sav1:,.0f} ({_sum_sav1_pct:.1f}%)")
+                        with _mc2:
+                            st.metric(f"{nem_regime_1} PPA Rate (Yr 1)", f"${_sum_r1:.4f}/kWh")
+                        if _prop_ppa_rate_r2 is not None:
+                            with _mc3:
+                                st.metric(f"{nem_regime_2} PPA Rate (Yr {num_years_1 + 1})", f"${_r2_val:.4f}/kWh")
+                    else:
+                        _mc1, _mc2 = st.columns(2)
+                        with _mc1:
+                            st.metric("Y1 Savings", f"${_sum_sav1:,.0f} ({_sum_sav1_pct:.1f}%)")
+                        with _mc2:
+                            st.metric("PPA Rate (Yr 1)", f"${_sum_r1:.4f}/kWh")
+            except Exception as e:
+                logger.warning("Failed to compute proposal PPA summary: %s", e)
+
             _prop_date = date.today().strftime("%B %Y")
             _batt_cap = st.session_state.get("battery_capacity_kwh", 0) or 0
             _batt_cfg = st.session_state.get("battery_config")
@@ -4944,78 +5041,30 @@ if st.session_state["billing_result"] is not None:
                     st.warning("Please enter a customer name.")
                 else:
                     with st.spinner("Building proposal deck..."):
-                        # Build a term-length projection for the proposal
-                        _prop_proj_df = build_annual_projection(
-                            result=result,
-                            system_cost=system_cost,
-                            rate_escalator_pct=rate_escalator,
-                            load_escalator_pct=load_escalator,
-                            years=prop_term,
-                            export_rates_multiyear=st.session_state.get("export_rates_multiyear"),
-                            result_pv_only=pv_only_for_display,
-                            compound_escalation=compound_escalation,
-                            rate_shift_old_baseline=_rs_old_baseline_for_proj,
-                            existing_solar_offset_kwh=_es_offset_annual,
-                            **_common_nem_kw,
-                        )
+                        # Reuse the term-length projection and PPA backsolve
+                        # already computed for the summary metrics — ensures
+                        # the PPTX matches the displayed PPA rates exactly.
+                        _prop_proj_original = _prop_base_proj.copy()
 
-                        # Keep the original (utility-only) projection for PPA
-                        # backsolve — the savings matrix and regime-2 rate need
-                        # Bill w/ Solar BEFORE any PPA overlay.
-                        _prop_proj_original = _prop_proj_df.copy()
-
-                        # When custom savings toggle is ON, compute per-year PPA
-                        # cost from the backsolve and layer it onto the utility
-                        # residual so the PPTX shows true customer economics:
+                        # Layer per-year PPA cost onto the utility residual so
+                        # the PPTX shows true customer economics:
                         #   Total Cost = Bill w/ Solar (utility) + PPA Cost
                         #   Customer Savings = Bill w/o Solar - Total Cost
-                        _cs_tariff = build_indexed_tariff_annual(
-                            _prop_proj_original,
-                            base_savings_pct=_prop_sav_1,
-                            savings_escalator_pct=_it_sav_esc,
-                            regime_1_savings_pct=_prop_sav_1,
-                            regime_2_savings_pct=_prop_sav_2 if nem_switch else None,
-                            nem_regime_2=nem_regime_2 if nem_switch else None,
-                            num_years_1=num_years_1 if nem_switch else None,
-                            ppa_escalator_pct=_prop_ppa_esc,
-                            ppa_escalator_pct_2=_prop_ppa_esc_2 if nem_switch else None,
-                        )
-                        _prop_proj_df = _prop_proj_df.copy()
-                        for idx, row in _prop_proj_df.iterrows():
-                            yr = int(row["Year"])
-                            _tariff_row = _cs_tariff[_cs_tariff["Year"] == yr]
-                            ppa_rate_yr = float(_tariff_row["PPA Rate ($/kWh)"].iloc[0]) if len(_tariff_row) else 0.0
-                            solar_kwh_yr = row["Solar (kWh)"]
-                            ppa_cost = max(ppa_rate_yr, 0.0) * solar_kwh_yr
-                            utility_residual = row["Bill w/ Solar ($)"]
-                            total_cost = utility_residual + ppa_cost
-                            bill_no = row["Bill w/o Solar ($)"]
-                            _prop_proj_df.at[idx, "PPA Cost ($)"] = round(ppa_cost, 2)
-                            _prop_proj_df.at[idx, "Bill w/ Solar ($)"] = round(total_cost, 2)
-                            _prop_proj_df.at[idx, "Annual Savings ($)"] = round(bill_no - total_cost, 2)
-                        _prop_proj_df["Cumulative Savings ($)"] = _prop_proj_df["Annual Savings ($)"].cumsum().round(2)
-
-                        # Compute regime 2 PPA rate for exec summary
-                        _prop_ppa_rate_r2 = None
-                        if nem_switch and num_years_1 and _prop_ppa_rate > 0:
-                            try:
-                                _r2_tariff = build_indexed_tariff_annual(
-                                    _prop_proj_original,
-                                    base_savings_pct=_prop_sav_1,
-                                    savings_escalator_pct=_it_sav_esc,
-                                    regime_1_savings_pct=_prop_sav_1,
-                                    regime_2_savings_pct=_prop_sav_2,
-                                    nem_regime_2=nem_regime_2,
-                                    num_years_1=num_years_1,
-                                    ppa_escalator_pct=_prop_ppa_esc,
-                                    ppa_escalator_pct_2=_prop_ppa_esc_2,
-                                )
-                                if len(_r2_tariff) > num_years_1:
-                                    _r2_rate = _r2_tariff["PPA Rate ($/kWh)"].iloc[num_years_1]
-                                    if _r2_rate > 0:
-                                        _prop_ppa_rate_r2 = round(float(_r2_rate), 4)
-                            except Exception as e:
-                                logger.warning("Failed to compute regime 2 PPA rate: %s", e)
+                        _prop_proj_df = _prop_base_proj.copy()
+                        if _sum_it_df is not None:
+                            for idx, row in _prop_proj_df.iterrows():
+                                yr = int(row["Year"])
+                                _tariff_row = _sum_it_df[_sum_it_df["Year"] == yr]
+                                ppa_rate_yr = float(_tariff_row["PPA Rate ($/kWh)"].iloc[0]) if len(_tariff_row) else 0.0
+                                solar_kwh_yr = row["Solar (kWh)"]
+                                ppa_cost = max(ppa_rate_yr, 0.0) * solar_kwh_yr
+                                utility_residual = row["Bill w/ Solar ($)"]
+                                total_cost = utility_residual + ppa_cost
+                                bill_no = row["Bill w/o Solar ($)"]
+                                _prop_proj_df.at[idx, "PPA Cost ($)"] = round(ppa_cost, 2)
+                                _prop_proj_df.at[idx, "Bill w/ Solar ($)"] = round(total_cost, 2)
+                                _prop_proj_df.at[idx, "Annual Savings ($)"] = round(bill_no - total_cost, 2)
+                            _prop_proj_df["Cumulative Savings ($)"] = _prop_proj_df["Annual Savings ($)"].cumsum().round(2)
 
                         proposal_bytes = generate_proposal_pptx(
                             customer_name=prop_customer,
