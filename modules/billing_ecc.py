@@ -16,7 +16,7 @@ from vendor.electricitycostcalculator.openei_tariff.openei_tariff_analyzer impor
 from vendor.electricitycostcalculator.cost_calculator.cost_calculator import CostCalculator
 from vendor.electricitycostcalculator.cost_calculator.rate_structure import ChargeType
 
-from .billing import BillingResult
+from .billing import BillingResult, _assemble_billing_result
 
 
 def _build_tou_arrays(
@@ -410,20 +410,7 @@ def run_ecc_billing_simulation(
             scale = ecc_sum / hourly_sum
             hourly_detail.loc[month_mask, "energy_cost"] *= scale
 
-    # --- Annual totals ---
-    annual_load = float(load.sum())
-    annual_solar = float(solar.sum())
-    annual_import = float(import_kwh.sum())
-    annual_export = float(export_kwh.sum())
-    annual_energy_cost = float(monthly_summary["energy_cost"].sum())
-    annual_demand_cost = float(monthly_summary["total_demand_charge"].sum())
-    annual_fixed_cost = float(monthly_summary["fixed_charge"].sum())
-    annual_export_credit = float(monthly_summary["export_credit"].sum())
-    annual_bill_solar = float(monthly_summary["net_bill"].sum())
-    annual_savings = baseline_total - annual_bill_solar
-    savings_pct = (annual_savings / baseline_total * 100) if baseline_total > 0 else 0.0
-
-    # TOU fields for projection compatibility
+    # --- TOU fields for projection compatibility ---
     _tou_monthly_energy = {}
     _tou_monthly_credit = {}
     for _, mrow in monthly_summary.iterrows():
@@ -431,28 +418,24 @@ def run_ecc_billing_simulation(
         _tou_monthly_energy[m] = float(mrow["energy_cost"])
         _tou_monthly_credit[m] = float(mrow["export_credit"])
 
-    return BillingResult(
+    annual_energy_cost = float(monthly_summary["energy_cost"].sum())
+    annual_export_credit = float(monthly_summary["export_credit"].sum())
+
+    return _assemble_billing_result(
         hourly_detail=hourly_detail,
         monthly_summary=monthly_summary,
-        annual_load_kwh=annual_load,
-        annual_solar_kwh=annual_solar,
-        annual_import_kwh=annual_import,
-        annual_export_kwh=annual_export,
-        annual_energy_cost=annual_energy_cost,
-        annual_demand_cost=annual_demand_cost,
-        annual_fixed_cost=annual_fixed_cost,
-        annual_export_credit=annual_export_credit,
-        annual_bill_with_solar=annual_bill_solar,
-        annual_bill_without_solar=baseline_total,
-        annual_savings=annual_savings,
-        savings_pct=savings_pct,
-        monthly_baseline_details=monthly_baseline_details,
-        raw_annual_energy=annual_energy_cost,
+        load=load,
+        solar=solar,
+        import_kwh=import_kwh,
+        export_kwh=export_kwh,
+        baseline_bill=baseline_total,
         nem_regime="NEM-3",
         tou_annual_energy=annual_energy_cost,
         tou_annual_credit=annual_export_credit,
         tou_monthly_energy=_tou_monthly_energy,
         tou_monthly_credit=_tou_monthly_credit,
+        monthly_baseline_details=monthly_baseline_details,
+        raw_annual_energy=annual_energy_cost,
     )
 
 
