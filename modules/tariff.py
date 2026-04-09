@@ -94,6 +94,7 @@ class TariffSchedule:
     raw_data: dict = field(default_factory=dict, repr=False)
 
 
+@st.cache_data(ttl=3600, show_spinner="Fetching rates...")
 def fetch_available_rates(utility_name: str) -> list[dict]:
     """
     Fetch available rate schedules for a given utility from OpenEI URDB.
@@ -137,6 +138,7 @@ def fetch_available_rates(utility_name: str) -> list[dict]:
     return rates
 
 
+@st.cache_data(ttl=3600, show_spinner="Loading tariff...")
 def fetch_tariff_detail(rate_label: str) -> TariffSchedule:
     """
     Fetch and parse the full tariff detail for a given rate label from OpenEI.

@@ -20,6 +20,7 @@ from typing import cast
 from .tariff import TariffSchedule, get_energy_rate
 from .billing import (
     BillingResult,
+    _assemble_billing_result,
     run_billing_simulation,
     _build_hourly_energy_rates,
 )
@@ -409,28 +410,21 @@ def _build_aggregate_result(
     for agg_res in agg_results.values():
         agg_raw_energy += agg_res.raw_annual_energy
 
-    return BillingResult(
+    return _assemble_billing_result(
         hourly_detail=hourly_detail,
         monthly_summary=monthly_summary,
-        annual_load_kwh=annual_load,
-        annual_solar_kwh=annual_solar,
-        annual_import_kwh=annual_import,
-        annual_export_kwh=annual_export,
-        annual_energy_cost=annual_energy_cost,
-        annual_demand_cost=annual_demand_cost,
-        annual_fixed_cost=annual_fixed_cost,
-        annual_export_credit=annual_export_credit,
-        annual_bill_with_solar=annual_bill_solar,
-        annual_bill_without_solar=annual_bill_no_solar,
-        annual_savings=annual_savings,
-        savings_pct=savings_pct,
-        annual_nbc_cost=annual_nbc,
-        annual_nsc_adjustment=annual_nsc_adj,
+        load=np.array([annual_load]),
+        solar=np.array([annual_solar]),
+        import_kwh=np.array([annual_import]),
+        export_kwh=np.array([annual_export]),
+        baseline_bill=annual_bill_no_solar,
         nem_regime=regime_str,
-        monthly_baseline_details=monthly_baseline,
         tou_annual_energy=agg_tou_energy,
         tou_annual_credit=agg_tou_credit,
+        monthly_baseline_details=monthly_baseline,
         raw_annual_energy=agg_raw_energy,
+        annual_nbc=annual_nbc,
+        annual_nsc_adj=annual_nsc_adj,
     )
 
 

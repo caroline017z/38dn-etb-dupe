@@ -68,6 +68,68 @@ class BillingResult:
     rate_shift_annual_savings: float | None = None          # old_rate_baseline - new_rate_baseline
 
 
+def _assemble_billing_result(
+    hourly_detail: pd.DataFrame,
+    monthly_summary: pd.DataFrame,
+    load: np.ndarray,
+    solar: np.ndarray,
+    import_kwh: np.ndarray,
+    export_kwh: np.ndarray,
+    baseline_bill: float,
+    nem_regime: str = "NEM-3",
+    tou_annual_energy: float = 0.0,
+    tou_annual_credit: float = 0.0,
+    tou_monthly_energy: dict | None = None,
+    tou_monthly_credit: dict | None = None,
+    monthly_baseline_details: list | None = None,
+    raw_annual_energy: float | None = None,
+    annual_nbc: float = 0.0,
+    annual_nsc_adj: float = 0.0,
+) -> "BillingResult":
+    """Assemble a BillingResult from monthly_summary and supporting arrays.
+
+    Computes standard annual totals (energy_cost, demand, fixed, export_credit)
+    from monthly_summary, derives annual_bill_solar / annual_savings / savings_pct,
+    and returns the populated dataclass.
+    """
+    annual_energy_cost = float(monthly_summary["energy_cost"].sum())
+    annual_demand_cost = float(monthly_summary["total_demand_charge"].sum())
+    annual_fixed_cost = float(monthly_summary["fixed_charge"].sum())
+    annual_export_credit = float(monthly_summary["export_credit"].sum())
+    annual_bill_solar = float(monthly_summary["net_bill"].sum())
+    annual_savings = baseline_bill - annual_bill_solar
+    savings_pct = (annual_savings / baseline_bill * 100) if baseline_bill > 0 else 0.0
+
+    if raw_annual_energy is None:
+        raw_annual_energy = float(hourly_detail["energy_cost"].sum())
+
+    return BillingResult(
+        hourly_detail=hourly_detail,
+        monthly_summary=monthly_summary,
+        annual_load_kwh=float(load.sum()),
+        annual_solar_kwh=float(solar.sum()),
+        annual_import_kwh=float(import_kwh.sum()),
+        annual_export_kwh=float(export_kwh.sum()),
+        annual_energy_cost=annual_energy_cost,
+        annual_demand_cost=annual_demand_cost,
+        annual_fixed_cost=annual_fixed_cost,
+        annual_export_credit=annual_export_credit,
+        annual_bill_with_solar=annual_bill_solar,
+        annual_bill_without_solar=baseline_bill,
+        annual_savings=annual_savings,
+        savings_pct=savings_pct,
+        annual_nbc_cost=annual_nbc,
+        annual_nsc_adjustment=annual_nsc_adj,
+        nem_regime=nem_regime,
+        tou_annual_energy=tou_annual_energy,
+        tou_annual_credit=tou_annual_credit,
+        tou_monthly_energy=tou_monthly_energy,
+        tou_monthly_credit=tou_monthly_credit,
+        raw_annual_energy=raw_annual_energy,
+        monthly_baseline_details=monthly_baseline_details,
+    )
+
+
 def _build_schedule_arrays(
     tariff: TariffSchedule,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -336,54 +398,27 @@ def run_billing_simulation(
     # --- Baseline bill (no solar) ---
     baseline_bill, monthly_baseline_list = _calc_baseline_bill(load_8760, tariff)
 
-    # --- Annual totals ---
-    annual_load = float(load.sum())
-    annual_solar = float(solar.sum())
-    annual_import = float(import_kwh.sum())
-    annual_export = float(export_kwh.sum())
-    annual_energy_cost = float(monthly_summary["energy_cost"].sum())
-    annual_demand_cost = float(monthly_summary["total_demand_charge"].sum())
-    annual_fixed_cost = float(monthly_summary["fixed_charge"].sum())
-    annual_export_credit = float(monthly_summary["export_credit"].sum())
+    # --- Annual totals via shared helper ---
     annual_nbc = float(monthly_summary["nbc_charge"].sum()) if "nbc_charge" in monthly_summary.columns else 0.0
-    annual_bill_solar = float(monthly_summary["net_bill"].sum())
-    annual_savings = baseline_bill - annual_bill_solar
-    savings_pct = (annual_savings / baseline_bill * 100) if baseline_bill > 0 else 0.0
-
-    # NSC adjustment (stored in monthly rows already applied)
     _nsc_col = monthly_summary.get("nsc_adjustment")
     annual_nsc_adj = float(_nsc_col.sum()) if _nsc_col is not None else 0.0
 
-    # Raw import energy cost: sum(import_kwh * energy_rate) from hourly arrays.
-    # This is always the gross import cost before any TOU netting or billing
-    # option adjustments.  The energy_cost column in hourly_detail holds these
-    # raw values (set at line 216 before NEM-1/2 export_credit override).
-    raw_annual_energy = float(hourly_detail["energy_cost"].sum())
-
-    return BillingResult(
+    return _assemble_billing_result(
         hourly_detail=hourly_detail,
         monthly_summary=monthly_summary,
-        annual_load_kwh=annual_load,
-        annual_solar_kwh=annual_solar,
-        annual_import_kwh=annual_import,
-        annual_export_kwh=annual_export,
-        annual_energy_cost=annual_energy_cost,
-        annual_demand_cost=annual_demand_cost,
-        annual_fixed_cost=annual_fixed_cost,
-        annual_export_credit=annual_export_credit,
-        annual_bill_with_solar=annual_bill_solar,
-        annual_bill_without_solar=baseline_bill,
-        annual_savings=annual_savings,
-        savings_pct=savings_pct,
-        annual_nbc_cost=annual_nbc,
-        annual_nsc_adjustment=annual_nsc_adj,
+        load=load,
+        solar=solar,
+        import_kwh=import_kwh,
+        export_kwh=export_kwh,
+        baseline_bill=baseline_bill,
         nem_regime=nem_regime,
         tou_annual_energy=tou_annual_energy,
         tou_annual_credit=tou_annual_credit,
         tou_monthly_energy=tou_monthly_energy,
         tou_monthly_credit=tou_monthly_credit,
-        raw_annual_energy=raw_annual_energy,
         monthly_baseline_details=monthly_baseline_list,
+        annual_nbc=annual_nbc,
+        annual_nsc_adj=annual_nsc_adj,
     )
 
 
