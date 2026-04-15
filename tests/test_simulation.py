@@ -70,6 +70,43 @@ def test_run_simulation_matches_direct_call(nem_regime, nbc):
     assert wrapped.billing_result is wrapped.pv_only_result
 
 
+def test_inputs_from_session_state_series_fallback_is_none_safe():
+    """Regression: ``or`` on a pandas Series raises
+    'The truth value of a Series is ambiguous'. The placeholder branch
+    must use an explicit ``is None`` check, not ``or``.
+    """
+    import pandas as pd
+    import numpy as np
+    from modules.simulation import inputs_from_session_state
+    from tests.golden_helpers import build_tariff
+
+    idx = pd.date_range("2026-01-01", periods=8760, freq="h")
+    load = pd.Series(np.full(8760, 10.0), index=idx)
+    solar = pd.Series(np.zeros(8760), index=idx)
+    exports_real = pd.Series(np.full(8760, 0.05), index=idx)
+    placeholder = pd.Series(np.zeros(8760), index=idx)
+    tariff = build_tariff({"kind": "flat", "rate": 0.20})
+
+    session = {
+        "load_8760": load, "production_8760": solar, "tariff": tariff,
+        "export_rates": exports_real,
+    }
+    inputs = inputs_from_session_state(
+        session, nem_regime="NEM-3", nbc_rate=0.0, nsc_rate=0.04,
+        billing_option="ABO", export_rates_placeholder=placeholder,
+        include_battery=False,
+    )
+    assert inputs.export_rates_8760 is exports_real
+
+    session["export_rates"] = None
+    inputs2 = inputs_from_session_state(
+        session, nem_regime="NEM-3", nbc_rate=0.0, nsc_rate=0.04,
+        billing_option="ABO", export_rates_placeholder=placeholder,
+        include_battery=False,
+    )
+    assert inputs2.export_rates_8760 is placeholder
+
+
 def test_run_simulation_frozen_inputs_support_replace():
     """Monte Carlo relies on ``dataclasses.replace`` producing a valid new
     ``SimulationInputs`` — this pins that behaviour so the frozen dataclass

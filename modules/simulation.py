@@ -147,7 +147,9 @@ def inputs_from_session_state(
     the caller supplies for the NEM-1/2 case where session_state has no
     export rates loaded.
     """
-    export = session_state.get("export_rates") or export_rates_placeholder
+    export = session_state.get("export_rates")
+    if export is None:
+        export = export_rates_placeholder
     battery_config = session_state.get("battery_config") if include_battery else None
     battery_capacity = (
         float(session_state.get("battery_capacity_kwh", 0.0))
