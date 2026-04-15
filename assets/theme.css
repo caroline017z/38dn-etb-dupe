@@ -228,6 +228,42 @@ p, li, div, label, input, select, textarea, .stMarkdown {
     opacity: 0.7;
 }
 
+/* API-call buttons (Generate Production Profile / Fetch Available Rates /
+ * Load Old Tariff) — light 38DN teal instead of the navy primary treatment,
+ * to visually signal "this button makes an outbound API request".
+ * Targeted via Streamlit's `st-key-<key>` class on the element container,
+ * so any button whose key starts with `api_call_btn_` gets this skin. */
+.st-key-api_call_btn_generate_prod button,
+.st-key-api_call_btn_fetch_rates button,
+.st-key-api_call_btn_mgmt_nema_fetch button,
+.st-key-api_call_btn_edit_nema_fetch button,
+.st-key-api_call_btn_rate_shift_load button,
+[class*="st-key-api_call_btn_"] button {
+    background: #8FB5B0 !important;   /* light teal (dilute of --38dn-teal) */
+    border-color: #8FB5B0 !important;
+    color: #ffffff !important;
+    font-weight: var(--38dn-fw-medium) !important;
+}
+[class*="st-key-api_call_btn_"] button * {
+    color: inherit !important;
+}
+[class*="st-key-api_call_btn_"] button:hover:not(:disabled) {
+    background: #6E9A95 !important;   /* mid teal */
+    border-color: #6E9A95 !important;
+    box-shadow: 0 0 0 3px rgba(81, 132, 132, 0.18) !important;
+}
+[class*="st-key-api_call_btn_"] button:active:not(:disabled) {
+    background: #518484 !important;   /* full --38dn-teal */
+    border-color: #518484 !important;
+    box-shadow: none !important;
+}
+[class*="st-key-api_call_btn_"] button:disabled {
+    background: #CBD5E1 !important;
+    border-color: #CBD5E1 !important;
+    color: #ffffff !important;
+    opacity: 0.85 !important;
+}
+
 /* Popover trigger buttons — same visual language as secondary buttons
  * (white bg, navy text, hairline border). Without this rule, Streamlit
  * paints them with `primaryColor` as background, which now matches

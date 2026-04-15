@@ -2421,7 +2421,9 @@ def _render_top_bar():
                 # --- Fetch Available Rates (shared across meters) ---
                 _mgmt_fetch_col1, _mgmt_fetch_col2 = st.columns([1, 2])
                 with _mgmt_fetch_col1:
-                    if st.button("Fetch Available Rates", key="mgmt_nema_fetch_rates"):
+                    if st.button(
+                        "Fetch Available Rates", key="api_call_btn_mgmt_nema_fetch",
+                    ):
                         st.session_state["_pending_mgmt_fetch_rates"] = _mgmt_nema_utility
                 if st.session_state.get("available_rates"):
                     st.caption(f"{len(st.session_state['available_rates'])} rate schedules available for per-meter tariff selection.")
@@ -2674,7 +2676,9 @@ def _render_top_bar():
                         )
 
                         # Fetch rates for tariff selection
-                        if st.button("Fetch Available Rates", key="edit_nema_fetch_rates"):
+                        if st.button(
+                            "Fetch Available Rates", key="api_call_btn_edit_nema_fetch",
+                        ):
                             st.session_state["_pending_edit_nema_fetch_rates"] = _ne_utility
                         if st.session_state.get("available_rates"):
                             st.caption(f"{len(st.session_state['available_rates'])} rate schedules available.")
@@ -3296,30 +3300,39 @@ def _render_sidebar():
         _sb_total = len(_sb_checks)
         _sb_complete = _sb_done == _sb_total
 
-        # Status color logic — celebratory green on 100%, amber mid, neutral low.
-        if _sb_complete:
-            _headline_color = "#45A750"
-            _headline_text = "Inputs ready — run simulation"
-            _accent_rule = "#45A750"
-        elif _sb_done >= _sb_total // 2:
-            _headline_color = "#D48A1A"
-            _headline_text = f"{_sb_done} of {_sb_total} inputs loaded"
-            _accent_rule = "#D48A1A"
-        else:
-            _headline_color = "#64748B"
-            _headline_text = f"{_sb_done} of {_sb_total} inputs loaded"
-            _accent_rule = "#CBD5E1"
+        # Teal → green ombre palette. User prefers the darker end (teal) as
+        # the dominant tone; green shows up lighter at the right of the
+        # gradient. We ramp through 4 stops, one per pill, so the row reads
+        # as a single teal-to-green sweep rather than 4 independent badges.
+        _TEAL = "#518484"
+        _GREEN = "#45A750"
+        _ombre_stops = ("#3E6F74", "#4B7E71", "#5A8D5E", _GREEN)  # teal → green
 
-        # Oval pills — green filled when loaded, outlined neutral when pending.
+        # Status copy — subtle tone shift at completion; the color is
+        # always a teal/green variant now (no amber/grey headline).
+        if _sb_complete:
+            _headline_text = "Inputs ready — run simulation"
+            _headline_color = "#3E6F74"  # dark teal
+        elif _sb_done >= _sb_total // 2:
+            _headline_text = f"{_sb_done} of {_sb_total} inputs loaded"
+            _headline_color = "#4B7E71"  # mid teal/green
+        else:
+            _headline_text = f"{_sb_done} of {_sb_total} inputs loaded"
+            _headline_color = "#518484"  # straight teal
+
+        # Oval pills — loaded pills take their color from the ombre stops
+        # (positional, so the row visually sweeps dark-teal to green).
+        # Pending pills stay ghost-outlined.
         _pill_pieces = []
-        for name, ok in _sb_checks:
+        for idx, (name, ok) in enumerate(_sb_checks):
             if ok:
+                _color = _ombre_stops[idx % len(_ombre_stops)]
                 _pill_pieces.append(
                     f'<span style="display:inline-flex; align-items:center; gap:4px;'
                     f'padding:3px 10px; margin:0 4px 4px 0;'
                     f'font-size:11px; font-weight:600; letter-spacing:0.02em;'
-                    f'border-radius:999px; background:#45A750; color:#ffffff;'
-                    f'border:1px solid #45A750;">'
+                    f'border-radius:999px; background:{_color}; color:#ffffff;'
+                    f'border:1px solid {_color};">'
                     f'<span style="font-size:9px; line-height:1;">✓</span> {name}'
                     f'</span>'
                 )
@@ -3335,12 +3348,15 @@ def _render_sidebar():
                 )
         _pills_html = "".join(_pill_pieces)
 
-        # Progress bar (4px hairline) — width scales with completion.
+        # Progress bar — teal → green ombre gradient, width scales with
+        # completion. At 0% the bar is invisible; at 100% it reads as the
+        # full ombre sweep.
         _pct = int(round(_sb_done / _sb_total * 100))
         _bar = (
             f'<div style="height:3px; background:#F1F5F9; border-radius:2px; '
             f'margin-top:8px; overflow:hidden;">'
-            f'<div style="width:{_pct}%; height:100%; background:{_accent_rule}; '
+            f'<div style="width:{_pct}%; height:100%; '
+            f'background:linear-gradient(90deg, {_TEAL} 0%, {_GREEN} 100%); '
             f'transition: width 240ms ease;"></div>'
             f'</div>'
         )
@@ -3350,10 +3366,10 @@ def _render_sidebar():
         # single flush-left HTML line because Streamlit's markdown parser
         # will treat indented HTML as a code block even with
         # unsafe_allow_html=True.
-        _eyebrow_color = "#45A750" if _sb_complete else "#64748B"
+        _eyebrow_color = _TEAL  # always teal; matches the ombre identity
         _celebration = (
             '<div style="position:absolute;top:0;left:0;right:0;height:2px;'
-            'background:linear-gradient(90deg,#45A750 0%,#1D6FA9 100%);"></div>'
+            f'background:linear-gradient(90deg,{_TEAL} 0%,{_GREEN} 100%);"></div>'
             if _sb_complete else ""
         )
         _tracker_html = (
@@ -3445,8 +3461,12 @@ def _render_sidebar():
 
         # --- 2. System Configuration ---
         st.subheader("2. PV System")
+        # Seed session default if unset; drop `value=` to avoid Streamlit's
+        # "default + session value" warning that fires when a saved sim
+        # populated the key before widget instantiation.
+        st.session_state.setdefault("sb_system_life", 20)
         system_life_years = st.number_input(
-            "System Life (years)", min_value=1, max_value=50, value=20, step=1,
+            "System Life (years)", min_value=1, max_value=50, step=1,
             key="sb_system_life",
             help="Duration used for annual projection and payback calculation",
         )
@@ -3506,7 +3526,11 @@ def _render_sidebar():
         )
         cod_year = cod_date.year
 
-        generate_prod = st.button("Generate Production Profile", type="primary")
+        generate_prod = st.button(
+            "Generate Production Profile",
+            type="primary",
+            key="api_call_btn_generate_prod",  # picked up by .st-key-* CSS below
+        )
 
         # --- 3. Load Profile ---
         st.subheader("3. Load Profile")
@@ -3689,7 +3713,9 @@ def _render_sidebar():
 
         if billing_engine == "Custom":
             # ---- Existing Custom engine UI ----
-            fetch_rates_btn = st.button("Fetch Available Rates")
+            fetch_rates_btn = st.button(
+                "Fetch Available Rates", key="api_call_btn_fetch_rates",
+            )
 
             # Rate selection (inline, right under Fetch button)
             if st.session_state["available_rates"]:
@@ -3820,7 +3846,9 @@ def _render_sidebar():
                         help="Select the tariff the customer was on before switching.",
                     )
                     _rs_label = _rs_rate_options[_rs_selected]
-                    if st.button("Load Old Tariff", key="rate_shift_load_btn"):
+                    if st.button(
+                        "Load Old Tariff", key="api_call_btn_rate_shift_load",
+                    ):
                         st.session_state["_pending_rate_shift_load"] = _rs_label
                 else:
                     st.caption("Fetch rates above first to select an old tariff.")
@@ -4204,13 +4232,18 @@ def _render_sidebar():
 
         # --- 7. Escalators ---
         st.subheader("7. Escalators (Annual Projection)")
+        # Seed session defaults before widget instantiation so a re-opened
+        # saved simulation overrides them, but a fresh session lands on the
+        # project-standard 3.0% / 0.0% pair.
+        st.session_state.setdefault("sb_rate_escalator", 3.0)
+        st.session_state.setdefault("sb_load_escalator", 0.0)
         rate_escalator = st.number_input(
-            "Utility Rate Escalator (%/yr)", min_value=0.0, max_value=20.0, value=3.0, step=0.5,
+            "Utility Rate Escalator (%/yr)", min_value=0.0, max_value=20.0, step=0.5,
             help="Applied annually to TOU energy rates",
             key="sb_rate_escalator",
         )
         load_escalator = st.number_input(
-            "Demand Growth Escalator (%/yr)", min_value=0.0, max_value=20.0, value=2.0, step=0.5,
+            "Demand Growth Escalator (%/yr)", min_value=0.0, max_value=20.0, step=0.5,
             help="Applied annually to load profile (increases consumption & peak demand)",
             key="sb_load_escalator",
         )
@@ -4228,8 +4261,9 @@ def _render_sidebar():
             help="Choose how to specify system cost. Used only for payback and ROI calculations.",
         )
         if cost_input_method == "$/W-DC":
+            st.session_state.setdefault("sb_cost_per_watt", 2.10)
             cost_per_watt = st.number_input(
-                "Installed Cost ($/W-DC)", min_value=0.0, value=1.50, step=0.05,
+                "Installed Cost ($/W-DC)", min_value=0.0, step=0.05,
                 key="sb_cost_per_watt",
             )
             system_cost = cost_per_watt * system_size_kw * 1000
