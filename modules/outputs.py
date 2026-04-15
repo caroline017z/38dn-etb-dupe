@@ -224,6 +224,7 @@ def build_monthly_summary_display(
         ]
         display_cols.append("rate_shift_savings")
 
+    # Sub-component export kWh columns indented under the total Export (kWh) column.
     rename_map.update({
         "energy_cost": "Energy ($)",
         "total_demand_charge": "Demand ($)",
@@ -232,11 +233,21 @@ def build_monthly_summary_display(
         "export_credit": "Export Credit ($)",
         "net_bill": "Net Bill ($)",
         "rate_shift_savings": "Rate Shift Savings ($)",
+        "export_peak_kwh": "↳ Peak (kWh)",
+        "export_offpeak_kwh": "↳ Off-Peak (kWh)",
     })
 
     # Only include columns that exist
     display_cols = [c for c in display_cols if c in df.columns]
     df = df[display_cols].rename(columns=rename_map)
+
+    # Negate cost-outflow columns so the bill rows render as accounting negatives
+    # (Energy/Demand/Fixed/NBC/Net Bill as red parentheses, Export Credit as
+    # positive). Export Credit and Rate Shift Savings stay positive.
+    COST_OUTFLOWS = ("Energy ($)", "Demand ($)", "Fixed ($)", "NBC ($)", "Net Bill ($)")
+    for col in COST_OUTFLOWS:
+        if col in df.columns:
+            df[col] = df[col] * -1
 
     # Format kWh columns
     kwh_cols = [c for c in df.columns if "(kWh)" in c]
@@ -795,30 +806,82 @@ def build_annual_projection(
     return pd.DataFrame(rows)
 
 
+# ─── 38DN brand palette for Plotly charts ────────────────────────────────────
+_38DN_NAVY   = "#0E2841"  # primary
+_38DN_GREEN  = "#45A750"  # accent 1
+_38DN_TEAL   = "#518484"  # accent 3
+_38DN_BLUE   = "#1D6FA9"  # accent 4
+_38DN_AMBER  = "#D48A1A"  # complementary warm
+_38DN_GRAY50 = "#666666"
+_38DN_INK    = "#1A1A1A"  # body text
+_38DN_FONT   = "Aptos Narrow, Aptos, Calibri, Arial Narrow, sans-serif"
+
+
+def _apply_38dn_layout(fig: go.Figure, *, title: str, x_title: str, y_title: str,
+                       height: int = 400, barmode: str | None = None) -> go.Figure:
+    """Apply consistent 38DN chart styling — navy title, black body text,
+    white template, breathing room on margins."""
+    fig.update_layout(
+        title=dict(text=title, font=dict(size=15, color=_38DN_NAVY)),
+        xaxis_title=x_title,
+        yaxis_title=y_title,
+        template="plotly_white",
+        height=height,
+        font=dict(family=_38DN_FONT, size=12, color=_38DN_INK),
+        title_font=dict(size=15, color=_38DN_NAVY),
+        margin=dict(l=60, r=30, t=70, b=55),
+        legend=dict(
+            orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
+            font=dict(color=_38DN_INK, size=11),
+        ),
+        xaxis=dict(tickfont=dict(color=_38DN_INK), title_font=dict(color=_38DN_INK)),
+        yaxis=dict(tickfont=dict(color=_38DN_INK), title_font=dict(color=_38DN_INK),
+                   gridcolor="#E5E7EB"),
+    )
+    if barmode:
+        fig.update_layout(barmode=barmode)
+    return fig
+
+
 def create_production_vs_load_chart(result: BillingResult) -> go.Figure:
-    """Create a monthly grouped bar chart: Load vs Solar Production."""
+    """Monthly grouped bar chart: Load vs Solar Production with Net Import overlay."""
     df = result.monthly_summary
     fig = go.Figure()
-    fig.add_trace(go.Bar(x=MONTH_NAMES, y=df["load_kwh"], name="Load", marker_color="#EF553B", opacity=0.85))
-    fig.add_trace(go.Bar(x=MONTH_NAMES, y=df["solar_kwh"], name="Solar Production", marker_color="#FFB347", opacity=0.85))
-    fig.add_trace(go.Scatter(x=MONTH_NAMES, y=df["import_kwh"], name="Net Import", mode="lines+markers", line=dict(color="#636EFA", width=2.5), marker=dict(size=7)))
-    fig.update_layout(title="Monthly Production vs. Load", xaxis_title="Month", yaxis_title="Energy (kWh)", barmode="group", template="plotly_white", legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1), height=380, font=dict(family="Aptos Narrow, Aptos, Calibri, Arial Narrow, sans-serif", size=12), title_font=dict(size=15, color="#0E2841"), margin=dict(l=40, r=20, t=50, b=40))
-    return fig
+    fig.add_trace(go.Bar(x=MONTH_NAMES, y=df["load_kwh"], name="Load",
+                         marker_color=_38DN_NAVY, opacity=0.88))
+    fig.add_trace(go.Bar(x=MONTH_NAMES, y=df["solar_kwh"], name="Solar Production",
+                         marker_color=_38DN_GREEN, opacity=0.88))
+    fig.add_trace(go.Scatter(x=MONTH_NAMES, y=df["import_kwh"], name="Net Import",
+                             mode="lines+markers",
+                             line=dict(color=_38DN_BLUE, width=2.5),
+                             marker=dict(size=8, color=_38DN_BLUE)))
+    return _apply_38dn_layout(
+        fig, title="Monthly Production vs. Load",
+        x_title="Month", y_title="Energy (kWh)", barmode="group",
+    )
 
 
 def create_monthly_bill_chart(result: BillingResult) -> go.Figure:
-    """Create a stacked bar chart showing monthly bill components."""
+    """Stacked bar chart of monthly bill components. Charges stack up,
+    export credit stacks down (below zero) for visual separation."""
     df = result.monthly_summary
     fig = go.Figure()
-    fig.add_trace(go.Bar(x=MONTH_NAMES, y=df["energy_cost"], name="Energy Charges", marker_color="#636EFA"))
-    fig.add_trace(go.Bar(x=MONTH_NAMES, y=df["total_demand_charge"], name="Demand Charges", marker_color="#EF553B"))
-    fig.add_trace(go.Bar(x=MONTH_NAMES, y=df["fixed_charge"], name="Fixed Charges", marker_color="#AB63FA"))
-    # NBC bar (NEM-2 only)
+    fig.add_trace(go.Bar(x=MONTH_NAMES, y=df["energy_cost"], name="Energy Charges",
+                         marker_color=_38DN_NAVY, opacity=0.92))
+    fig.add_trace(go.Bar(x=MONTH_NAMES, y=df["total_demand_charge"],
+                         name="Demand Charges",
+                         marker_color=_38DN_BLUE, opacity=0.92))
+    fig.add_trace(go.Bar(x=MONTH_NAMES, y=df["fixed_charge"], name="Fixed Charges",
+                         marker_color=_38DN_TEAL, opacity=0.92))
     if "nbc_charge" in df.columns and df["nbc_charge"].sum() > 0:
-        fig.add_trace(go.Bar(x=MONTH_NAMES, y=df["nbc_charge"], name="NBC Charges", marker_color="#FFA15A"))
-    fig.add_trace(go.Bar(x=MONTH_NAMES, y=-df["export_credit"], name="Export Credit", marker_color="#00CC96"))
-    fig.update_layout(title="Monthly Bill Breakdown (With Solar)", xaxis_title="Month", yaxis_title="Cost ($)", barmode="relative", template="plotly_white", legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1), height=380, font=dict(family="Aptos Narrow, Aptos, Calibri, Arial Narrow, sans-serif", size=12), title_font=dict(size=15, color="#0E2841"), margin=dict(l=40, r=20, t=50, b=40))
-    return fig
+        fig.add_trace(go.Bar(x=MONTH_NAMES, y=df["nbc_charge"], name="NBC Charges",
+                             marker_color=_38DN_AMBER, opacity=0.92))
+    fig.add_trace(go.Bar(x=MONTH_NAMES, y=-df["export_credit"], name="Export Credit",
+                         marker_color=_38DN_GREEN, opacity=0.92))
+    return _apply_38dn_layout(
+        fig, title="Monthly Bill Breakdown (With Solar)",
+        x_title="Month", y_title="Cost ($)", barmode="relative",
+    )
 
 
 def generate_hourly_csv(result: BillingResult, cod_date=None) -> str:
@@ -1454,24 +1517,29 @@ def build_grid_exchange_summary(
             "Month": MONTH_NAMES[m - 1],
             "Degraded Solar- Assumed Demand Offset (kWh)": round(solar_m, 0),
             "Import Total (kWh)": round(imp_total, 0),
-            "Import Peak (kWh)": round(imp_peak, 0),
-            "Import Off-Peak (kWh)": round(imp_offpeak, 0),
+            "↳ Peak (kWh)": round(imp_peak, 0),
+            "↳ Off-Peak (kWh)": round(imp_offpeak, 0),
             "Export Total (kWh)": round(exp_total, 0),
         }
         if _has_bess:
             bess_exp = float(hd.loc[mm, "batt_to_grid_kwh"].sum())
             pv_exp = max(0.0, exp_total - bess_exp)
-            row["Export PV (kWh)"] = round(pv_exp, 0)
-            row["Export BESS (kWh)"] = round(bess_exp, 0)
+            row["↳ PV (kWh)"] = round(pv_exp, 0)
+            row["↳ BESS (kWh)"] = round(bess_exp, 0)
+        # Export totals and sub-components — sub-cols labelled with a trailing
+        # column-specific disambiguator because the Import block above already
+        # uses "↳ Peak (kWh)" / "↳ Off-Peak (kWh)" as its sub-cols.
         row.update({
-            "Export Peak (kWh)": round(exp_peak, 0),
-            "Export Off-Peak (kWh)": round(exp_offpeak, 0),
-            "Import Cost Total ($)": round(cost_total, 0),
-            "Import Cost Peak ($)": round(cost_peak, 0),
-            "Import Cost Off-Peak ($)": round(cost_offpeak, 0),
-            "Export Credit Total ($)": -round(credit_total, 0),
-            "Export Credit Peak ($)": -round(credit_peak, 0),
-            "Export Credit Off-Peak ($)": -round(credit_offpeak, 0),
+            "↳ Export Peak (kWh)": round(exp_peak, 0),
+            "↳ Export Off-Peak (kWh)": round(exp_offpeak, 0),
+            # Import cost = outflow → negated so it renders red accounting-negative.
+            "Import Cost Total ($)": -round(cost_total, 0),
+            "↳ Cost Peak ($)": -round(cost_peak, 0),
+            "↳ Cost Off-Peak ($)": -round(cost_offpeak, 0),
+            # Export credit = inflow → stays positive.
+            "Export Credit Total ($)": round(credit_total, 0),
+            "↳ Credit Peak ($)": round(credit_peak, 0),
+            "↳ Credit Off-Peak ($)": round(credit_offpeak, 0),
         })
         rows.append(row)
 
