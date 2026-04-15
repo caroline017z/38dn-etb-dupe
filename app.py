@@ -985,6 +985,7 @@ def _render_proposals_tab(
                     except Exception as exc:
                         st.warning(f"GCS persistence skipped: {exc}")
                 st.success(f"Saved Proposal: {updated.name}")
+                st.session_state["_focus_proposals_tab"] = True
                 st.rerun()
             except Exception as exc:
                 st.error(f"Save failed: {exc}")
@@ -998,6 +999,7 @@ def _render_proposals_tab(
                         pass
                 _delete_proposal_session(st.session_state, active_proposal.id)
                 st.success(f"Deleted Proposal: {active_proposal.name}")
+                st.session_state["_focus_proposals_tab"] = True
                 st.rerun()
             except Exception as exc:
                 st.error(f"Delete failed: {exc}")
