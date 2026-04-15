@@ -204,6 +204,94 @@ p, li, div, label, input, select, textarea, .stMarkdown {
     opacity: 0.7;
 }
 
+/* Popover trigger buttons — same visual language as secondary buttons
+ * (white bg, navy text, hairline border). Without this rule, Streamlit
+ * paints them with `primaryColor` as background, which now matches
+ * `textColor` (both navy) and leaves the label invisible. */
+[data-testid="stPopover"] button,
+button[data-testid="stPopoverButton"],
+button[data-testid="stBaseButton-secondary"],
+.stPopover button {
+    background: var(--38dn-surface-0) !important;
+    color: var(--38dn-ink) !important;
+    border: 1px solid var(--38dn-border-2) !important;
+    font-size: var(--38dn-fs-body) !important;
+    font-weight: var(--38dn-fw-medium) !important;
+    border-radius: var(--38dn-radius-md) !important;
+}
+[data-testid="stPopover"] button *,
+button[data-testid="stPopoverButton"] *,
+button[data-testid="stBaseButton-secondary"] *,
+.stPopover button * {
+    color: inherit !important;
+}
+[data-testid="stPopover"] button:hover:not(:disabled),
+button[data-testid="stPopoverButton"]:hover:not(:disabled),
+button[data-testid="stBaseButton-secondary"]:hover:not(:disabled),
+.stPopover button:hover:not(:disabled) {
+    border-color: var(--38dn-navy) !important;
+    background: var(--38dn-surface-1) !important;
+}
+/* Nav-bar context overrides these back to the navy chrome. */
+.nav-bar-wrapper button[data-testid="stPopoverButton"],
+.nav-bar-wrapper button[data-testid="stPopoverButton"] * {
+    background: transparent !important;
+    color: #ffffff !important;
+    border: none !important;
+}
+
+/* Download buttons — same secondary look, not navy-on-navy. */
+[data-testid="stDownloadButton"] button,
+.stDownloadButton button {
+    background: var(--38dn-surface-0) !important;
+    color: var(--38dn-ink) !important;
+    border: 1px solid var(--38dn-border-2) !important;
+    font-weight: var(--38dn-fw-medium) !important;
+}
+[data-testid="stDownloadButton"] button *,
+.stDownloadButton button * {
+    color: inherit !important;
+}
+[data-testid="stDownloadButton"] button:hover:not(:disabled),
+.stDownloadButton button:hover:not(:disabled) {
+    border-color: var(--38dn-navy) !important;
+    background: var(--38dn-surface-1) !important;
+}
+
+/* Selectbox / multiselect / text input chrome — ensure the visible text
+ * inside the control is the ink color, not picking up primaryColor from
+ * focus / selected states. */
+[data-testid="stSelectbox"] div[data-baseweb="select"] > div,
+[data-testid="stSelectbox"] div[data-baseweb="select"] span,
+[data-testid="stMultiSelect"] div[data-baseweb="select"] > div,
+[data-testid="stMultiSelect"] div[data-baseweb="select"] span,
+div[data-baseweb="input"] input,
+div[data-baseweb="textarea"] textarea {
+    color: var(--38dn-ink) !important;
+}
+/* Dropdown menu list items opened from a selectbox. */
+[data-baseweb="popover"] li,
+[data-baseweb="popover"] li *,
+[data-baseweb="menu"] li,
+[data-baseweb="menu"] li * {
+    color: var(--38dn-ink) !important;
+}
+[data-baseweb="popover"] li:hover,
+[data-baseweb="menu"] li:hover {
+    background: var(--38dn-info-bg) !important;
+}
+
+/* Radio + checkbox — label text should stay ink even when the option is
+ * selected (primaryColor fills the indicator; the label is text). */
+[data-testid="stRadio"] label,
+[data-testid="stRadio"] label p,
+[data-testid="stCheckbox"] label,
+[data-testid="stCheckbox"] label p,
+[data-testid="stToggle"] label,
+[data-testid="stToggle"] label p {
+    color: var(--38dn-ink) !important;
+}
+
 /* Inputs */
 .stTextInput > div > div > input,
 .stNumberInput > div > div > input,
