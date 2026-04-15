@@ -665,9 +665,24 @@ def _slide_exec_summary(prs, pg, total, name, result, tariff, utility,
     _action_title(sl, "Executive Summary")
     _subtitle(sl, f"{name}  |  {utility} {tariff}  |  {sys_kw:,.0f} kW-DC Solar"
               + (f" + {batt_kwh:,.0f} kWh BESS" if batt_kwh > 0 else ""))
+
+    # AI narrative (when provided) renders as a proper bullet list in the
+    # takeaway zone rather than a single •-joined line — lets 3 separate
+    # selling points land as separate beats. Cap at 3 to respect the
+    # fixed takeaway band height (each bullet ≈ 16pt line).
     if narrative_bullets:
-        # Join as a single callout; PPTX layout is tight so multiline risks overflow.
-        _takeaway(sl, "  •  ".join(str(b).strip() for b in narrative_bullets if b))
+        _bullet_items = [str(b).strip() for b in narrative_bullets[:3] if b]
+        # _takeaway() would collapse newlines; lay out directly via _bullets
+        # at the same geometry _takeaway uses (below the subtitle).
+        _take_y = Inches(1.05)
+        _take_h = Inches(0.66)
+        _rect(sl, ML, _take_y, CW, _take_h, fill=LT_GRAY)
+        _rect(sl, ML, _take_y, Inches(0.06), _take_h, fill=ACCENT1)
+        _bullets(
+            sl, ML + Inches(0.22), _take_y + Inches(0.06),
+            CW - Inches(0.4), _bullet_items,
+            sz=Pt(11), color=DK1, spacing=Pt(3),
+        )
     else:
         _takeaway(sl,
             f"Day-1 savings of {_fd(sav)} ({pct:.1f}%) with zero upfront capital. "

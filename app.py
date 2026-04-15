@@ -1033,7 +1033,12 @@ def _render_proposals_tab(
             st.info("Pick a primary PPA on the left to render the preview.")
             return
 
-        st.markdown(f"**Preview · {preview_source.name or 'Unsaved'}**")
+        _ui_section_header(
+            f"Preview · {preview_source.name or 'Unsaved'}",
+            caption=f"Primary: {preview_source.primary_ppa.name} · "
+                    f"{len(preview_source.comparison_ppas)} comparison PPA"
+                    f"{'s' if len(preview_source.comparison_ppas) != 1 else ''}",
+        )
         _cmp_df = _build_prop_table(preview_source)
         st.markdown(
             render_styled_table(_cmp_df, bold_cols=["Metric"]),
@@ -1059,9 +1064,16 @@ def _render_proposals_tab(
                     st.markdown(f"- {b}")
 
         # ── Export controls ────────────────────────────────────────
+        # Use the shared section_header component for consistent visual
+        # rhythm with other Proposals-tab section boundaries.
         st.divider()
-        st.markdown("**Export**")
-        ex1, ex2, ex3 = st.columns(3)
+        _ui_section_header(
+            "Export", caption="Customer-facing deliverables for this Proposal",
+        )
+        # Weighted columns: primary Deck action gets 40% visual width; the
+        # two secondary exports take 30% each so the primary action reads
+        # as the dominant CTA.
+        ex1, ex2, ex3 = st.columns([0.4, 0.3, 0.3])
 
         def _comparison_ppas_payload(source: _ProposalObj) -> list[dict]:
             """Shape the PPASnapshots for the PPTX alternatives-considered slide."""
@@ -2029,6 +2041,7 @@ section[data-testid="stSidebar"] .stNumberInput label {
 # on collisions. The legacy block is kept around for the navy top-bar rules
 # (the theme file deliberately doesn't touch `.nav-bar-wrapper`).
 from modules.ui import install_theme as _install_theme, set_dense_mode as _set_dense_mode
+from modules.ui.components import section_header as _ui_section_header
 _install_theme()
 # Density preference reads from session_state; the toggle lives in the
 # sidebar (see _render_sidebar). Set the attribute every rerun so the
@@ -2586,12 +2599,14 @@ def _render_top_bar():
                         help=_help,
                     ):
                         st.session_state["active_proposal_id"] = _p.id
-                        # Deep-link: auto-focus the Downloads top-level tab
-                        # so the user lands on the export surface for the
-                        # Proposal they just picked.
-                        st.session_state["_focus_downloads_tab"] = True
+                        # Deep-link: auto-focus the Proposals sub-tab (where
+                        # all editing + export lives after Tranche 1
+                        # consolidation) so the user lands directly on the
+                        # preview + export surface for the Proposal they
+                        # just picked.
+                        st.session_state["_focus_proposals_tab"] = True
                         st.session_state["_proposal_toast_pending"] = (
-                            f"Activated: {_p.name} — loaded Downloads",
+                            f"Activated: {_p.name} — loaded Proposals",
                             "📁",
                         )
                         st.rerun()
@@ -6033,30 +6048,40 @@ def _render_results():
 
     # When the user activates a Proposal from the top-bar popover we do
     # two things on the next render:
-    #   1. Click the Downloads tab so they land on the export surface.
+    #   1. Click the "Proposals" sub-tab under PPA & Proposals so they
+    #      land on the preview + export surface (Tranche 1 consolidation
+    #      made this the single export home).
     #   2. Dismiss the popover, which Streamlit's st.popover doesn't do
     #      itself after a button inside it triggers a rerun. We simulate
     #      an Escape key press on the document (BaseWeb popovers listen
     #      for it) and click outside the popover as a fallback.
-    # Streamlit's st.tabs has no programmatic selection API, so the tab
-    # focus goes through a small JS snippet that polls for the button.
-    if st.session_state.pop("_focus_downloads_tab", False):
+    if st.session_state.pop("_focus_proposals_tab", False):
         st.components.v1.html(
             """
             <script>
-            (function focusDownloadsAndClosePopover() {
+            (function focusProposalsAndClosePopover() {
                 const doc = window.parent.document;
 
-                function clickDownloadsTab() {
+                function clickTab(labels) {
                     const tabs = doc.querySelectorAll(
                         '.stTabs [data-baseweb="tab-list"] > button'
                     );
                     if (!tabs || tabs.length === 0) return false;
                     for (const t of tabs) {
-                        const label = (t.innerText || "").trim();
-                        if (label === "Downloads") { t.click(); return true; }
+                        const text = (t.innerText || "").trim();
+                        if (labels.includes(text)) { t.click(); return true; }
                     }
                     return false;
+                }
+
+                function focusProposals() {
+                    /* First click the top-level PPA & Proposals section,
+                     * then the Proposals sub-tab. */
+                    const topOk = clickTab(["PPA & Proposals"]);
+                    if (!topOk) return false;
+                    /* Sub-tab clicks must wait for DOM mount. */
+                    setTimeout(function () { clickTab(["Proposals"]); }, 150);
+                    return true;
                 }
 
                 function closeAnyOpenPopover() {
@@ -6077,11 +6102,11 @@ def _render_results():
                 }
 
                 /* Try once immediately, then poll briefly for late mounts. */
-                let done = clickDownloadsTab();
+                let done = focusProposals();
                 closeAnyOpenPopover();
                 if (!done) {
                     const iv = setInterval(function () {
-                        if (clickDownloadsTab()) {
+                        if (focusProposals()) {
                             closeAnyOpenPopover();
                             clearInterval(iv);
                         }
@@ -6671,36 +6696,45 @@ def _render_results():
                     f" (primary + {len(_active_prop.comparison_ppas)} of {_PROP_MAX_COMPARISONS} comparisons)"
                     if _active_prop.comparison_ppas else " (primary)"
                 )
+                # Styled via design-system tokens (see assets/theme.css).
+                # Same visual language as the regime-switch explainer so
+                # status callouts across the app stay coherent.
                 st.markdown(
-                    f'<div style="background:#E3EDED;border:1px solid #C7DADA;'
-                    f'border-left:3px solid #518484;border-radius:6px;'
-                    f'padding:10px 14px;margin:6px 0 10px 0;font-size:12px;'
-                    f'color:#0E2841;">'
-                    f'<div style="font-size:10px;font-weight:600;color:#518484;'
-                    f'text-transform:uppercase;letter-spacing:0.06em;margin-bottom:4px;">'
-                    f'Active Proposal</div>'
+                    '<div style="background:var(--38dn-info-bg);'
+                    'border:1px solid var(--38dn-border-1);'
+                    'border-left:3px solid var(--38dn-teal);'
+                    'border-radius:var(--38dn-radius-md);'
+                    'padding:10px 14px;margin:6px 0 10px 0;'
+                    'font-size:var(--38dn-fs-body);color:var(--38dn-ink);">'
+                    '<div class="eyebrow-38dn" style="margin-bottom:4px;">'
+                    'Active Proposal</div>'
                     f'<strong>{_active_prop.name}</strong> — {_n_snaps} PPA'
                     f'{"s" if _n_snaps != 1 else ""}{_snap_limit_msg}'
-                    f'</div>',
+                    "</div>",
                     unsafe_allow_html=True,
                 )
             else:
                 st.markdown(
-                    '<div style="background:#F8FAFC;border:1px dashed #CBD5E1;'
-                    'border-radius:6px;padding:10px 14px;margin:6px 0 10px 0;'
-                    'font-size:12px;color:#64748B;">'
+                    '<div style="background:var(--38dn-surface-1);'
+                    'border:1px dashed var(--38dn-border-2);'
+                    'border-radius:var(--38dn-radius-md);'
+                    'padding:10px 14px;margin:6px 0 10px 0;'
+                    'font-size:var(--38dn-fs-body);color:var(--38dn-slate-50);">'
                     '<strong>No Proposal active for this simulation.</strong> '
-                    'Saving a PPA below will auto-create one you can edit from the Proposals tab.'
-                    '</div>',
+                    "Saving a PPA below will auto-create one you can edit "
+                    "from the Proposals tab."
+                    "</div>",
                     unsafe_allow_html=True,
                 )
 
-            st.markdown("**Save PPA to Proposal**")
-            st.caption(
-                "Names and stores the current PPA configuration on the active "
-                "Proposal (auto-creates one if missing). Each save appends a "
-                "new PPA snapshot — build your primary first, then iterate "
-                f"up to {_PROP_MAX_COMPARISONS} comparison variants."
+            _ui_section_header(
+                "Save PPA to Proposal",
+                caption=(
+                    "Names and stores the current PPA configuration on the "
+                    "active Proposal (auto-creates one if missing). Each save "
+                    "appends a new PPA snapshot — build your primary first, "
+                    f"then iterate up to {_PROP_MAX_COMPARISONS} comparison variants."
+                ),
             )
             sv_name_col, sv_btn_col, sv_clear_col = st.columns([0.5, 0.25, 0.25])
             with sv_name_col:
@@ -7344,58 +7378,26 @@ def _render_results():
                 key="dl_tornado_csv",
             )
 
-        # --- Customer Proposal Deck (PPTX) ---
-        # The builder moved to the Proposals tab (Phase 4). Downloads now lists
-        # every saved Proposal for this simulation with a one-click re-export
-        # for each — keeps a historical view here without duplicating the
-        # builder UI.
+        # Tranche 1 consolidation: Downloads no longer hosts a Customer
+        # Proposal Deck block. The full deck build + export lives in the
+        # PPA & Proposals → Proposals sub-tab so there's one surface that
+        # owns Proposal state end-to-end. A thin pointer card stays here
+        # for discoverability.
         st.divider()
-        st.subheader("Customer Proposal Deck (PPTX)")
-
-        _dl_sim_name = (
-            st.session_state.get("_active_simulation_name")
-            or st.session_state.get("_last_loaded_simulation_name")
+        st.markdown(
+            '<div style="background:var(--38dn-info-bg, #E8F1FA);'
+            'border:1px solid #C9DBEC;border-left:3px solid #1D6FA9;'
+            'border-radius:6px;padding:12px 16px;margin:8px 0;'
+            'font-size:13px;color:#0E2841;">'
+            '<div style="font-size:10px;font-weight:600;color:#1D6FA9;'
+            'text-transform:uppercase;letter-spacing:0.06em;'
+            'margin-bottom:6px;">Customer Proposal Deck</div>'
+            "Deck (PPTX), Deck + Comparison Appendix, and Comparison XLSX "
+            "exports live in <strong>PPA &amp; Proposals → Proposals</strong>. "
+            "Pick a Proposal from the top-bar popover to jump there."
+            "</div>",
+            unsafe_allow_html=True,
         )
-        _dl_props = _list_proposals_session(
-            st.session_state, simulation_name=_dl_sim_name,
-        )
-        if not _dl_props:
-            st.info(
-                "No saved Proposals yet. Open the **Proposals** tab to build one — "
-                "Deck and Comparison exports live there."
-            )
-        else:
-            st.caption(
-                "Re-download any saved Proposal for this simulation. To tweak "
-                "the PPA selection or customer details, use the **Proposals** tab."
-            )
-            for _p in _dl_props:
-                with st.container(border=True):
-                    _row_l, _row_r = st.columns([0.65, 0.35])
-                    with _row_l:
-                        st.markdown(f"**{_p.name}**")
-                        _meta_bits = [
-                            f"{_p.customer_name}" if _p.customer_name else None,
-                            f"Primary: {_p.primary_ppa.name}",
-                            (f"+ {len(_p.comparison_ppas)} alt"
-                             f"{'s' if len(_p.comparison_ppas) != 1 else ''}")
-                            if _p.comparison_ppas else None,
-                            f"Updated {_p.updated_at[:10]}" if _p.updated_at else None,
-                        ]
-                        st.caption(" · ".join(b for b in _meta_bits if b))
-                    with _row_r:
-                        if st.button(
-                            "Open in Proposals tab",
-                            key=f"dl_open_prop_{_p.id}",
-                            width="stretch",
-                        ):
-                            st.session_state["active_proposal_id"] = _p.id
-                            st.info("Switch to the **Proposals** tab to rebuild the deck.")
-
-        # Inline deck-builder removed in Phase 4. See `_render_proposals_tab`
-        # in this file and `modules/proposals.py` for the Proposal-scoped
-        # replacement. Downloads above lists every saved Proposal for
-        # this simulation with a jump-to link.
 
 
 if st.session_state["billing_result"] is not None:
