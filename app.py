@@ -1200,6 +1200,7 @@ def _render_ai_assistant_tab(
                 st.error(f"Q&A failed: {exc}")
 
 
+@st.fragment
 def _render_sensitivity_tab(
     *,
     result,
@@ -1212,6 +1213,11 @@ def _render_sensitivity_tab(
     nem_regime_1: str,
 ) -> None:
     """Monte Carlo + tornado sensitivity view.
+
+    Decorated with ``@st.fragment`` so interacting with the config inputs
+    (σ sliders, sample-count, seed, horizon, discount) only re-runs this
+    fragment instead of the whole page — otherwise pressing Enter in any
+    input would bounce the user back to the first top-level tab.
 
     Lets the user select projection-level levers (rate escalator, load
     escalator, PV degradation), pick a sample count, and see the NPV
@@ -6262,31 +6268,47 @@ def _render_results():
             _k3.metric("Savings %", f"{_yr1_pct:.1f}%")
             _k4.metric("Lifetime Savings", f"${_life_sav:,.0f}")
 
+        # Pre-compute the x-axis series once — used by the Save PPA handler
+        # below AND by the chart renderer further down. Previously this lived
+        # inside the chart block, which meant clicking Save PPA raised a
+        # NameError on _x because the handler ran before the chart body.
+        _x = _cd["Calendar Year"].astype(int) if "Calendar Year" in _cd.columns else _cd["Year"]
+
         # ── Why does the NEM-3 bill often rise despite a lower PPA? ───
         # Custom callout styled with a light-teal background so it reads as
         # an explanatory panel tied to the 38DN palette rather than
-        # Streamlit's default info-blue.
+        # Streamlit's default info-blue. Arrow direction in the headline
+        # flips with the sign of the bill jump so a (rare) regime-switch
+        # drop renders the correct semantic ↓ rather than the default ↑.
         if nem_switch and num_years_1 and num_years_1 < len(_cd):
             _jump = float(_total_ppa.iloc[num_years_1] - _total_ppa.iloc[num_years_1 - 1])
-            if _jump > 0:
+            if _jump != 0:
+                _is_drop = _jump < 0
+                _jump_arrow = "↓" if _is_drop else "↑"
+                _jump_verb = "drops" if _is_drop else "steps up"
+                _jump_rule_color = "#A8141A" if _is_drop else "#518484"
+                _jump_bg = "#FDEDED" if _is_drop else "#E3EDED"
+                _jump_border = "#F3C2C2" if _is_drop else "#C7DADA"
+                _jump_eyebrow_color = "#A8141A" if _is_drop else "#518484"
+
                 _jump_body = (
-                    f"<strong>Why the bill jumps in {nem_regime_2} even as the PPA steps "
+                    f"<strong>Why the bill {_jump_verb} in {nem_regime_2} even as the PPA steps "
                     f"down by ${abs(_yr1_rate_r2 - _yr1_rate_r1):.4f}/kWh:</strong> "
                     f"under {nem_regime_2}, exported solar is compensated at the ACC "
                     f"(avoided-cost) rate, which is typically <strong>5–10×</strong> "
                     f"lower than retail TOU. The lost export credit on the utility "
                     f"side outweighs the PPA reduction, so the customer's total bill "
-                    f"steps up by about <strong>${_jump:,.0f}</strong> at the regime "
-                    f"switch. The backsolver re-lowers the {nem_regime_2} PPA to "
-                    f"preserve the savings target, but it cannot fully close the gap "
-                    f"without taking the PPA to zero."
+                    f"{_jump_verb} by about <strong>{_jump_arrow} ${abs(_jump):,.0f}</strong> "
+                    f"at the regime switch. The backsolver re-lowers the {nem_regime_2} "
+                    f"PPA to preserve the savings target, but it cannot fully close the "
+                    f"gap without taking the PPA to zero."
                 )
                 st.markdown(
-                    '<div style="background:#E3EDED;border:1px solid #C7DADA;'
-                    'border-left:3px solid #518484;border-radius:6px;'
+                    f'<div style="background:{_jump_bg};border:1px solid {_jump_border};'
+                    f'border-left:3px solid {_jump_rule_color};border-radius:6px;'
                     'padding:12px 16px;margin:10px 0 18px 0;font-size:13px;'
                     'line-height:1.55;color:#0E2841;">'
-                    f'<div style="font-size:10px;font-weight:600;color:#518484;'
+                    f'<div style="font-size:10px;font-weight:600;color:{_jump_eyebrow_color};'
                     'text-transform:uppercase;letter-spacing:0.06em;'
                     f'margin-bottom:6px;">Regime-switch explainer</div>'
                     f'{_jump_body}</div>',
@@ -6392,7 +6414,8 @@ def _render_results():
             ),
         )
 
-        _x = _cd["Calendar Year"].astype(int) if "Calendar Year" in _cd.columns else _cd["Year"]
+        # (_x was pre-computed above alongside the Save PPA handler so both
+        # callers reference the same instance.)
         import plotly.graph_objects as go
 
         _NAVY, _GREEN, _BLUE, _TEAL, _AMBER = "#0E2841", "#45A750", "#1D6FA9", "#518484", "#D48A1A"
