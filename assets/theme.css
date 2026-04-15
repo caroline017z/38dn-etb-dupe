@@ -405,3 +405,53 @@ hr {
     color: var(--38dn-slate-50);
     font-weight: var(--38dn-fw-medium);
 }
+
+/* ─── Dense mode ────────────────────────────────────────────────────
+ * Applied by adding `data-dense="true"` to the root stApp container via
+ * Streamlit JS (see modules/ui/theme.py::install_dense_mode). Compresses
+ * padding, metric value sizes, table row height, and tab row spacing for
+ * analysts who want more density per pixel.
+ */
+[data-testid="stAppViewContainer"][data-dense="true"] .block-container,
+.stApp[data-dense="true"] .block-container {
+    padding-top: var(--38dn-sp-2) !important;
+    padding-left: var(--38dn-sp-4) !important;
+    padding-right: var(--38dn-sp-4) !important;
+}
+.stApp[data-dense="true"] [data-testid="stMetric"] {
+    padding: 6px 10px !important;
+}
+.stApp[data-dense="true"] [data-testid="stMetric"] [data-testid="stMetricValue"] {
+    font-size: 18px !important;
+}
+.stApp[data-dense="true"] [data-testid="stMetric"] label {
+    font-size: 10px !important;
+}
+.stApp[data-dense="true"] .card-38dn {
+    padding: 10px 14px !important;
+    margin-bottom: var(--38dn-sp-2) !important;
+}
+.stApp[data-dense="true"] .card-38dn__value {
+    font-size: 20px !important;
+}
+.stApp[data-dense="true"] .tbl-38dn tbody td {
+    padding: 3px 10px !important;
+}
+.stApp[data-dense="true"] .tbl-38dn thead th {
+    padding: 5px 10px !important;
+    font-size: 10px !important;
+}
+.stApp[data-dense="true"] .stTabs [data-baseweb="tab-list"] {
+    gap: var(--38dn-sp-4) !important;
+}
+.stApp[data-dense="true"] .stTabs [data-baseweb="tab"] {
+    padding: 4px 0 !important;
+    font-size: 12px !important;
+}
+.stApp[data-dense="true"] h1 { font-size: 18px !important; }
+.stApp[data-dense="true"] h2 { font-size: 14px !important; }
+.stApp[data-dense="true"] h3 { font-size: 13px !important; }
+.stApp[data-dense="true"] hr { margin: 8px 0 !important; }
+.stApp[data-dense="true"] .section-38dn {
+    margin: var(--38dn-sp-3) 0 var(--38dn-sp-2) 0 !important;
+}

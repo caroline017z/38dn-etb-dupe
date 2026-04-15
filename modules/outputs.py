@@ -119,16 +119,20 @@ def render_styled_table(
         html.append(f"<tr{tr_cls}>")
         for j, val in enumerate(row):
             s = str(val)
+            # Pre-rendered SVG (sparklines) passes through unescaped. Every
+            # other cell is HTML-escaped to prevent injection.
+            is_raw_svg = s.lstrip().startswith("<svg")
             classes: list[str] = []
             if col_list[j] in bold_set or is_total:
                 classes.append("cell-bold")
             if col_list[j] in highlight_set:
                 classes.append("cell-highlight")
-            elif "(" in s:
+            elif "(" in s and not is_raw_svg:
                 # Accounting negative: `$(1,234)` format rendered red.
                 classes.append("cell-negative")
             cls_attr = f' class="{" ".join(classes)}"' if classes else ""
-            html.append(f"<td{cls_attr}>{_esc(s)}</td>")
+            cell_html = s if is_raw_svg else _esc(s)
+            html.append(f"<td{cls_attr}>{cell_html}</td>")
         html.append("</tr>")
 
     html.append("</tbody></table></div>")

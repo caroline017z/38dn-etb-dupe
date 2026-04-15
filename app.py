@@ -1778,8 +1778,12 @@ section[data-testid="stSidebar"] .stNumberInput label {
 # from assets/theme.css) AFTER the legacy inline CSS so the new tokens win
 # on collisions. The legacy block is kept around for the navy top-bar rules
 # (the theme file deliberately doesn't touch `.nav-bar-wrapper`).
-from modules.ui import install_theme as _install_theme
+from modules.ui import install_theme as _install_theme, set_dense_mode as _set_dense_mode
 _install_theme()
+# Density preference reads from session_state; the toggle lives in the
+# sidebar (see _render_sidebar). Set the attribute every rerun so the
+# selected mode survives navigation and script reruns.
+_set_dense_mode(bool(st.session_state.get("ui_dense_mode", False)))
 
 LOGO_PATH = os.path.join(os.path.dirname(__file__), "assets", "logo.png")
 if os.path.exists(LOGO_PATH):
@@ -3375,6 +3379,19 @@ def _render_sidebar():
             'margin:4px 0 12px 0;">',
             unsafe_allow_html=True,
         )
+
+        # Dense-mode toggle — lives just under the tracker so power users
+        # get a single place to manage viewing preferences.
+        _prev_dense = bool(st.session_state.get("ui_dense_mode", False))
+        _dense_choice = st.toggle(
+            "Dense view",
+            value=_prev_dense,
+            key="ui_dense_mode_toggle",
+            help="Tightens padding, metric sizes, and row height. Useful on smaller screens or when comparing many scenarios.",
+        )
+        if _dense_choice != _prev_dense:
+            st.session_state["ui_dense_mode"] = _dense_choice
+            st.rerun()
 
         st.header("System & Site Configuration")
 
