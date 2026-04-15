@@ -1785,23 +1785,27 @@ LOGO_PATH = os.path.join(os.path.dirname(__file__), "assets", "logo.png")
 if os.path.exists(LOGO_PATH):
     with open(LOGO_PATH, "rb") as f:
         logo_b64 = base64.b64encode(f.read()).decode()
+    # Embedded logo: sits in the document flow at the top-right of the
+    # first content row, so it scrolls away with the page like any other
+    # static asset. No longer fixed.
     st.markdown(
         f"""
         <style>
-        .top-right-logo {{
-            position: fixed;
-            top: 64px;
-            right: 20px;
-            z-index: 999998;
-            pointer-events: none;
+        .embedded-logo {{
+            display: flex;
+            justify-content: flex-end;
+            align-items: center;
+            margin: -6px 0 8px 0;
+            padding: 0 4px;
         }}
-        .top-right-logo img {{
-            height: 48px;
-            width: 48px;
+        .embedded-logo img {{
+            height: 40px;
+            width: 40px;
             object-fit: contain;
+            opacity: 0.92;
         }}
         </style>
-        <div class="top-right-logo">
+        <div class="embedded-logo">
             <img src="data:image/png;base64,{logo_b64}" alt="38DN Logo">
         </div>
         """,
