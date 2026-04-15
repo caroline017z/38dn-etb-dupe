@@ -43,19 +43,24 @@ from modules.export_value import (
 )
 from modules.billing import run_billing_simulation, BillingResult, compute_old_rate_baseline
 from modules.simulation import (
-    SimulationInputs,
     run_simulation,
     inputs_from_session_state,
 )
 from modules.sensitivity import (
-    DEFAULT_LEVERS,
     Lever,
     monte_carlo as _sens_monte_carlo,
     percentiles as _sens_percentiles,
-    project_npv as _sens_project_npv,
     tornado as _sens_tornado,
 )
 from dataclasses import replace as _dc_replace
+
+# AI features (lazy-used so app still runs without ANTHROPIC_API_KEY)
+from modules.ai.proposal_narrative import (
+    ProposalContext as _AIProposalContext,
+    generate_executive_summary as _ai_generate_exec_summary,
+)
+from modules.ai.bill_ingest import extract_bill as _ai_extract_bill
+from modules.ai.tariff_qa import ask as _ai_tariff_ask
 from modules.billing_aggregation import (
     MeterConfig,
     NemAProfile,
@@ -222,6 +227,126 @@ def _check_battery_solver(result: "BillingResult"):
                 "Battery dispatch produced near-zero discharge. "
                 "Check that export rates are loaded and charge/discharge windows are configured correctly."
             )
+
+
+def _render_ai_assistant_tab(
+    *,
+    result,
+    customer_name: str,
+    address: str,
+    system_size_kw: float,
+    battery_capacity_kwh: float,
+    nem_regime: str,
+    horizon_years: int,
+    ppa_rate: float | None,
+    tariff,
+) -> None:
+    """Narrative generation + bill ingestion + tariff Q&A.
+
+    Each sub-panel is independent — the tab degrades gracefully when the
+    underlying input (simulation result, uploaded PDF, loaded tariff) is
+    absent. Outbound Anthropic calls only fire when the user clicks a
+    button, so the tab renders cheaply on idle.
+    """
+    st.subheader("AI Assistant")
+    st.caption(
+        "Narrative generation, bill ingestion, and tariff Q&A. Requires "
+        "`ANTHROPIC_API_KEY` in secrets or environment."
+    )
+
+    narrative_col, bill_col = st.columns(2)
+
+    # -- Executive-summary narrative --------------------------------------
+    with narrative_col:
+        st.markdown("**Proposal executive summary**")
+        st.caption("3–5 factual bullets generated from the current simulation results.")
+        disabled = result is None
+        if st.button("Generate bullets", key="ai_gen_narrative", disabled=disabled):
+            try:
+                ctx = _AIProposalContext(
+                    customer_name=customer_name or "Customer",
+                    site_address=address or "",
+                    system_size_kw=system_size_kw,
+                    battery_capacity_kwh=battery_capacity_kwh,
+                    nem_regime=nem_regime,
+                    year1_savings_usd=float(getattr(result, "annual_savings", 0.0) or 0.0),
+                    year1_bill_without_solar_usd=float(
+                        getattr(result, "annual_bill_without_solar", 0.0) or 0.0),
+                    year1_bill_with_solar_usd=float(
+                        getattr(result, "annual_bill_with_solar", 0.0) or 0.0),
+                    savings_pct=float(getattr(result, "savings_pct", 0.0) or 0.0),
+                    horizon_years=int(horizon_years),
+                    total_projected_savings_usd=float(
+                        getattr(result, "annual_savings", 0.0) or 0.0) * int(horizon_years),
+                    ppa_rate_usd_per_kwh=float(ppa_rate) if ppa_rate else None,
+                )
+                bullets = _ai_generate_exec_summary(ctx)
+                st.session_state["ai_narrative_bullets"] = bullets
+            except Exception as exc:
+                st.error(f"Narrative generation failed: {exc}")
+
+        if st.session_state.get("ai_narrative_bullets"):
+            for b in st.session_state["ai_narrative_bullets"]:
+                st.markdown(f"- {b}")
+
+    # -- Bill PDF ingestion -----------------------------------------------
+    with bill_col:
+        st.markdown("**Extract data from a utility bill**")
+        st.caption("Upload a recent PDF bill — fields below are pre-filled suggestions you can copy into the sidebar.")
+        up = st.file_uploader("Utility bill (PDF)", type=["pdf"], key="ai_bill_upload")
+        if up is not None and st.button("Extract", key="ai_bill_extract"):
+            try:
+                extraction = _ai_extract_bill(up.getvalue())
+                st.session_state["ai_bill_extraction"] = extraction
+            except Exception as exc:
+                st.error(f"Bill extraction failed: {exc}")
+
+        extraction = st.session_state.get("ai_bill_extraction")
+        if extraction is not None:
+            fields = {
+                "Utility": extraction.utility,
+                "Rate schedule": extraction.rate_schedule,
+                "Billing period": (
+                    f"{extraction.billing_period_start} → {extraction.billing_period_end}"
+                    if extraction.billing_period_start else None
+                ),
+                "Total kWh": (
+                    f"{extraction.total_kwh:,.0f}" if extraction.total_kwh is not None else None
+                ),
+                "Peak demand (kW)": (
+                    f"{extraction.peak_demand_kw:.1f}"
+                    if extraction.peak_demand_kw is not None else None
+                ),
+                "Total charges": (
+                    f"${extraction.total_charges_usd:,.2f}"
+                    if extraction.total_charges_usd is not None else None
+                ),
+                "NEM true-up": "Yes" if extraction.nem_true_up else "No",
+            }
+            for label, value in fields.items():
+                if value is not None:
+                    st.markdown(f"- **{label}:** {value}")
+            if extraction.notes:
+                st.info(extraction.notes)
+
+    # -- Tariff Q&A --------------------------------------------------------
+    st.divider()
+    st.markdown("**Ask a question about the selected tariff**")
+    if tariff is None:
+        st.info("Load a tariff in Section 4 of the sidebar to enable tariff Q&A.")
+    else:
+        q = st.text_input("Question", key="ai_tariff_q",
+                          placeholder="e.g. What are the peak TOU hours in summer?")
+        if q and st.button("Ask", key="ai_tariff_ask"):
+            try:
+                answer = _ai_tariff_ask(
+                    q,
+                    tariff_label=getattr(tariff, "label", ""),
+                    urdb_json=getattr(tariff, "raw_data", {}) or {},
+                )
+                st.markdown(answer)
+            except Exception as exc:
+                st.error(f"Tariff Q&A failed: {exc}")
 
 
 def _render_sensitivity_tab(
@@ -4294,6 +4419,7 @@ def _render_results():
         tab_labels.append("Battery Analysis")
     tab_labels.append("PPA Rate")
     tab_labels.append("Sensitivity")
+    tab_labels.append("AI Assistant")
     tab_labels.append("Downloads")
     result_tabs = st.tabs(tab_labels)
 
@@ -4304,8 +4430,9 @@ def _render_results():
     tab3 = result_tabs[3]
     tab4 = result_tabs[4]
     tab_batt = result_tabs[5] if has_battery else None
-    tab_indexed = result_tabs[-3]      # PPA Rate
-    tab_sensitivity = result_tabs[-2]  # Monte Carlo + tornado
+    tab_indexed = result_tabs[-4]      # PPA Rate
+    tab_sensitivity = result_tabs[-3]  # Monte Carlo + tornado
+    tab_ai = result_tabs[-2]           # AI Assistant
     tab5 = result_tabs[-1]             # Export / Download (always last)
 
     # Compute peak period index from tariff
@@ -4956,6 +5083,19 @@ def _render_results():
             degradation_pct=st.session_state.get("pv_degradation_pct", 0.5),
             system_life_years=system_life_years,
             nem_regime_1=_common_nem_kw.get("nem_regime_1", "NEM-3 / NVBT"),
+        )
+
+    with tab_ai:
+        _render_ai_assistant_tab(
+            result=result,
+            customer_name=st.session_state.get("customer_name", ""),
+            address=st.session_state.get("sb_location", ""),
+            system_size_kw=float(st.session_state.get("sb_system_size", 0.0) or 0.0),
+            battery_capacity_kwh=float(st.session_state.get("battery_capacity_kwh", 0.0) or 0.0),
+            nem_regime=_common_nem_kw.get("nem_regime_1", "NEM-3"),
+            horizon_years=system_life_years,
+            ppa_rate=st.session_state.get("ppa_rate_value"),
+            tariff=st.session_state.get("tariff"),
         )
 
     # --- Downloads tab (always last) ---
