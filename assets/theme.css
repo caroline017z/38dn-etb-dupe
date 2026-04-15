@@ -156,7 +156,12 @@ p, li, div, label, input, select, textarea, .stMarkdown {
     border-bottom: 2px solid var(--38dn-navy) !important;
 }
 
-/* Buttons — primary solid navy, secondary outlined. */
+/* Buttons — primary solid navy, secondary outlined.
+ * Streamlit wraps the label in a <p> or <div>; the inner element inherits
+ * the button's color only when we force it, otherwise a stray base style
+ * can hide the text. Hence `color` is applied to both the button and its
+ * descendants. The `data-testid*="primary"` selector covers modern
+ * Streamlit; `[kind="primary"]` covers older releases. */
 .stButton > button {
     font-size: var(--38dn-fs-body) !important;
     font-weight: var(--38dn-fw-medium) !important;
@@ -167,18 +172,36 @@ p, li, div, label, input, select, textarea, .stMarkdown {
     padding: 6px 14px !important;
     transition: background 120ms ease, border-color 120ms ease;
 }
-.stButton > button:hover {
+.stButton > button * {
+    color: inherit !important;
+}
+.stButton > button:hover:not(:disabled) {
     border-color: var(--38dn-navy) !important;
     background: var(--38dn-surface-1) !important;
 }
-.stButton > button[kind="primary"] {
+.stButton > button[kind="primary"],
+.stButton > button[data-testid="stBaseButton-primary"] {
     background: var(--38dn-navy) !important;
     border-color: var(--38dn-navy) !important;
     color: #ffffff !important;
 }
-.stButton > button[kind="primary"]:hover {
+.stButton > button[kind="primary"]:hover:not(:disabled),
+.stButton > button[data-testid="stBaseButton-primary"]:hover:not(:disabled) {
     background: #061a2d !important;
     border-color: #061a2d !important;
+}
+/* Disabled primary — preserve contrast so the label stays legible. */
+.stButton > button[kind="primary"]:disabled,
+.stButton > button[data-testid="stBaseButton-primary"]:disabled {
+    background: var(--38dn-slate-30) !important;
+    border-color: var(--38dn-slate-30) !important;
+    color: #ffffff !important;
+    opacity: 0.85 !important;
+    cursor: not-allowed !important;
+}
+.stButton > button:disabled {
+    color: var(--38dn-slate-50) !important;
+    opacity: 0.7;
 }
 
 /* Inputs */
