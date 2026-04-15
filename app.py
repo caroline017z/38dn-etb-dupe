@@ -100,6 +100,7 @@ from modules.proposals import (
     create_proposal as _create_proposal_obj,
     update_proposal as _update_proposal_obj,
     snapshot_from_saved as _snapshot_from_saved,
+    snapshot_drift_reasons as _snapshot_drift_reasons,
     save_proposal_to_session as _save_proposal_session,
     delete_proposal_from_session as _delete_proposal_session,
     list_proposals_in_session as _list_proposals_session,
@@ -1039,6 +1040,44 @@ def _render_proposals_tab(
                     f"{len(preview_source.comparison_ppas)} comparison PPA"
                     f"{'s' if len(preview_source.comparison_ppas) != 1 else ''}",
         )
+
+        # Snapshot-drift check: walk every snapshot in the Proposal and see
+        # whether the underlying simulation has drifted since each was
+        # captured (system size, rate/load escalator). Stale snapshots
+        # produce misleading exports — surface the mismatch in an amber
+        # callout and offer a one-click resnap via the PPA Rate tab.
+        _all_snaps = [preview_source.primary_ppa, *preview_source.comparison_ppas]
+        _stale = []
+        for _snap in _all_snaps:
+            reasons = _snapshot_drift_reasons(
+                _snap,
+                current_system_size_kw=float(system_size_kw or 0.0) or None,
+                current_rate_escalator_pct=float(rate_escalator or 0.0) or None,
+                current_load_escalator_pct=float(load_escalator or 0.0) or None,
+            )
+            if reasons:
+                _stale.append((_snap.name, reasons))
+        if _stale:
+            _reason_items = "".join(
+                f"<li><strong>{_name}</strong>: {'; '.join(_reasons)}</li>"
+                for _name, _reasons in _stale
+            )
+            st.markdown(
+                '<div style="background:var(--38dn-warning-bg);'
+                'border:1px solid #F0D7A8;border-left:3px solid var(--38dn-amber);'
+                'border-radius:var(--38dn-radius-md);'
+                'padding:10px 14px;margin:6px 0 12px 0;'
+                'font-size:var(--38dn-fs-body);color:var(--38dn-ink);">'
+                '<div class="eyebrow-38dn" style="color:var(--38dn-amber);'
+                'margin-bottom:4px;">Snapshots may be stale</div>'
+                "The simulation has changed since the following PPA "
+                "snapshots were captured. Exports will use the captured "
+                "numbers — resave the PPA on the PPA Rate tab to refresh."
+                f'<ul style="margin:6px 0 0 18px;padding:0;">{_reason_items}</ul>'
+                '</div>',
+                unsafe_allow_html=True,
+            )
+
         _cmp_df = _build_prop_table(preview_source)
         st.markdown(
             render_styled_table(_cmp_df, bold_cols=["Metric"]),
@@ -6803,6 +6842,9 @@ def _render_results():
                     try:
                         _new_snap = _snapshot_from_saved(
                             name, saved[name], term_years=int(len(_cd)),
+                            sim_system_size_kw=float(system_size_kw or 0.0),
+                            sim_rate_escalator_pct=float(rate_escalator or 0.0),
+                            sim_load_escalator_pct=float(load_escalator or 0.0),
                         )
                         _current = (
                             _active_prop

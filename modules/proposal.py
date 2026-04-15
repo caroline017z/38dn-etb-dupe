@@ -1966,82 +1966,120 @@ def _slide_label_for_primary(
 
 
 def _slide_alternatives_considered(prs, pg, total, *, primary_label: str, alternatives: list):
-    """Appendix slide: Primary vs Alternative PPAs in a compact table.
+    """Appendix slide: Primary vs Alternative PPAs.
 
-    ``alternatives`` is a list of dicts with keys matching the ``PPASnapshot``
-    field names we care about: ``name``, ``year1_rate_r1``, ``year1_rate_r2``,
-    ``escalator_r1_pct``, ``escalator_r2_pct``, ``savings_pct``,
-    ``lifetime_savings_usd``, ``term_years``.
+    Tranche-3 layout: an at-a-glance horizontal-bar *waterfall* of
+    lifetime savings per variant lives in the upper half, a compact
+    reference table below. The bars let a CFO see which variant
+    delivers the highest lifetime value without reading a single
+    number; the table confirms the contractual detail.
     """
     sl = prs.slides.add_slide(prs.slide_layouts[6])
     _accent_rule(sl)
     _action_title(sl, "Alternatives Considered")
-    _subtitle(sl, "Side-by-side view of the recommended offer and alternatives reviewed during pricing.")
+    _subtitle(sl, "Side-by-side comparison of the recommended offer and alternatives reviewed during pricing.")
     _takeaway(sl, primary_label)
 
-    # Header + rows
-    rows = [
-        ("", "Recommended") + tuple(a.get("name", f"Alt {i+1}") for i, a in enumerate(alternatives)),
-    ]
+    # --- Waterfall: horizontal bars of lifetime savings per variant ---
+    bar_zone_y = Inches(1.80)
+    bar_zone_h = Inches(2.80)
+    _txt(
+        sl, ML, bar_zone_y, CW, Inches(0.22),
+        text="LIFETIME CUSTOMER SAVINGS (by PPA variant)",
+        sz=Pt(11), bold=True, color=GRAY50,
+    )
+    _divider_line(sl, bar_zone_y + Inches(0.27), CW)
 
+    # Accent colour per variant — recommended is the 38DN green; alts
+    # progress through the palette so they're distinguishable in B/W.
+    _palette = [ACCENT1, ACCENT4, ACCENT3, DK1]
+
+    _max_sav = max(
+        (float(a.get("lifetime_savings_usd") or 0.0) for a in alternatives),
+        default=0.0,
+    ) or 1.0
+
+    # Each bar row: label (left, 2.0"), bar track (middle, 7.5"), value (right, 1.5")
+    row_h_bar = Inches(0.52)
+    track_start = ML + Inches(2.10)
+    track_width = CW - Inches(3.70)  # leaves ~1.5" on the right for value label
+    val_x = track_start + track_width + Inches(0.12)
+    first_row_y = bar_zone_y + Inches(0.42)
+
+    for i, a in enumerate(alternatives):
+        y = first_row_y + row_h_bar * i
+        if y + row_h_bar > bar_zone_y + bar_zone_h:
+            break  # max 5 bars fit before we collide with the table
+        name = "Recommended" if i == 0 else a.get("name", f"Alt {i}")
+        sav = float(a.get("lifetime_savings_usd") or 0.0)
+        pct = sav / _max_sav if _max_sav > 0 else 0.0
+        color = _palette[i % len(_palette)]
+
+        # Label
+        _txt(sl, ML, y + Inches(0.09), Inches(2.0), Inches(0.34),
+             text=name, sz=Pt(11), bold=(i == 0), color=DK1)
+
+        # Track background
+        _rect(sl, track_start, y + Inches(0.14), track_width, Inches(0.24),
+              fill=TBL_ALT)
+        # Bar
+        _rect(sl, track_start, y + Inches(0.14),
+              Emu(int(track_width * pct)), Inches(0.24),
+              fill=color)
+
+        # Value label
+        _txt(sl, val_x, y + Inches(0.09), Inches(1.5), Inches(0.34),
+             text=f"${sav:,.0f}",
+             sz=Pt(11), bold=True, color=color,
+             align=PP_ALIGN.LEFT)
+
+    # --- Compact reference table below the bars --------------------------
     def _fmt_rate_pair(r1, r2):
         if r1 is None:
             return "—"
         if r2 is not None:
-            return f"${r1:.3f} → ${r2:.3f}/kWh"
+            return f"${r1:.3f} → ${r2:.3f}"
         return f"${r1:.3f}/kWh"
 
     def _fmt_pct(v):
         return f"{v:.1f}%" if v is not None else "—"
 
-    def _fmt_usd(v):
-        return f"${v:,.0f}" if v is not None else "—"
-
-    primary_like = alternatives[0].get("_recommended_view", None) if alternatives else None
-
-    # Metric rows — include the recommended values in the first column of each row.
     metric_rows = [
-        ("Yr-1 PPA Rate", primary_like.get("year1_rate") if primary_like else None,
+        ("Yr-1 PPA Rate",
          lambda a: _fmt_rate_pair(a.get("year1_rate_r1"), a.get("year1_rate_r2"))),
-        ("Escalator (Yr-1 regime)", primary_like.get("escalator") if primary_like else None,
+        ("Escalator (Yr-1 regime)",
          lambda a: f"{(a.get('escalator_r1_pct') or 0):.1f}%/yr"),
-        ("Savings Target", primary_like.get("savings_pct") if primary_like else None,
+        ("Savings Target",
          lambda a: _fmt_pct(a.get("savings_pct"))),
-        ("Lifetime Savings", None,
-         lambda a: _fmt_usd(a.get("lifetime_savings_usd"))),
-        ("Term", None,
+        ("Term",
          lambda a: f"{int(a.get('term_years') or 0)} yrs"),
     ]
 
-    # We lay out as a simple grid of text boxes — python-pptx tables are
-    # heavyweight for a compact appendix and styling doesn't match the deck.
-    cols = 1 + len(alternatives)  # metric col + N PPAs
+    cols = 1 + len(alternatives)
     col_w = CW / cols
-    y0 = Inches(1.80)
-    row_h = Inches(0.42)
+    table_y = bar_zone_y + bar_zone_h + Inches(0.20)
+    row_h = Inches(0.36)
 
     # Column headers
-    _txt(sl, ML, y0, col_w, row_h, text="Metric",
-         sz=Pt(11), bold=True, color=WHITE, align=PP_ALIGN.LEFT)
-    _rect(sl, ML, y0, col_w, row_h, fill=DK1)
+    _rect(sl, ML, table_y, CW, row_h, fill=DK1)
+    _txt(sl, ML + Inches(0.12), table_y, col_w - Inches(0.12), row_h,
+         text="Metric", sz=Pt(10), bold=True, color=WHITE, align=PP_ALIGN.LEFT)
     for i, a in enumerate(alternatives):
         x = ML + col_w * (i + 1)
-        _rect(sl, x, y0, col_w, row_h, fill=DK1)
         label = "Recommended" if i == 0 else a.get("name", f"Alt {i}")
-        _txt(sl, x, y0, col_w, row_h, text=label,
-             sz=Pt(11), bold=True, color=WHITE, align=PP_ALIGN.CENTER)
+        _txt(sl, x, table_y, col_w, row_h, text=label,
+             sz=Pt(10), bold=True, color=WHITE, align=PP_ALIGN.CENTER)
 
-    # Re-render on top of the filled rects with the same text (so fill+text coexist).
-    for r, (metric, _unused_primary, getter) in enumerate(metric_rows, start=1):
-        y = y0 + row_h * r
+    for r, (metric, getter) in enumerate(metric_rows, start=1):
+        y = table_y + row_h * r
         bg = TBL_ALT if r % 2 == 1 else WHITE
         _rect(sl, ML, y, CW, row_h, fill=bg)
         _txt(sl, ML + Inches(0.12), y, col_w - Inches(0.12), row_h,
-             text=metric, sz=Pt(11), bold=True, color=DK1, align=PP_ALIGN.LEFT)
+             text=metric, sz=Pt(10), bold=True, color=DK1, align=PP_ALIGN.LEFT)
         for i, a in enumerate(alternatives):
             x = ML + col_w * (i + 1)
             _txt(sl, x, y, col_w, row_h, text=getter(a),
-                 sz=Pt(11), color=DK1, align=PP_ALIGN.CENTER)
+                 sz=Pt(10), color=DK1, align=PP_ALIGN.CENTER)
 
     _source(sl, "38DN pricing model; values reflect the current simulation.")
     _footer(sl, pg, total)

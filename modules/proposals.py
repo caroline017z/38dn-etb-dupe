@@ -75,6 +75,14 @@ class PPASnapshot:
     solar_kwh_per_year: tuple[float, ...] | None = None
     utility_only_bill_k_per_year: tuple[float, ...] | None = None
     total_ppa_bill_k_per_year: tuple[float, ...] | None = None
+    # When the snapshot was captured + the simulation state at capture time,
+    # used to flag stale snapshots after the underlying sim changes
+    # (system size, rate escalator, etc.). Empty string / None preserves
+    # backward compatibility with pre-Tranche-3 saved proposals.
+    captured_at: str = ""
+    captured_system_size_kw: float | None = None
+    captured_rate_escalator_pct: float | None = None
+    captured_load_escalator_pct: float | None = None
 
 
 @dataclass(frozen=True)
@@ -105,12 +113,23 @@ class Proposal:
 # ---------------------------------------------------------------------------
 # Snapshot bridge (saved_ppa_scenarios dict → PPASnapshot)
 # ---------------------------------------------------------------------------
-def snapshot_from_saved(name: str, saved_dict: dict, *, term_years: int) -> PPASnapshot:
+def snapshot_from_saved(
+    name: str,
+    saved_dict: dict,
+    *,
+    term_years: int,
+    sim_system_size_kw: float | None = None,
+    sim_rate_escalator_pct: float | None = None,
+    sim_load_escalator_pct: float | None = None,
+) -> PPASnapshot:
     """Extract a :class:`PPASnapshot` from the ``saved_ppa_scenarios[name]``
     structure already persisted by the PPA Rate tab.
 
     The PPA-tab save format has evolved across phases; this bridge tolerates
-    missing fields and fills with safe defaults.
+    missing fields and fills with safe defaults. When the caller passes the
+    simulation's current system/escalator values, they're stamped on the
+    snapshot so a later render can detect if the simulation has drifted
+    since the snapshot was captured.
     """
     def _tuple(v):
         return tuple(v) if v is not None else None
@@ -145,7 +164,66 @@ def snapshot_from_saved(name: str, saved_dict: dict, *, term_years: int) -> PPAS
         solar_kwh_per_year=_tuple(saved_dict.get("solar_kwh_per_year")),
         utility_only_bill_k_per_year=_tuple(saved_dict.get("utility_only_bill_k")),
         total_ppa_bill_k_per_year=_tuple(saved_dict.get("total_ppa_bill_k")),
+        captured_at=datetime.now().isoformat(timespec="seconds"),
+        captured_system_size_kw=(
+            float(sim_system_size_kw) if sim_system_size_kw is not None else None
+        ),
+        captured_rate_escalator_pct=(
+            float(sim_rate_escalator_pct)
+            if sim_rate_escalator_pct is not None else None
+        ),
+        captured_load_escalator_pct=(
+            float(sim_load_escalator_pct)
+            if sim_load_escalator_pct is not None else None
+        ),
     )
+
+
+def snapshot_drift_reasons(
+    snapshot: PPASnapshot,
+    *,
+    current_system_size_kw: float | None,
+    current_rate_escalator_pct: float | None,
+    current_load_escalator_pct: float | None,
+    size_tolerance_pct: float = 0.5,
+    escalator_tolerance_pp: float = 0.01,
+) -> list[str]:
+    """Return a list of human-readable reasons a snapshot is stale relative
+    to the current simulation state. Empty list means the snapshot is in
+    sync (or the captured_* fields aren't populated on an older snapshot).
+
+    Tolerances avoid false positives on floating-point noise and tiny
+    legitimate adjustments (<0.5 % size change, <0.01 pp escalator change).
+    """
+    reasons: list[str] = []
+    if (snapshot.captured_system_size_kw is not None
+            and current_system_size_kw is not None):
+        pct = abs(
+            current_system_size_kw - snapshot.captured_system_size_kw
+        ) / max(snapshot.captured_system_size_kw, 1e-6) * 100
+        if pct > size_tolerance_pct:
+            reasons.append(
+                f"system size changed "
+                f"{snapshot.captured_system_size_kw:,.0f} → "
+                f"{current_system_size_kw:,.0f} kW"
+            )
+    if (snapshot.captured_rate_escalator_pct is not None
+            and current_rate_escalator_pct is not None):
+        if abs(current_rate_escalator_pct - snapshot.captured_rate_escalator_pct) > escalator_tolerance_pp:
+            reasons.append(
+                f"rate escalator changed "
+                f"{snapshot.captured_rate_escalator_pct:.2f}% → "
+                f"{current_rate_escalator_pct:.2f}%"
+            )
+    if (snapshot.captured_load_escalator_pct is not None
+            and current_load_escalator_pct is not None):
+        if abs(current_load_escalator_pct - snapshot.captured_load_escalator_pct) > escalator_tolerance_pp:
+            reasons.append(
+                f"load escalator changed "
+                f"{snapshot.captured_load_escalator_pct:.2f}% → "
+                f"{current_load_escalator_pct:.2f}%"
+            )
+    return reasons
 
 
 # ---------------------------------------------------------------------------
@@ -273,6 +351,19 @@ def _snapshot_from_dict(data: dict) -> PPASnapshot:
         solar_kwh_per_year=_tuple(data.get("solar_kwh_per_year")),
         utility_only_bill_k_per_year=_tuple(data.get("utility_only_bill_k_per_year")),
         total_ppa_bill_k_per_year=_tuple(data.get("total_ppa_bill_k_per_year")),
+        captured_at=str(data.get("captured_at", "")),
+        captured_system_size_kw=(
+            float(data["captured_system_size_kw"])
+            if data.get("captured_system_size_kw") is not None else None
+        ),
+        captured_rate_escalator_pct=(
+            float(data["captured_rate_escalator_pct"])
+            if data.get("captured_rate_escalator_pct") is not None else None
+        ),
+        captured_load_escalator_pct=(
+            float(data["captured_load_escalator_pct"])
+            if data.get("captured_load_escalator_pct") is not None else None
+        ),
     )
 
 
@@ -421,6 +512,7 @@ __all__ = [
     "SESSION_KEY_PROPOSALS",
     "SESSION_KEY_ACTIVE",
     "snapshot_from_saved",
+    "snapshot_drift_reasons",
     "create_proposal",
     "update_proposal",
     "to_dict",
