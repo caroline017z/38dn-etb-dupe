@@ -47,6 +47,14 @@ from modules.simulation import (
     run_simulation,
     inputs_from_session_state,
 )
+from modules.sensitivity import (
+    DEFAULT_LEVERS,
+    Lever,
+    monte_carlo as _sens_monte_carlo,
+    percentiles as _sens_percentiles,
+    project_npv as _sens_project_npv,
+    tornado as _sens_tornado,
+)
 from dataclasses import replace as _dc_replace
 from modules.billing_aggregation import (
     MeterConfig,
@@ -214,6 +222,182 @@ def _check_battery_solver(result: "BillingResult"):
                 "Battery dispatch produced near-zero discharge. "
                 "Check that export rates are loaded and charge/discharge windows are configured correctly."
             )
+
+
+def _render_sensitivity_tab(
+    *,
+    result,
+    result_pv_only,
+    system_cost: float,
+    rate_escalator: float,
+    load_escalator: float,
+    degradation_pct: float,
+    system_life_years: int,
+    nem_regime_1: str,
+) -> None:
+    """Monte Carlo + tornado sensitivity view.
+
+    Lets the user select projection-level levers (rate escalator, load
+    escalator, PV degradation), pick a sample count, and see the NPV
+    distribution update live as samples accumulate.
+    """
+    import numpy as np
+    import plotly.graph_objects as go
+
+    st.subheader("Sensitivity Analysis")
+    st.caption(
+        "Projection-level Monte Carlo and tornado — year-1 billing is held "
+        "fixed; escalators and degradation are perturbed around the base "
+        "case to quantify 20-year NPV risk."
+    )
+
+    cfg_col, out_col = st.columns([0.38, 0.62])
+
+    with cfg_col:
+        years = st.number_input(
+            "Projection horizon (years)", 5, max(system_life_years, 5), min(20, system_life_years), 1,
+            key="sens_years",
+        )
+        discount = st.number_input(
+            "Discount rate (%)", 0.0, 20.0, 7.0, 0.5, key="sens_discount",
+        )
+        seed = st.number_input("Seed", 0, 9999, 42, 1, key="sens_seed")
+        n_samples = st.slider("Samples", 50, 2000, 500, 50, key="sens_n")
+
+        st.markdown("**Levers** — base = current sidebar value; σ controls spread")
+        rate_sigma = st.number_input(
+            "Rate escalator σ (%/yr)", 0.0, 5.0, 1.0, 0.1, key="sens_rate_sigma",
+        )
+        load_sigma = st.number_input(
+            "Load escalator σ (%/yr)", 0.0, 5.0, 0.5, 0.1, key="sens_load_sigma",
+        )
+        degrad_low, degrad_mode, degrad_high = st.columns(3)
+        with degrad_low:
+            d_low = st.number_input("Degrad low", 0.0, 2.0, 0.3, 0.05, key="sens_d_low")
+        with degrad_mode:
+            d_mode = st.number_input("Degrad mode", 0.0, 2.0, float(degradation_pct), 0.05, key="sens_d_mode")
+        with degrad_high:
+            d_high = st.number_input("Degrad high", 0.0, 2.0, 0.8, 0.05, key="sens_d_high")
+
+        run_mc = st.button("Run Monte Carlo", type="primary", key="sens_run_mc")
+        run_tornado = st.button("Run Tornado", key="sens_run_tornado")
+
+    levers = [
+        Lever("rate_escalator", "normal", (float(rate_escalator), float(rate_sigma)),
+              "Rate escalator", "%/yr"),
+        Lever("load_escalator", "normal", (float(load_escalator), float(load_sigma)),
+              "Load escalator", "%/yr"),
+        Lever("degradation", "triangular", (float(d_low), float(d_mode), float(d_high)),
+              "PV degradation", "%/yr"),
+    ]
+
+    with out_col:
+        placeholder = st.empty()
+
+        def _draw_mc(npvs: "np.ndarray", final: bool) -> None:
+            pct = _sens_percentiles(npvs)
+            fig = go.Figure()
+            fig.add_trace(go.Histogram(
+                x=npvs, nbinsx=40, marker_color="#2E86AB", opacity=0.85, name="NPV",
+            ))
+            for p, color in [(10, "#D62728"), (50, "#111111"), (90, "#2CA02C")]:
+                fig.add_vline(
+                    x=pct[p], line_dash="dash", line_color=color,
+                    annotation_text=f"P{p}=${pct[p]/1000:,.0f}k",
+                    annotation_position="top",
+                )
+            fig.update_layout(
+                title=f"NPV distribution — {len(npvs):,} sample{'s' if len(npvs)!=1 else ''}"
+                      + (" (final)" if final else " (running…)"),
+                xaxis_title="20-year NPV ($)",
+                yaxis_title="Count",
+                template="plotly_white",
+                bargap=0.02,
+                height=380,
+                margin=dict(l=40, r=20, t=50, b=40),
+            )
+            placeholder.plotly_chart(fig, use_container_width=True, key=f"mc_{len(npvs)}")
+
+        if run_mc:
+            with st.status("Running Monte Carlo…", expanded=True) as status:
+                def _cb(i: int, npvs_so_far):
+                    status.write(f"{i:,} / {n_samples:,} samples")
+                    _draw_mc(npvs_so_far, final=False)
+
+                mc_df = _sens_monte_carlo(
+                    result=result,
+                    result_pv_only=result_pv_only,
+                    system_cost=float(system_cost),
+                    years=int(years),
+                    discount_rate_pct=float(discount),
+                    levers=levers,
+                    n=int(n_samples),
+                    seed=int(seed),
+                    nem_regime_1=nem_regime_1,
+                    progress_cb=_cb,
+                    chunk=max(10, n_samples // 20),
+                )
+                status.update(label=f"Monte Carlo complete: {len(mc_df):,} samples", state="complete")
+
+            _draw_mc(mc_df["npv"].to_numpy(), final=True)
+            st.session_state["sensitivity_mc_df"] = mc_df
+
+            pct = _sens_percentiles(mc_df["npv"].to_numpy())
+            k1, k2, k3 = st.columns(3)
+            k1.metric("P10 NPV", f"${pct[10]/1000:,.0f}k")
+            k2.metric("P50 NPV", f"${pct[50]/1000:,.0f}k")
+            k3.metric("P90 NPV", f"${pct[90]/1000:,.0f}k")
+
+        if run_tornado:
+            with st.spinner("Running tornado sweep…"):
+                tdf = _sens_tornado(
+                    result=result,
+                    result_pv_only=result_pv_only,
+                    system_cost=float(system_cost),
+                    years=int(years),
+                    discount_rate_pct=float(discount),
+                    levers=levers,
+                    pct_low=-0.10,
+                    pct_high=0.10,
+                    nem_regime_1=nem_regime_1,
+                )
+            base = tdf.attrs.get("base_npv", 0.0)
+
+            fig = go.Figure()
+            # Bars drawn as (base -> low) and (base -> high) segments.
+            for _, row in tdf[::-1].iterrows():
+                fig.add_trace(go.Bar(
+                    y=[row["lever"]], x=[row["low_npv"] - base],
+                    base=base, orientation="h",
+                    marker_color="#D62728", showlegend=False,
+                    hovertemplate=f"{row['lever']}: low→${{:,.0f}}".replace("{", "{"),
+                ))
+                fig.add_trace(go.Bar(
+                    y=[row["lever"]], x=[row["high_npv"] - base],
+                    base=base, orientation="h",
+                    marker_color="#2CA02C", showlegend=False,
+                ))
+            fig.add_vline(x=base, line_color="#111111", line_width=2,
+                          annotation_text=f"Base NPV=${base/1000:,.0f}k",
+                          annotation_position="top")
+            fig.update_layout(
+                title="Tornado — ±10% around base",
+                xaxis_title="NPV ($)",
+                barmode="overlay",
+                template="plotly_white",
+                height=380,
+                margin=dict(l=40, r=20, t=50, b=40),
+            )
+            st.plotly_chart(fig, use_container_width=True)
+            st.dataframe(
+                tdf[["lever", "base", "low", "high", "low_npv", "high_npv", "swing"]]
+                    .style.format({
+                        "base": "{:.2f}", "low": "{:.2f}", "high": "{:.2f}",
+                        "low_npv": "${:,.0f}", "high_npv": "${:,.0f}", "swing": "${:,.0f}",
+                    }),
+                use_container_width=True, hide_index=True,
+            )
+            st.session_state["sensitivity_tornado_df"] = tdf
 
 
 # =============================================================================
@@ -4109,6 +4293,7 @@ def _render_results():
     if has_battery:
         tab_labels.append("Battery Analysis")
     tab_labels.append("PPA Rate")
+    tab_labels.append("Sensitivity")
     tab_labels.append("Downloads")
     result_tabs = st.tabs(tab_labels)
 
@@ -4119,8 +4304,9 @@ def _render_results():
     tab3 = result_tabs[3]
     tab4 = result_tabs[4]
     tab_batt = result_tabs[5] if has_battery else None
-    tab_indexed = result_tabs[-2]  # Indexed Tariff (always second-to-last)
-    tab5 = result_tabs[-1]         # Export / Download (always last)
+    tab_indexed = result_tabs[-3]      # PPA Rate
+    tab_sensitivity = result_tabs[-2]  # Monte Carlo + tornado
+    tab5 = result_tabs[-1]             # Export / Download (always last)
 
     # Compute peak period index from tariff
     _tariff_for_peak = st.session_state["tariff"]
@@ -4759,6 +4945,18 @@ def _render_results():
 
     with tab_indexed:
         _ppa_dashboard()
+
+    with tab_sensitivity:
+        _render_sensitivity_tab(
+            result=result,
+            result_pv_only=pv_only_for_display,
+            system_cost=system_cost,
+            rate_escalator=rate_escalator,
+            load_escalator=load_escalator,
+            degradation_pct=st.session_state.get("pv_degradation_pct", 0.5),
+            system_life_years=system_life_years,
+            nem_regime_1=_common_nem_kw.get("nem_regime_1", "NEM-3 / NVBT"),
+        )
 
     # --- Downloads tab (always last) ---
     with tab5:
