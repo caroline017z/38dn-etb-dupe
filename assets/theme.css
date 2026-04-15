@@ -302,16 +302,37 @@ button[data-testid="stBaseButton-secondary"]:active:not(:disabled),
     box-shadow: inset 0 0 0 1px var(--38dn-navy) !important;
     transform: none !important;
 }
-/* Nav-bar context overrides these back to the navy chrome. */
-.nav-bar-wrapper button[data-testid="stPopoverButton"],
-.nav-bar-wrapper button[data-testid="stPopoverButton"] * {
+/* Nav-bar context overrides these back to the navy chrome. The extra
+ * `.stApp` prefix bumps specificity above the general popover-hover rule
+ * above (which would otherwise paint a full-white flash over nav-bar
+ * buttons because it has the same specificity and loads after the
+ * inline block in app.py). */
+.stApp .nav-bar-wrapper button[data-testid="stPopoverButton"],
+.stApp .nav-bar-wrapper button[data-testid="stPopoverButton"] * {
     background: transparent !important;
     color: #ffffff !important;
     border: none !important;
     box-shadow: none !important;
 }
-/* Hover treatment is redefined in app.py's inline nav-bar block so the
- * rule lands AFTER this selector in cascade order. */
+.stApp .nav-bar-wrapper button[data-testid="stPopoverButton"]:hover,
+.stApp .nav-bar-wrapper button[data-testid="stPopoverButton"]:hover:not(:disabled) {
+    background: transparent !important;
+    color: #ffffff !important;
+    border: none !important;
+    box-shadow: inset 0 0 0 1px rgba(255,255,255,0.55) !important;
+    border-radius: 3px !important;
+}
+.stApp .nav-bar-wrapper button[data-testid="stPopoverButton"]:focus,
+.stApp .nav-bar-wrapper button[data-testid="stPopoverButton"]:focus-visible {
+    background: transparent !important;
+    outline: none !important;
+    box-shadow: inset 0 0 0 1px rgba(255,255,255,0.7) !important;
+}
+.stApp .nav-bar-wrapper button[data-testid="stPopoverButton"]:active,
+.stApp .nav-bar-wrapper button[data-testid="stPopoverButton"]:active:not(:disabled) {
+    background: transparent !important;
+    box-shadow: inset 0 0 0 1px rgba(255,255,255,0.85) !important;
+}
 
 /* Download buttons — same secondary look, not navy-on-navy. */
 [data-testid="stDownloadButton"] button,
