@@ -77,7 +77,8 @@ def style_negative_red(styler):
     """Apply red styling to any cell whose text contains '(' (accounting negative)."""
     def _color(val):
         if isinstance(val, str) and "(" in val:
-            return "color: #cc0000; background-color: #ffe0e0"
+            # WCAG-friendly: darker red text, paler background (was #cc0000/#ffe0e0).
+            return "color: #a8141a; background-color: #fff5f5"
         return ""
     return styler.map(_color)
 
@@ -134,7 +135,7 @@ def render_styled_table(
             if col_list[j] in highlight_set:
                 cell_style += " background-color:#e3f2fd;"
             elif "(" in s:
-                cell_style += " color:#cc0000; background-color:#ffe0e0;"
+                cell_style += " color:#a8141a; background-color:#fff5f5;"
             html.append(f"<td style='{cell_style}'>{_esc(s)}</td>")
         html.append("</tr>")
 
