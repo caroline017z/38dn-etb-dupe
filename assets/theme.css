@@ -319,17 +319,27 @@ hr {
 }
 
 /* Sidebar — finer rhythm, lighter dividers, denser type for dense-panel feel.
- * Default width bumped to 340px (was ~244px) so dense finance inputs have
- * room to breathe; the user can still drag the grip to resize. */
+ * Default width ~340px (Streamlit default is ~244) so dense finance inputs
+ * have room. `min-width` is a floor; `width` is NOT forced with !important
+ * so Streamlit's native drag-resize and collapse chevron both keep working:
+ *   • chevron-collapse → aria-expanded="false" → handled below
+ *   • drag grip       → inline style overrides the 340 default
+ */
 [data-testid="stSidebar"] {
     background: var(--38dn-surface-0) !important;
     border-right: 1px solid var(--38dn-border-1);
-    min-width: 340px !important;
-    width: 340px !important;
+    min-width: 260px;
+    width: 340px;
 }
 [data-testid="stSidebar"] > div:first-child {
-    min-width: 340px !important;
-    width: 340px !important;
+    min-width: 260px;
+    width: 340px;
+}
+/* Collapsed state — let Streamlit shrink it to the usual peek strip. */
+[data-testid="stSidebar"][aria-expanded="false"],
+[data-testid="stSidebar"][aria-expanded="false"] > div:first-child {
+    min-width: 0 !important;
+    width: auto !important;
 }
 [data-testid="stSidebar"] hr {
     margin: var(--38dn-sp-2) 0 !important;
