@@ -6408,25 +6408,77 @@ def _render_results():
                     unsafe_allow_html=True,
                 )
 
-        # ── Save PPA scenario (moved ABOVE the chart) ─────────────────
+        # ── Save PPA → Proposal (nested structure) ───────────────────
+        # Single action: saving a PPA simultaneously (a) appends it to the
+        # session's saved_ppa_scenarios pool so the overlay chart can draw
+        # it AND (b) attaches it to a Proposal for this simulation. If no
+        # Proposal is active, one is auto-created with a sensible default
+        # name, the PPA becomes its primary, and it is persisted to GCS.
+        # Later saves append the new PPA as a comparison snapshot on the
+        # active Proposal up to the 3-comparison cap, then wrap around to
+        # replace the oldest comparison so the cap stays respected.
         _sp_save, _sp_tbl = st.container(), st.container()
         with _sp_save:
-            st.markdown("**Save this PPA structure**")
+            # Current-Proposal indicator (teal card when active, ghost when not)
+            _active_sim_name = (
+                st.session_state.get("_active_simulation_name")
+                or st.session_state.get("_last_loaded_simulation_name")
+            )
+            _active_prop = _get_active_proposal(st.session_state)
+            if _active_prop and _active_prop.simulation_name == _active_sim_name:
+                _n_snaps = 1 + len(_active_prop.comparison_ppas)
+                _snap_limit_msg = (
+                    f" (primary + {len(_active_prop.comparison_ppas)} of {_PROP_MAX_COMPARISONS} comparisons)"
+                    if _active_prop.comparison_ppas else " (primary)"
+                )
+                st.markdown(
+                    f'<div style="background:#E3EDED;border:1px solid #C7DADA;'
+                    f'border-left:3px solid #518484;border-radius:6px;'
+                    f'padding:10px 14px;margin:6px 0 10px 0;font-size:12px;'
+                    f'color:#0E2841;">'
+                    f'<div style="font-size:10px;font-weight:600;color:#518484;'
+                    f'text-transform:uppercase;letter-spacing:0.06em;margin-bottom:4px;">'
+                    f'Active Proposal</div>'
+                    f'<strong>{_active_prop.name}</strong> — {_n_snaps} PPA'
+                    f'{"s" if _n_snaps != 1 else ""}{_snap_limit_msg}'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.markdown(
+                    '<div style="background:#F8FAFC;border:1px dashed #CBD5E1;'
+                    'border-radius:6px;padding:10px 14px;margin:6px 0 10px 0;'
+                    'font-size:12px;color:#64748B;">'
+                    '<strong>No Proposal active for this simulation.</strong> '
+                    'Saving a PPA below will auto-create one you can edit from the Proposals tab.'
+                    '</div>',
+                    unsafe_allow_html=True,
+                )
+
+            st.markdown("**Save PPA to Proposal**")
             st.caption(
-                "Name and save the current PPA configuration to overlay on the "
-                "chart and compare against other PPA structures you try."
+                "Names and stores the current PPA configuration on the active "
+                "Proposal (auto-creates one if missing). Each save appends a "
+                "new PPA snapshot — build your primary first, then iterate "
+                f"up to {_PROP_MAX_COMPARISONS} comparison variants."
             )
             sv_name_col, sv_btn_col, sv_clear_col = st.columns([0.5, 0.25, 0.25])
             with sv_name_col:
                 _sv_name = st.text_input(
-                    "Scenario name", value="", key="ppa_save_name",
-                    placeholder="e.g. 2.9% escalator / 10% savings",
+                    "PPA scenario name", value="", key="ppa_save_name",
+                    placeholder="e.g. 2.9% esc / 10% savings",
                     label_visibility="collapsed",
                 )
             with sv_btn_col:
-                if st.button("💾 Save PPA", key="ppa_save_btn", use_container_width=True):
+                _sv_btn_label = (
+                    "💾 Add to Proposal" if _active_prop and _active_prop.simulation_name == _active_sim_name
+                    else "💾 Save PPA + Start Proposal"
+                )
+                if st.button(_sv_btn_label, key="ppa_save_btn", use_container_width=True):
                     name = (_sv_name or "").strip() or f"Scenario {len(st.session_state.get('saved_ppa_scenarios', {})) + 1}"
-                    # Pre-compute load kWh per year (needed for effective $/kWh overlay).
+
+                    # --- 1. Persist to the session-wide scenarios pool so the
+                    #        overlay chart and the comparison table can read it.
                     _proj_load_col = (
                         "Customer Load (kWh)"
                         if "Customer Load (kWh)" in _main_projection.columns
@@ -6463,11 +6515,88 @@ def _render_results():
                         "term_years": int(len(_cd)),
                         "lifetime_savings": float(_life_sav),
                     }
-                    st.rerun()
+
+                    # --- 2. Attach to a Proposal — create one if missing, or
+                    #        append to the active Proposal for this simulation.
+                    try:
+                        _new_snap = _snapshot_from_saved(
+                            name, saved[name], term_years=int(len(_cd)),
+                        )
+                        _current = (
+                            _active_prop
+                            if (_active_prop and _active_prop.simulation_name == _active_sim_name)
+                            else None
+                        )
+                        if _current is None:
+                            # Auto-create a Proposal: first PPA is the primary.
+                            _default_proposal_name = (
+                                f"{_active_sim_name or 'Deal'} — {date.today().strftime('%b %d %Y')}"
+                            )
+                            _proposal_obj = _create_proposal_obj(
+                                name=_default_proposal_name,
+                                simulation_name=_active_sim_name,
+                                customer_name=st.session_state.get("customer_name", ""),
+                                site_address=st.session_state.get("sb_location", ""),
+                                utility_account="",
+                                term_years=int(len(_cd)),
+                                primary_ppa=_new_snap,
+                                comparison_ppas=(),
+                            )
+                            _toast_msg = (
+                                f"Created Proposal '{_proposal_obj.name}' with "
+                                f"'{name}' as primary"
+                            )
+                        else:
+                            # Append as comparison. If we're at the cap,
+                            # replace the oldest comparison snapshot to keep
+                            # the UX forgiving rather than silently blocking.
+                            _existing_comps = list(_current.comparison_ppas)
+                            # Don't duplicate — if a snap by this name exists, overwrite it.
+                            _existing_comps = [s for s in _existing_comps if s.name != name]
+                            _existing_comps.append(_new_snap)
+                            if len(_existing_comps) > _PROP_MAX_COMPARISONS:
+                                _existing_comps = _existing_comps[-_PROP_MAX_COMPARISONS:]
+                            _proposal_obj = _update_proposal_obj(
+                                _current,
+                                comparison_ppas=tuple(_existing_comps),
+                                term_years=int(len(_cd)),
+                            )
+                            _toast_msg = (
+                                f"Added '{name}' to Proposal '{_proposal_obj.name}' "
+                                f"({len(_existing_comps)}/{_PROP_MAX_COMPARISONS} comparisons)"
+                            )
+                        _save_proposal_session(st.session_state, _proposal_obj)
+                        try:
+                            _persist_proposal_gcs(_proposal_obj)
+                        except Exception:
+                            # Non-fatal — session save already succeeded.
+                            pass
+                        st.session_state["_proposal_toast_pending"] = (
+                            _toast_msg + " · open the Proposals tab to review",
+                            "📁",
+                        )
+                    except Exception as exc:
+                        st.warning(f"PPA saved to pool but could not attach to a Proposal: {exc}")
+                        st.session_state["_proposal_toast_pending"] = (
+                            f"Saved PPA '{name}' (no Proposal link)", "💾",
+                        )
+
+                    # Fragment-scoped rerun so the teal Active-Proposal card
+                    # and the scenarios table below refresh immediately
+                    # without bouncing the user back to the Overview tab.
+                    try:
+                        st.rerun(scope="fragment")
+                    except TypeError:
+                        # Streamlit <1.32 doesn't support the scope kwarg.
+                        pass
             with sv_clear_col:
-                if st.button("Clear saved", key="ppa_clear_btn", use_container_width=True):
+                if st.button("Clear PPA pool", key="ppa_clear_btn", use_container_width=True,
+                             help="Clears the session's PPA scenarios pool (saved Proposals are untouched)."):
                     st.session_state["saved_ppa_scenarios"] = {}
-                    st.rerun()
+                    try:
+                        st.rerun(scope="fragment")
+                    except TypeError:
+                        pass
 
         # Saved scenarios table (above chart so the user sees their saved
         # trajectories before looking at the overlay).
