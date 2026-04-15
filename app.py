@@ -1768,8 +1768,20 @@ section[data-testid="stSidebar"] .stNumberInput label {
     border-radius: 0 !important;
 }
 .nav-bar-wrapper button[data-testid="stPopoverButton"]:hover {
-    background: rgba(255,255,255,0.1) !important;
+    /* Subtle hairline white outline — no background fill flash. */
+    background: transparent !important;
     color: #ffffff !important;
+    box-shadow: inset 0 0 0 1px rgba(255,255,255,0.55) !important;
+    border-radius: 3px !important;
+}
+.nav-bar-wrapper button[data-testid="stPopoverButton"]:focus,
+.nav-bar-wrapper button[data-testid="stPopoverButton"]:focus-visible {
+    outline: none !important;
+    box-shadow: inset 0 0 0 1px rgba(255,255,255,0.7) !important;
+}
+.nav-bar-wrapper button[data-testid="stPopoverButton"]:active {
+    background: transparent !important;
+    box-shadow: inset 0 0 0 1px rgba(255,255,255,0.85) !important;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -3289,13 +3301,36 @@ def _render_sidebar():
             st.session_state.get("tariff") is not None
             or st.session_state.get("ecc_cost_calculator") is not None
         )
-        _sb_export = st.session_state.get("export_rates") is not None
+        # Export rates are only required under NEM-3 / NVBT single-meter.
+        # NEM-1 / NEM-2 / NEM-A value exports at retail TOU so the check
+        # is always satisfied there — mirror the Run-button's ready_checks
+        # logic so the tracker can't disagree with the button.
+        _sb_nem_regime = st.session_state.get("nem_regime_1", "NEM-3 / NVBT")
+        _sb_nema_mode = st.session_state.get("load_mode") == "NEM-A Aggregation"
+        _sb_export_required = (
+            _sb_nem_regime == "NEM-3 / NVBT" and not _sb_nema_mode
+        )
+        _sb_export = (
+            st.session_state.get("export_rates") is not None
+            if _sb_export_required else True
+        )
         _sb_checks = [
             ("Production", _sb_prod),
             ("Load",       _sb_load),
             ("Tariff",     _sb_tariff),
             ("Export",     _sb_export),
         ]
+        # Rate-shift adds a 5th gate when the toggle is on — loading a
+        # saved sim that had rate-shift enabled but no old-tariff reference
+        # used to silently disable the Run button while the tracker showed
+        # 4/4 ready. Surface it as its own pill instead.
+        if st.session_state.get("rate_shift_enabled"):
+            _sb_rs_ready = (
+                st.session_state.get("rate_shift_old_tariff") is not None
+                if st.session_state.get("billing_engine", "Custom") == "Custom"
+                else st.session_state.get("rate_shift_old_ecc_calculator") is not None
+            )
+            _sb_checks.append(("Rate-shift", _sb_rs_ready))
         _sb_done = sum(1 for _, ok in _sb_checks if ok)
         _sb_total = len(_sb_checks)
         _sb_complete = _sb_done == _sb_total
@@ -3306,7 +3341,10 @@ def _render_sidebar():
         # as a single teal-to-green sweep rather than 4 independent badges.
         _TEAL = "#518484"
         _GREEN = "#45A750"
-        _ombre_stops = ("#3E6F74", "#4B7E71", "#5A8D5E", _GREEN)  # teal → green
+        # Ombre stops — sized for up to 5 pills (4 core + optional rate-shift).
+        # The ramp stays teal→green; an extra mid-stop keeps the sweep even
+        # when the 5th pill shows up.
+        _ombre_stops = ("#3E6F74", "#47767A", "#4F8369", "#59925E", _GREEN)
 
         # Status copy — subtle tone shift at completion; the color is
         # always a teal/green variant now (no amber/grey headline).

@@ -595,8 +595,17 @@ def populate_session_from_simulation(st_session_state, sim_data: dict):
                     _adj_load.values - _es_prod.values, index=_adj_load.index, name="load_kwh"
                 )
 
-    # 10) Rate shift config
-    st_session_state["rate_shift_enabled"] = inp.get("rate_shift_enabled", False)
+    # 10) Rate shift config — only restore enabled=True if the required old
+    # tariff data actually travels with the saved sim. Without this guard,
+    # reloading a saved sim that had rate-shift on would land with
+    # rate_shift_enabled=True and no old-tariff reference, silently
+    # disabling the Run Simulation button.
+    _rs_enabled = inp.get("rate_shift_enabled", False)
+    _rs_has_old_tariff = (
+        sim_data.get("rate_shift_old_tariff") is not None
+        or sim_data.get("rate_shift_old_ecc_calculator") is not None
+    )
+    st_session_state["rate_shift_enabled"] = bool(_rs_enabled and _rs_has_old_tariff)
 
     # 11) Restore saved PPA scenarios (Phase 3) and Proposals (Phase 4) if
     # present on the saved sim dict. Older simulations predate both keys;

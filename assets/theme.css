@@ -308,7 +308,10 @@ button[data-testid="stBaseButton-secondary"]:active:not(:disabled),
     background: transparent !important;
     color: #ffffff !important;
     border: none !important;
+    box-shadow: none !important;
 }
+/* Hover treatment is redefined in app.py's inline nav-bar block so the
+ * rule lands AFTER this selector in cascade order. */
 
 /* Download buttons — same secondary look, not navy-on-navy. */
 [data-testid="stDownloadButton"] button,
