@@ -207,10 +207,18 @@ hr {
     max-width: 1600px;
 }
 
-/* Sidebar — finer rhythm, lighter dividers, denser type for dense-panel feel */
+/* Sidebar — finer rhythm, lighter dividers, denser type for dense-panel feel.
+ * Default width bumped to 340px (was ~244px) so dense finance inputs have
+ * room to breathe; the user can still drag the grip to resize. */
 [data-testid="stSidebar"] {
     background: var(--38dn-surface-0) !important;
     border-right: 1px solid var(--38dn-border-1);
+    min-width: 340px !important;
+    width: 340px !important;
+}
+[data-testid="stSidebar"] > div:first-child {
+    min-width: 340px !important;
+    width: 340px !important;
 }
 [data-testid="stSidebar"] hr {
     margin: var(--38dn-sp-2) 0 !important;
