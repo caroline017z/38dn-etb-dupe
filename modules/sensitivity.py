@@ -49,6 +49,10 @@ class Lever:
     params: tuple[float, ...]
     display_name: str = ""
     unit: str = "%"
+    # Optional absolute swing (in the lever's unit, e.g. percentage points)
+    # used by :func:`tornado`. When set > 0, tornado ignores its global
+    # pct_low / pct_high and instead perturbs this lever by base ± abs_swing.
+    abs_swing: float = 0.0
 
     def sample(self, rng: np.random.Generator, n: int) -> np.ndarray:
         if self.distribution == "normal":
@@ -244,8 +248,15 @@ def tornado(
     rows = []
     for lev in levers:
         base = lev.base()
-        low = base * (1.0 + pct_low)
-        high = base * (1.0 + pct_high)
+        # Prefer the lever's absolute swing when set — lets the UI give each
+        # lever its own pp-swing (e.g. rate esc ±1%, degradation ±0.5%)
+        # rather than a uniform relative percentage.
+        if lev.abs_swing and lev.abs_swing > 0:
+            low = base - lev.abs_swing
+            high = base + lev.abs_swing
+        else:
+            low = base * (1.0 + pct_low)
+            high = base * (1.0 + pct_high)
 
         low_kwargs = dict(base_values, **{lev.key: low})
         high_kwargs = dict(base_values, **{lev.key: high})

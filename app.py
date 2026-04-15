@@ -1256,31 +1256,79 @@ def _render_sensitivity_tab(
         seed = st.number_input("Seed", 0, 9999, 42, 1, key="sens_seed")
         n_samples = st.slider("Samples", 50, 2000, 500, 50, key="sens_n")
 
-        st.markdown("**Levers** — base = current sidebar value; σ controls spread")
-        rate_sigma = st.number_input(
-            "Rate escalator σ (%/yr)", 0.0, 5.0, 1.0, 0.1, key="sens_rate_sigma",
+        st.markdown(
+            "**Annual levers** — all values below are expressed in **% per year**. "
+            "σ controls the Monte Carlo spread around the base value; "
+            "the Tornado swing controls how far the ± bars walk each lever "
+            "in the tornado-chart sensitivity sweep."
         )
-        load_sigma = st.number_input(
-            "Load escalator σ (%/yr)", 0.0, 5.0, 0.5, 0.1, key="sens_load_sigma",
-        )
+
+        st.markdown("*Utility rate escalator*")
+        _rs_col1, _rs_col2 = st.columns(2)
+        with _rs_col1:
+            rate_sigma = st.number_input(
+                "σ (%/yr)", 0.0, 5.0, 1.0, 0.1, key="sens_rate_sigma",
+            )
+        with _rs_col2:
+            rate_swing = st.number_input(
+                "Tornado ± (%/yr)", 0.0, 5.0, 1.0, 0.1,
+                key="sens_rate_swing",
+                help="Absolute swing in %/yr applied symmetrically around the base "
+                     "rate escalator when running the tornado sweep.",
+            )
+
+        st.markdown("*Load growth escalator*")
+        _ls_col1, _ls_col2 = st.columns(2)
+        with _ls_col1:
+            load_sigma = st.number_input(
+                "σ (%/yr) ", 0.0, 5.0, 0.5, 0.1, key="sens_load_sigma",
+            )
+        with _ls_col2:
+            load_swing = st.number_input(
+                "Tornado ± (%/yr) ", 0.0, 5.0, 1.0, 0.1,
+                key="sens_load_swing",
+                help="Absolute swing in %/yr applied symmetrically around the "
+                     "base load escalator when running the tornado sweep.",
+            )
+
+        st.markdown("*PV degradation (triangular MC; absolute swing for tornado)*")
         degrad_low, degrad_mode, degrad_high = st.columns(3)
         with degrad_low:
-            d_low = st.number_input("Degrad low", 0.0, 2.0, 0.3, 0.05, key="sens_d_low")
+            d_low = st.number_input("MC low (%/yr)", 0.0, 2.0, 0.3, 0.05, key="sens_d_low")
         with degrad_mode:
-            d_mode = st.number_input("Degrad mode", 0.0, 2.0, float(degradation_pct), 0.05, key="sens_d_mode")
+            d_mode = st.number_input("MC mode (%/yr)", 0.0, 2.0, float(degradation_pct), 0.05, key="sens_d_mode")
         with degrad_high:
-            d_high = st.number_input("Degrad high", 0.0, 2.0, 0.8, 0.05, key="sens_d_high")
+            d_high = st.number_input("MC high (%/yr)", 0.0, 2.0, 0.8, 0.05, key="sens_d_high")
+        degrad_swing = st.number_input(
+            "PV degradation tornado ± (%/yr)",
+            0.0, 2.0, 0.5, 0.05,
+            key="sens_degrad_swing",
+            help="Absolute swing in %/yr applied symmetrically around the "
+                 "base PV degradation (the MC mode) when running the tornado sweep.",
+        )
 
         run_mc = st.button("Run Monte Carlo", type="primary", key="sens_run_mc")
         run_tornado = st.button("Run Tornado", key="sens_run_tornado")
 
     levers = [
-        Lever("rate_escalator", "normal", (float(rate_escalator), float(rate_sigma)),
-              "Rate escalator", "%/yr"),
-        Lever("load_escalator", "normal", (float(load_escalator), float(load_sigma)),
-              "Load escalator", "%/yr"),
-        Lever("degradation", "triangular", (float(d_low), float(d_mode), float(d_high)),
-              "PV degradation", "%/yr"),
+        Lever(
+            "rate_escalator", "normal",
+            (float(rate_escalator), float(rate_sigma)),
+            "Rate escalator", "%/yr",
+            abs_swing=float(rate_swing),
+        ),
+        Lever(
+            "load_escalator", "normal",
+            (float(load_escalator), float(load_sigma)),
+            "Load escalator", "%/yr",
+            abs_swing=float(load_swing),
+        ),
+        Lever(
+            "degradation", "triangular",
+            (float(d_low), float(d_mode), float(d_high)),
+            "PV degradation", "%/yr",
+            abs_swing=float(degrad_swing),
+        ),
     ]
 
     with out_col:
