@@ -1,0 +1,20 @@
+{
+  "description": "Two-period TOU under NEM-3 with flat ACC-like export rate. Exercises import-cost + separate export-credit path.",
+  "tariff": {
+    "kind": "tou",
+    "peak_rate": 0.40,
+    "offpeak_rate": 0.10,
+    "peak_hours": [16, 17, 18, 19, 20],
+    "fixed_monthly": 12.0,
+    "label": "golden_tou_nem3",
+    "name": "Golden TOU NEM-3",
+    "utility": "SCE"
+  },
+  "load": {"kind": "seed", "mean": 35.0, "std": 10.0, "seed": 7},
+  "solar": {"kind": "bell", "peak": 70.0},
+  "export_rate": {"kind": "flat", "value": 0.06},
+  "nem_regime": "NEM-3",
+  "nbc_rate": 0.0,
+  "nsc_rate": 0.04,
+  "billing_option": "ABO"
+}
