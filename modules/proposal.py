@@ -769,6 +769,123 @@ def _slide_exec_summary(prs, pg, total, name, result, tariff, utility,
     _footer(sl, pg, total)
 
 
+def _slide_key_commercial_terms(
+    prs, pg, total, ex, *,
+    result,
+    ppa_rate, ppa_rate_r2, ppa_esc_1, ppa_esc_2,
+    term_years, customer_savings_pct, customer_savings_pct_2,
+    nem_regime_1, nem_regime_2,
+    num_years_1,
+    system_size_kw, battery_kwh,
+):
+    """Contract-snapshot slide: 4 KPI tiles a CFO or procurement lead
+    can read in 15 seconds to confirm the deal shape before reading
+    supporting detail. Inserted after the Executive Summary so the
+    narrative goes: headline value → commercial terms → baseline cost
+    → solution."""
+    sl = prs.slides.add_slide(prs.slide_layouts[6])
+    _accent_rule(sl)
+
+    _action_title(sl, "Key Commercial Terms")
+    _subtitle(
+        sl,
+        f"Contract snapshot — {term_years}-year "
+        + ("PPA with mid-term NEM regime switch" if nem_regime_2 else "PPA")
+    )
+
+    _takeaway(
+        sl,
+        "Fixed-rate energy purchase with zero customer capex, "
+        "zero operating risk, and a published savings target across the full term."
+    )
+
+    # Four tiles in a 2×2 grid.
+    tile_w = Inches(5.85)
+    tile_h = Inches(2.20)
+    tile_gap = Inches(0.10)
+    tiles_x1 = ML
+    tiles_x2 = ML + tile_w + tile_gap
+    tiles_y1 = Inches(1.95)
+    tiles_y2 = tiles_y1 + tile_h + tile_gap
+
+    def _tile(x, y, eyebrow, value, sublines=None, accent=ACCENT1):
+        _rect(sl, x, y, tile_w, tile_h, fill=LT_GRAY)
+        _rect(sl, x, y, Inches(0.06), tile_h, fill=accent)
+        _txt(sl, x + Inches(0.20), y + Inches(0.18),
+             tile_w - Inches(0.30), Inches(0.22),
+             text=eyebrow, sz=Pt(10), bold=True, color=GRAY50)
+        _txt(sl, x + Inches(0.20), y + Inches(0.46),
+             tile_w - Inches(0.30), Inches(0.60),
+             text=value, sz=Pt(22), bold=True, color=DK1)
+        for i, ln in enumerate(sublines or []):
+            _txt(sl, x + Inches(0.20), y + Inches(1.18 + i * 0.26),
+                 tile_w - Inches(0.30), Inches(0.26),
+                 text=ln, sz=Pt(10), color=DK1)
+
+    # Tile 1: PPA rate (regime 1, optional regime 2).
+    _r1_str = f"${ppa_rate:.3f}/kWh" if ppa_rate else "—"
+    _rate_sublines = [
+        f"{nem_regime_1 or 'NEM-3'}: {_r1_str} · {ppa_esc_1 or 0:.1f}%/yr escalator",
+    ]
+    if ppa_rate_r2 is not None and nem_regime_2:
+        _rate_sublines.append(
+            f"{nem_regime_2}: ${ppa_rate_r2:.3f}/kWh "
+            f"· {(ppa_esc_2 or ppa_esc_1 or 0):.1f}%/yr escalator"
+        )
+    _tile(tiles_x1, tiles_y1,
+          eyebrow="PPA RATE",
+          value=_r1_str,
+          sublines=_rate_sublines,
+          accent=ACCENT4)  # blue — financial terms
+
+    # Tile 2: Term + Savings target.
+    _sav_str = (
+        f"{customer_savings_pct:.1f}% year 1"
+        if customer_savings_pct is not None else "—"
+    )
+    _sav_sublines = [f"Contract term: {term_years} years"]
+    if customer_savings_pct_2 is not None and nem_regime_2:
+        _sav_sublines.append(
+            f"Savings target shifts to {customer_savings_pct_2:.1f}% "
+            f"in year {(num_years_1 or 0) + 1} ({nem_regime_2})"
+        )
+    _tile(tiles_x2, tiles_y1,
+          eyebrow="SAVINGS TARGET",
+          value=_sav_str,
+          sublines=_sav_sublines,
+          accent=ACCENT1)  # green — value
+
+    # Tile 3: Upfront cost + ownership.
+    _tile(tiles_x1, tiles_y2,
+          eyebrow="UPFRONT COST",
+          value="$0",
+          sublines=[
+              "38DN owns, maintains, and insures the system",
+              "Customer pays only for delivered kWh at the PPA rate",
+          ],
+          accent=ACCENT3)  # teal — operational
+
+    # Tile 4: System shape.
+    _sys_value = f"{system_size_kw:,.0f} kW PV"
+    _sys_sublines = []
+    if battery_kwh and battery_kwh > 0:
+        _sys_value += f" + {battery_kwh:,.0f} kWh BESS"
+        _sys_sublines.append("Battery dispatched to minimise peak demand")
+    _sys_sublines.append(
+        f"System offsets {result.annual_solar_kwh / result.annual_load_kwh * 100:.0f}% "
+        f"of annual load"
+        if result and result.annual_load_kwh else "Sized to site load profile"
+    )
+    _tile(tiles_x2, tiles_y2,
+          eyebrow="SYSTEM",
+          value=_sys_value,
+          sublines=_sys_sublines,
+          accent=DK1)  # navy — brand / equipment
+
+    _source(sl, "Commercial terms indicative; final contract language governs.")
+    _footer(sl, pg, total)
+
+
 def _slide_current_cost(prs, pg, total, ex, name, result, tariff, utility):
     """Baseline electricity cost analysis."""
     sl = prs.slides.add_slide(prs.slide_layouts[6])
@@ -2011,20 +2128,24 @@ def generate_proposal_pptx(
     has_p = annual_proj_df is not None and len(annual_proj_df) > 0
     _nem_switch = nem_regime_2 is not None and num_years_1 is not None
 
-    # Dynamic page count
-    total = 1  # cover (not numbered but counted)
-    if has_r: total += 2  # exec summary, current cost
-    total += 1  # system design
-    if has_r: total += 3  # year1, production/load, energy detail
-    # NEM regime detail slides
+    # Dynamic page count. Tranche 2 reorders the deck into a
+    # problem → commercial terms → economics → technical credibility →
+    # objections → alternatives → next-step narrative.
+    total = 1  # cover
+    if has_r: total += 1  # exec summary
+    if has_r: total += 1  # NEW: Key Commercial Terms
+    if has_r: total += 1  # current cost ("the challenge")
+    if has_r: total += 1  # year 1 comparison
+    if has_p: total += 1  # projections (moved earlier)
+    total += 1            # rate hedge (moved earlier — addresses objection)
+    total += 1            # system design (moved later — tech credibility)
+    if has_r: total += 2  # production/load, energy detail
     if has_r:
         total += 1  # regime 1 detail
         if _nem_switch: total += 1  # regime 2 detail
-    if has_p: total += 1  # projections
-    total += 1  # process
-    total += 1  # rate hedge
     if has_p: total += 1  # savings matrix
-    if comparison_ppas: total += 1  # alternatives considered appendix
+    if comparison_ppas: total += 1  # alternatives appendix
+    total += 1  # process
     total += 1  # next steps
 
     pg = 0; ex = 0
@@ -2034,10 +2155,9 @@ def generate_proposal_pptx(
     if ppa_rate is not None and has_r:
         _yr1_ppa_cost = ppa_rate * result.annual_solar_kwh
 
-    # Cover
+    # --- Hook: Cover → Exec → Commercial Terms --------------------------
     _slide_cover(prs, customer_name, address, utility_account, date_str, total)
 
-    # Exec Summary
     if has_r:
         pg += 1
         _slide_exec_summary(prs, pg, total, customer_name, result, tariff_name,
@@ -2051,19 +2171,36 @@ def generate_proposal_pptx(
                             ppa_cost=_yr1_ppa_cost,
                             narrative_bullets=narrative_bullets)
 
-    # Current Cost
+    # NEW: Key Commercial Terms — a single-page CFO-facing snapshot that
+    # lands right after the Exec narrative so a reader can lock the deal
+    # shape before diving into evidence.
+    if has_r:
+        pg += 1; ex += 1
+        _slide_key_commercial_terms(
+            prs, pg, total, ex,
+            result=result,
+            ppa_rate=ppa_rate,
+            ppa_rate_r2=ppa_rate_regime_2,
+            ppa_esc_1=ppa_escalator_pct,
+            ppa_esc_2=ppa_escalator_pct_2,
+            term_years=term_years,
+            customer_savings_pct=customer_savings_pct,
+            customer_savings_pct_2=customer_savings_pct_2,
+            nem_regime_1=nem_regime_1,
+            nem_regime_2=nem_regime_2,
+            num_years_1=num_years_1,
+            system_size_kw=system_size_kw,
+            battery_kwh=battery_kwh,
+        )
+
+    # --- Problem: baseline cost -----------------------------------------
     if has_r:
         pg += 1; ex += 1
         _slide_current_cost(prs, pg, total, ex, customer_name, result,
                             tariff_name, utility_name)
 
-    # System Design
-    pg += 1; ex += 1
-    _slide_system(prs, pg, total, ex, system_size_kw, dc_ac_ratio,
-                  battery_kwh, battery_kw, ppa_rate, ppa_escalator_pct,
-                  term_years, tariff_name, new_tariff_name)
-
-    # Year 1 Comparison
+    # --- Economics: Year-1 → Projections → Rate Hedge --------------------
+    # Year 1 Comparison (immediate economics)
     if has_r:
         pg += 1; ex += 1
         _slide_year1(prs, pg, total, ex, result, tariff_name,
@@ -2073,7 +2210,9 @@ def generate_proposal_pptx(
                      battery_kwh=battery_kwh,
                      nem_regime=nem_regime_1)
 
-    # Projections
+    # Projections moved before technical detail — shows the multi-year
+    # savings divergence while the reader's attention is still on economics.
+    _orig_df = annual_proj_df_original if annual_proj_df_original is not None else annual_proj_df
     if has_p:
         pg += 1; ex += 1
         _slide_projections(prs, pg, total, ex, annual_proj_df,
@@ -2082,41 +2221,8 @@ def generate_proposal_pptx(
                            num_years_1=num_years_1,
                            ppa_esc_2=ppa_escalator_pct_2)
 
-    # Production vs Load
-    if has_r:
-        pg += 1; ex += 1
-        _slide_production_load(prs, pg, total, ex, result, system_size_kw)
-
-    # Energy Detail
-    if has_r:
-        pg += 1; ex += 1
-        _slide_energy(prs, pg, total, ex, result, system_size_kw,
-                      battery_kwh=battery_kwh,
-                      nem_regime=nem_regime_1,
-                      ppa_cost=_yr1_ppa_cost)
-
-    # NEM Regime Detail Slides
-    _orig_df = annual_proj_df_original if annual_proj_df_original is not None else annual_proj_df
-    if has_r:
-        pg += 1; ex += 1
-        _r1_end = num_years_1 if _nem_switch else term_years
-        _slide_nem_detail(prs, pg, total, ex,
-                          nem_regime_1 or "NEM-3 / NVBT",
-                          1, _r1_end, result,
-                          proj_df=_orig_df)
-        if _nem_switch:
-            pg += 1; ex += 1
-            _slide_nem_detail(prs, pg, total, ex,
-                              nem_regime_2,
-                              num_years_1 + 1, term_years, result,
-                              proj_df=_orig_df)
-
-    # Process
-    pg += 1
-    _slide_process(prs, pg, total, system_size_kw, battery_kwh, battery_kw,
-                   ppa_rate, ppa_escalator_pct, utility_name, tariff_name, term_years)
-
-    # Rate Hedge — use original projection for accurate per-year PPA curve
+    # Rate Hedge now answers the "what if rates don't rise as fast?"
+    # objection immediately after the savings trajectory lands.
     _hedge_sav = customer_savings_pct if customer_savings_pct is not None else 10.0
     pg += 1; ex += 1
     _slide_rate_hedge(prs, pg, total, ex, utility_name,
@@ -2134,8 +2240,40 @@ def generate_proposal_pptx(
                       ppa_esc_2=ppa_escalator_pct_2,
                       ppa_rate_2=ppa_rate_regime_2)
 
-    # Savings Matrix — always use the original (utility-only) projection so
-    # PPA rate backsolve reflects true utility savings, not post-PPA bills.
+    # --- Technical credibility: System → Production → Energy → Regime --
+    pg += 1; ex += 1
+    _slide_system(prs, pg, total, ex, system_size_kw, dc_ac_ratio,
+                  battery_kwh, battery_kw, ppa_rate, ppa_escalator_pct,
+                  term_years, tariff_name, new_tariff_name)
+
+    if has_r:
+        pg += 1; ex += 1
+        _slide_production_load(prs, pg, total, ex, result, system_size_kw)
+
+    if has_r:
+        pg += 1; ex += 1
+        _slide_energy(prs, pg, total, ex, result, system_size_kw,
+                      battery_kwh=battery_kwh,
+                      nem_regime=nem_regime_1,
+                      ppa_cost=_yr1_ppa_cost)
+
+    if has_r:
+        pg += 1; ex += 1
+        _r1_end = num_years_1 if _nem_switch else term_years
+        _slide_nem_detail(prs, pg, total, ex,
+                          nem_regime_1 or "NEM-3 / NVBT",
+                          1, _r1_end, result,
+                          proj_df=_orig_df)
+        if _nem_switch:
+            pg += 1; ex += 1
+            _slide_nem_detail(prs, pg, total, ex,
+                              nem_regime_2,
+                              num_years_1 + 1, term_years, result,
+                              proj_df=_orig_df)
+
+    # --- Appendix: savings scenarios + alternatives + process + CTA -----
+    # Savings matrix uses the original (utility-only) projection so the
+    # PPA backsolve reflects true utility savings, not post-PPA bills.
     _matrix_df = annual_proj_df_original if annual_proj_df_original is not None else annual_proj_df
     if has_p:
         pg += 1; ex += 1
@@ -2147,7 +2285,6 @@ def generate_proposal_pptx(
                               ppa_escalator_pct=ppa_escalator_pct or 0.0,
                               ppa_escalator_pct_2=ppa_escalator_pct_2)
 
-    # Alternatives Considered (Proposal comparison appendix)
     if comparison_ppas:
         pg += 1
         _slide_alternatives_considered(
@@ -2156,7 +2293,12 @@ def generate_proposal_pptx(
             alternatives=comparison_ppas,
         )
 
-    # Next Steps
+    # Process slide relocated right before Next Steps so the operational
+    # reassurance lands immediately before the CTA.
+    pg += 1
+    _slide_process(prs, pg, total, system_size_kw, battery_kwh, battery_kw,
+                   ppa_rate, ppa_escalator_pct, utility_name, tariff_name, term_years)
+
     pg += 1
     _slide_next_steps(prs, pg, total, ppa_rate, ppa_escalator_pct, term_years)
 
