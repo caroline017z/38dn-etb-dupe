@@ -2887,7 +2887,7 @@ def _render_top_bar():
                     dt_idx = pd.date_range(f"{_preview_year}-01-01", periods=8760, freq="h")
                     monthly_avg = pd.Series(vals, index=dt_idx).resample("ME").mean()
                     import plotly.graph_objects as go
-                    fig = go.Figure(go.Bar(x=MONTH_NAMES, y=monthly_avg.values, marker_color="#00CC96"))
+                    fig = go.Figure(go.Bar(x=MONTH_NAMES, y=monthly_avg.values, marker_color="#45A750"))
                     fig.update_layout(title="Monthly Avg Export Rate ($/kWh)", yaxis_title="$/kWh", height=300, template="plotly_white")
                     st.plotly_chart(fig, width="stretch")
                 except Exception as e:
