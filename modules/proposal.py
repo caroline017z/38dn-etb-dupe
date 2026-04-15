@@ -645,8 +645,14 @@ def _slide_exec_summary(prs, pg, total, name, result, tariff, utility,
                         sys_kw, batt_kwh, ppa_rate, esc_pct, term,
                         customer_savings_pct=None, customer_savings_pct_2=None,
                         nem_regime_1=None, nem_regime_2=None,
-                        ppa_rate_regime_2=None, ppa_cost=None):
-    """Executive Summary — two-column financial + technical overview."""
+                        ppa_rate_regime_2=None, ppa_cost=None,
+                        narrative_bullets=None):
+    """Executive Summary — two-column financial + technical overview.
+
+    When ``narrative_bullets`` is supplied (list of short strings from the AI
+    narrative generator), they replace the auto-generated takeaway sentence
+    joined by `•` separators. Layout is preserved.
+    """
     sl = prs.slides.add_slide(prs.slide_layouts[6])
     _accent_rule(sl)
 
@@ -659,9 +665,13 @@ def _slide_exec_summary(prs, pg, total, name, result, tariff, utility,
     _action_title(sl, "Executive Summary")
     _subtitle(sl, f"{name}  |  {utility} {tariff}  |  {sys_kw:,.0f} kW-DC Solar"
               + (f" + {batt_kwh:,.0f} kWh BESS" if batt_kwh > 0 else ""))
-    _takeaway(sl,
-        f"Day-1 savings of {_fd(sav)} ({pct:.1f}%) with zero upfront capital. "
-        f"System offsets {offset:.0f}% of annual load and provides long-term rate certainty.")
+    if narrative_bullets:
+        # Join as a single callout; PPTX layout is tight so multiline risks overflow.
+        _takeaway(sl, "  •  ".join(str(b).strip() for b in narrative_bullets if b))
+    else:
+        _takeaway(sl,
+            f"Day-1 savings of {_fd(sav)} ({pct:.1f}%) with zero upfront capital. "
+            f"System offsets {offset:.0f}% of annual load and provides long-term rate certainty.")
 
     # ── Left column: Financial ──
     cx1 = ML; cx2 = ML + Inches(6.2)
@@ -1879,6 +1889,7 @@ def generate_proposal_pptx(
     customer_savings_pct_2: float | None = None,
     ppa_rate_regime_2: float | None = None,
     annual_proj_df_original: pd.DataFrame | None = None,
+    narrative_bullets: list[str] | None = None,
 ) -> bytes:
     """Generate an institutional-quality branded customer proposal PPTX."""
     prs = Presentation()
@@ -1924,7 +1935,8 @@ def generate_proposal_pptx(
                             nem_regime_1=nem_regime_1,
                             nem_regime_2=nem_regime_2,
                             ppa_rate_regime_2=ppa_rate_regime_2,
-                            ppa_cost=_yr1_ppa_cost)
+                            ppa_cost=_yr1_ppa_cost,
+                            narrative_bullets=narrative_bullets)
 
     # Current Cost
     if has_r:

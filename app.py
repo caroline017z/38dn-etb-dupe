@@ -279,26 +279,23 @@ def _render_savings_dashboard(
 
     st.markdown("")  # visual breather
 
-    # ── View toggle ──────────────────────────────────────────────────────
-    view = st.radio(
-        "Dashboard view",
-        ["💰 Financial Impact", "⚡ Energy Flow", "📊 Scenario Comparison", "📈 Cumulative Payback"],
-        horizontal=True,
-        key="sp_view",
-        label_visibility="collapsed",
-    )
-
+    # ── Stacked sections (no view-toggle radio — each lens scrollable) ─────
+    st.markdown("#### 💰 Financial Impact")
+    _sp_financial_view(result, pv_only_result, has_battery,
+                       NAVY, GREEN, BLUE, TEAL, AMBER, INK, FONT)
     st.divider()
 
-    if view.endswith("Financial Impact"):
-        _sp_financial_view(result, pv_only_result, has_battery,
-                           NAVY, GREEN, BLUE, TEAL, AMBER, INK, FONT)
-    elif view.endswith("Energy Flow"):
-        _sp_energy_view(result, NAVY, GREEN, BLUE, TEAL, INK, FONT)
-    elif view.endswith("Scenario Comparison"):
+    st.markdown("#### ⚡ Energy Flow")
+    _sp_energy_view(result, NAVY, GREEN, BLUE, TEAL, INK, FONT)
+    st.divider()
+
+    st.markdown("#### 📈 Cumulative Payback")
+    _sp_payback_view(main_projection, system_cost, NAVY, GREEN, BLUE, INK, FONT)
+
+    if has_battery and pv_only_result is not None and pv_batt_result is not None:
+        st.divider()
+        st.markdown("#### 📊 Scenario Comparison")
         _sp_scenario_view(result, pv_only_result, pv_batt_result, has_battery)
-    elif view.endswith("Cumulative Payback"):
-        _sp_payback_view(main_projection, system_cost, NAVY, GREEN, BLUE, INK, FONT)
 
     # ── Rate shift (conditional, always visible when applicable) ────────
     if summary.get("rate_shift_annual_savings") is not None:
@@ -565,8 +562,9 @@ def _render_ai_assistant_tab(
     """
     st.subheader("AI Assistant")
     st.caption(
-        "Narrative generation, bill ingestion, and tariff Q&A. Requires "
-        "`ANTHROPIC_API_KEY` in secrets or environment."
+        "Ask a question about the selected system, tariff, NEM regime, or "
+        "billing structure — or upload a utility bill for auto-extraction, "
+        "or generate proposal narrative bullets. Requires `ANTHROPIC_API_KEY`."
     )
 
     narrative_col, bill_col = st.columns(2)
@@ -767,6 +765,11 @@ def _render_sensitivity_tab(
     ]
 
     with out_col:
+        # Inner tabs so the tornado chart is always discoverable even before the
+        # user clicks Run Tornado — they can see the empty-state copy there.
+        mc_sub, tornado_sub = st.tabs(["📊 Monte Carlo", "🌪 Tornado"])
+
+    with mc_sub:
         placeholder = st.empty()
 
         # Counter for unique Plotly chart keys — Streamlit rejects duplicates,
@@ -839,6 +842,18 @@ def _render_sensitivity_tab(
             k1.metric("P10 NPV (Customer Savings)", f"${pct[10]/1_000_000:,.2f}MM")
             k2.metric("P50 NPV (Customer Savings)", f"${pct[50]/1_000_000:,.2f}MM")
             k3.metric("P90 NPV (Customer Savings)", f"${pct[90]/1_000_000:,.2f}MM")
+        elif st.session_state.get("sensitivity_mc_df") is None:
+            st.caption(
+                "Click **Run Monte Carlo** on the left to sample the NPV "
+                "distribution across the selected levers."
+            )
+
+    with tornado_sub:
+        if not run_tornado and st.session_state.get("sensitivity_tornado_df") is None:
+            st.caption(
+                "Click **Run Tornado** on the left for a ±10% one-at-a-time "
+                "sensitivity sweep — shows which lever moves NPV the most."
+            )
 
         if run_tornado:
             with st.spinner("Running tornado sweep…"):
@@ -1894,7 +1909,7 @@ def _render_top_bar():
                 # --- Per-meter expanders (config + upload only) ---
                 _nema_staged_uploads: dict[int, pd.DataFrame] = {}
                 for _lp_i, _lp_meter in enumerate(st.session_state["nema_meters"]):
-                    with st.expander(f"{'*' if _lp_meter.get('is_generating') else ''} {_lp_meter['name']}", expanded=(_lp_i < 2)):
+                    with st.expander(f"{'*' if _lp_meter.get('is_generating') else ''} {_lp_meter['name']}", expanded=False):
                         _lp_meter["name"] = st.text_input(
                             "Meter Name", value=_lp_meter["name"], key=f"mgmt_nema_name_{_lp_i}",
                         )
@@ -2041,7 +2056,7 @@ def _render_top_bar():
                         )
                         if _lp_chart_type == "Monthly Load":
                             monthly_kwh = pd.Series(vals, index=dt_idx).resample("ME").sum()
-                            fig = go.Figure(go.Bar(x=MONTH_NAMES, y=monthly_kwh.values, marker_color="#636EFA"))
+                            fig = go.Figure(go.Bar(x=MONTH_NAMES, y=monthly_kwh.values, marker_color="#1D6FA9"))
                             fig.update_layout(title="Monthly Load (kWh)", yaxis_title="kWh", **_chart_layout)
                             st.plotly_chart(fig, use_container_width=True)
                         elif _lp_chart_type == "Average Daily Profile":
@@ -2049,8 +2064,8 @@ def _render_top_bar():
                             _lp_avg_hourly = _lp_series.groupby(_lp_series.index.hour).mean()
                             fig = go.Figure(go.Scatter(
                                 x=list(range(24)), y=_lp_avg_hourly.values,
-                                mode="lines+markers", line=dict(color="#636EFA", width=2.5),
-                                marker=dict(size=5), fill="tozeroy", fillcolor="rgba(99,110,250,0.1)",
+                                mode="lines+markers", line=dict(color="#1D6FA9", width=2.5),
+                                marker=dict(size=5), fill="tozeroy", fillcolor="rgba(29,111,169,0.12)",
                             ))
                             fig.update_layout(
                                 title="Average Daily Load Profile",
@@ -2063,8 +2078,8 @@ def _render_top_bar():
                             _lp_sorted = np.sort(vals)[::-1]
                             fig = go.Figure(go.Scatter(
                                 x=list(range(1, 8761)), y=_lp_sorted,
-                                mode="lines", line=dict(color="#636EFA", width=2),
-                                fill="tozeroy", fillcolor="rgba(99,110,250,0.1)",
+                                mode="lines", line=dict(color="#1D6FA9", width=2),
+                                fill="tozeroy", fillcolor="rgba(29,111,169,0.12)",
                             ))
                             fig.update_layout(
                                 title="Load Duration Curve",
@@ -2163,7 +2178,7 @@ def _render_top_bar():
                         # Per-meter expanders
                         _ne_staged_uploads: dict[int, pd.DataFrame] = {}
                         for _ei, _em in enumerate(_ne_edit_meters):
-                            with st.expander(f"{'*' if _em.get('is_generating') else ''} {_em['name']}", expanded=(_ei < 2)):
+                            with st.expander(f"{'*' if _em.get('is_generating') else ''} {_em['name']}", expanded=False):
                                 _em["name"] = st.text_input(
                                     "Meter Name", value=_em["name"], key=f"edit_nema_name_{_ei}",
                                 )
@@ -2719,6 +2734,39 @@ def _render_sidebar():
     # =============================================================================
     with st.sidebar:
         st.header("System & Site Configuration")
+
+        # Inline progress badge: shows the user at a glance which core inputs
+        # are loaded. The detailed checklist still renders in the main pane
+        # when anything is missing.
+        _sb_prod = st.session_state.get("production_8760") is not None
+        _sb_load = st.session_state.get("load_8760") is not None
+        _sb_tariff = (
+            st.session_state.get("tariff") is not None
+            or st.session_state.get("ecc_cost_calculator") is not None
+        )
+        _sb_export = st.session_state.get("export_rates") is not None
+        _sb_checks = [("Prod", _sb_prod), ("Load", _sb_load),
+                      ("Tariff", _sb_tariff), ("Export", _sb_export)]
+        _sb_done = sum(1 for _, ok in _sb_checks if ok)
+        _sb_total = len(_sb_checks)
+        _sb_bar_color = "#45A750" if _sb_done == _sb_total else "#D48A1A" if _sb_done >= 2 else "#6b7280"
+        _sb_pills = "".join(
+            f'<span style="display:inline-block; padding:1px 7px; margin-right:4px; '
+            f'font-size:10px; font-weight:600; border-radius:10px; '
+            f'background:{"#45A750" if ok else "#e5e7eb"}; '
+            f'color:{"#ffffff" if ok else "#6b7280"};">{name}</span>'
+            for name, ok in _sb_checks
+        )
+        st.markdown(
+            f"""<div style="margin:-8px 0 10px 0;">
+                <div style="font-size:11px; color:{_sb_bar_color}; font-weight:600;
+                            letter-spacing:0.3px; margin-bottom:4px;">
+                    {_sb_done}/{_sb_total} inputs loaded
+                </div>
+                <div>{_sb_pills}</div>
+            </div>""",
+            unsafe_allow_html=True,
+        )
         st.caption("Complete each section below, then click **Run Simulation** in the main panel.")
 
         # --- Load a System Profile ---
@@ -2792,7 +2840,7 @@ def _render_sidebar():
             key="sb_system_type",
         )
 
-        with st.expander("Advanced PV Options"):
+        with st.expander("Advanced PV Options", expanded=False):
             module_type_label = st.selectbox(
                 "Module Type",
                 ["Standard", "Premium", "Thin Film"],
@@ -3101,7 +3149,7 @@ def _render_sidebar():
                 st.caption("Load a separate tariff for meters not using the generating meter's tariff.")
                 _pmt_loaded_tariffs = st.session_state.get("nema_meter_tariffs", {})
                 for _pmt_i, _pmt_m in _pmt_needs_tariff:
-                    with st.expander(f"Tariff for: {_pmt_m['name']}", expanded=True):
+                    with st.expander(f"Tariff for: {_pmt_m['name']}", expanded=False):
                         if st.session_state["available_rates"]:
                             _pmt_rate_options = {f"{r['name']}": r["label"] for r in st.session_state["available_rates"]}
                             _pmt_sel_name = st.selectbox(
@@ -4405,6 +4453,19 @@ ready_checks = {
         else True  # Not needed for NEM-1/NEM-2 or NEM-A (exports valued at retail rate)
     ),
 }
+
+# Rate-shift guard: when enabled, the user must have loaded an old-tariff
+# reference so the shift baseline is computable. Silent None-fallbacks used
+# to leave rate_shift_annual_savings empty without explanation.
+if st.session_state.get("rate_shift_enabled"):
+    if billing_engine == "Custom":
+        ready_checks["Rate-shift old tariff"] = (
+            st.session_state.get("rate_shift_old_tariff") is not None
+        )
+    else:
+        ready_checks["Rate-shift old tariff"] = (
+            st.session_state.get("rate_shift_old_ecc_calculator") is not None
+        )
 all_ready = all(ready_checks.values())
 
 if not all_ready:
@@ -4414,6 +4475,7 @@ if not all_ready:
         "Load profile": "Sidebar Section 3: upload an 8760 CSV or select a saved load profile",
         "Tariff schedule": "Sidebar Section 4: fetch and load a rate schedule. For NEM-A meters not using the generating meter's tariff, load per-meter tariffs below the rate selector.",
         "Export rates": "Sidebar Section 5: choose an export compensation method (saved profile, CSV upload, or flat rate)",
+        "Rate-shift old tariff": "Sidebar Section 4: pick an old tariff for the Rate Shift comparison and click **Load Old Tariff** (or disable Rate Shift).",
     }
     for check, status in ready_checks.items():
         if status:
@@ -4835,7 +4897,27 @@ def _render_results():
     else:
         result = cast(BillingResult, st.session_state["billing_result"])
 
-    tab_labels = ["Monthly Bills", "Grid Exchange", "Annual Projection", "Production vs Load", "Savings & Payback"]
+    # Persistent "Viewing" badge — survives tab switching so the user never
+    # loses track of which scenario the charts and tables reflect.
+    _scenario_badge_label = (
+        (scenario or ("PV + Battery" if has_battery else "PV Only"))
+        if has_battery else "PV Only"
+    )
+    _badge_color = "#45A750" if "Battery" in _scenario_badge_label else "#1D6FA9"
+    st.markdown(
+        f"""<div style="margin:6px 0 10px 0; display:flex; align-items:center; gap:10px;">
+            <span style="font-size:11px; color:#6b7280; text-transform:uppercase; letter-spacing:0.5px;">Viewing</span>
+            <span style="background:{_badge_color}; color:#ffffff; padding:3px 10px;
+                         border-radius:12px; font-size:12px; font-weight:600;">
+                {_scenario_badge_label}
+            </span>
+        </div>""",
+        unsafe_allow_html=True,
+    )
+
+    # Grid Exchange is now a sub-expander inside Monthly Bills (users were
+    # hopping between two tabs to cross-reference the same volumes).
+    tab_labels = ["Monthly Bills", "Annual Projection", "Production vs Load", "Savings & Payback"]
     if has_battery:
         tab_labels.append("Battery Analysis")
     tab_labels.append("PPA Rate")
@@ -4846,15 +4928,14 @@ def _render_results():
 
     # Assign tab variables
     tab1 = result_tabs[0]
-    tab_grid = result_tabs[1]
-    tab2 = result_tabs[2]
-    tab3 = result_tabs[3]
-    tab4 = result_tabs[4]
-    tab_batt = result_tabs[5] if has_battery else None
+    tab2 = result_tabs[1]
+    tab3 = result_tabs[2]
+    tab4 = result_tabs[3]
+    tab_batt = result_tabs[4] if has_battery else None
     tab_indexed = result_tabs[-4]      # PPA Rate
     tab_sensitivity = result_tabs[-3]  # Monte Carlo + tornado
     tab_ai = result_tabs[-2]           # AI Assistant
-    tab5 = result_tabs[-1]             # Export / Download (always last)
+    tab5 = result_tabs[-1]             # Downloads (always last)
 
     # Compute peak period index from tariff
     _tariff_for_peak = st.session_state["tariff"]
@@ -4962,33 +5043,30 @@ def _render_results():
                 f"${result.annual_nsc_adjustment:,.2f} (surplus valued at NSC rate instead of retail)"
             )
 
-    # --- Grid Exchange tab ---
-    with tab_grid:
-        st.subheader("Grid Import & Export by TOU Period")
-        ge_display, ge_raw = build_grid_exchange_summary(result, _peak_period_idx)
-
-        _ge_bold_cols = [c for c in ge_display.columns if "Total" in c]
-        st.markdown(render_styled_table(ge_display, bold_last_row=True, bold_cols=_ge_bold_cols), unsafe_allow_html=True)
+        # ── Grid Exchange breakdown (inline, was its own tab) ─────────
+        with st.expander("TOU breakdown — Grid Import & Export by TOU Period"):
+            st.caption(
+                "Monthly totals above, here decomposed into peak vs off-peak "
+                "import / export and their associated cost / credit."
+            )
+            ge_display, ge_raw = build_grid_exchange_summary(result, _peak_period_idx)
+            _ge_bold_cols = [c for c in ge_display.columns if "Total" in c]
+            st.markdown(
+                render_styled_table(ge_display, bold_last_row=True, bold_cols=_ge_bold_cols),
+                unsafe_allow_html=True,
+            )
 
     # --- Tab 2: Annual Summary ---
     with tab2:
         st.subheader(f"Annual Summary ({system_life_years}-Year)")
         projection_df = _main_projection
 
-        # Store projection for fragment access
-        st.session_state["_proj_display_df"] = projection_df.copy()
-
-        @st.fragment
-        def _render_projection_table():
-            _proj_detail = st.radio(
-                "View", ["Simple", "Detailed"], horizontal=True,
-                key="proj_view_toggle", label_visibility="collapsed",
-            )
-
-            display_proj = st.session_state["_proj_display_df"].copy()
-            # Cost outflows rendered as accounting negatives. Export (kWh)
-            # stays positive (volume quantity, not a dollar flow) and
-            # Export Credit stays positive (inflow).
+        # Pre-compute both Simple and Detailed display DataFrames once so the
+        # radio toggle swaps views without re-running the format pipeline.
+        # Keyed in session_state only to survive fragment reruns; cleared on
+        # every outer render to avoid cross-scenario staleness.
+        def _format_projection(pdf):
+            display_proj = pdf.copy()
             outflow_dollar_cols = [
                 "Bill w/o Solar ($)", "Energy ($)", "Demand ($)",
                 "Fixed ($)", "NBC ($)", "Bill w/ Solar ($)",
@@ -4996,9 +5074,6 @@ def _render_results():
             for col in outflow_dollar_cols:
                 if col in display_proj.columns:
                     display_proj[col] = display_proj[col].apply(lambda x: -x)
-
-            # Rename export sub-components with the ↳ indent prefix so the
-            # "Export (kWh)" total visually owns its Peak / Off-Peak rows.
             _rename = {}
             if "Export Peak (kWh)" in display_proj.columns:
                 _rename["Export Peak (kWh)"] = "↳ Peak (kWh)"
@@ -5006,29 +5081,38 @@ def _render_results():
                 _rename["Export Off-Peak (kWh)"] = "↳ Off-Peak (kWh)"
             if _rename:
                 display_proj = display_proj.rename(columns=_rename)
-
-            kwh_proj_cols = [c for c in display_proj.columns if "(kWh)" in c]
-            for col in kwh_proj_cols:
+            for col in [c for c in display_proj.columns if "(kWh)" in c]:
                 display_proj[col] = display_proj[col].apply(fmt_num)
-            kw_proj_cols = [c for c in display_proj.columns if "kW" in c and "(kWh)" not in c]
-            for col in kw_proj_cols:
+            for col in [c for c in display_proj.columns if "kW" in c and "(kWh)" not in c]:
                 display_proj[col] = display_proj[col].apply(fmt_num)
-            dollar_proj_cols = [c for c in display_proj.columns if "($)" in c]
-            for col in dollar_proj_cols:
+            for col in [c for c in display_proj.columns if "($)" in c]:
                 display_proj[col] = display_proj[col].apply(fmt_dollar)
+            return display_proj
 
-            if _proj_detail == "Simple":
-                _drop_cols = [
-                    "Load (kWh)", "Customer Load (kWh)", "Solar (kWh)",
-                    "Solar Offset (kWh)", "Import (kWh)", "Export (kWh)",
-                    "↳ Peak (kWh)", "↳ Off-Peak (kWh)",
-                    "Demand kW (PV)", "Demand kW (PV+BESS)",
-                    "Energy ($)", "Demand ($)", "Fixed ($)",
-                    "NBC ($)", "NSC Adj ($)",
-                ]
-                display_proj = display_proj.drop(
-                    columns=[c for c in _drop_cols if c in display_proj.columns]
-                )
+        _detailed_proj = _format_projection(projection_df)
+        _simple_drop = [
+            "Load (kWh)", "Customer Load (kWh)", "Solar (kWh)",
+            "Solar Offset (kWh)", "Import (kWh)", "Export (kWh)",
+            "↳ Peak (kWh)", "↳ Off-Peak (kWh)",
+            "Demand kW (PV)", "Demand kW (PV+BESS)",
+            "Energy ($)", "Demand ($)", "Fixed ($)",
+            "NBC ($)", "NSC Adj ($)",
+        ]
+        _simple_proj = _detailed_proj.drop(
+            columns=[c for c in _simple_drop if c in _detailed_proj.columns]
+        )
+        st.session_state["_proj_simple_df"] = _simple_proj
+        st.session_state["_proj_detailed_df"] = _detailed_proj
+
+        @st.fragment
+        def _render_projection_table():
+            _proj_detail = st.radio(
+                "View", ["Simple", "Detailed"], horizontal=True,
+                key="proj_view_toggle", label_visibility="collapsed",
+            )
+            display_proj = (st.session_state["_proj_detailed_df"]
+                            if _proj_detail == "Detailed"
+                            else st.session_state["_proj_simple_df"])
 
             _proj_bold = ["Calendar Year"] if "Calendar Year" in display_proj.columns else ["Year"]
             if "Export (kWh)" in display_proj.columns:
@@ -5194,7 +5278,7 @@ def _render_results():
                 fig_sz.add_trace(go.Scatter(
                     x=sz["size_kwh"], y=sz["net_bill"],
                     mode="lines+markers", name="Net Bill",
-                    line=dict(color="#636EFA", width=2.5),
+                    line=dict(color="#1D6FA9", width=2.5),
                     marker=dict(size=6),
                 ))
                 # Mark best point
@@ -5203,13 +5287,21 @@ def _render_results():
                     fig_sz.add_trace(go.Scatter(
                         x=best_row["size_kwh"], y=best_row["net_bill"],
                         mode="markers", name="Optimal",
-                        marker=dict(color="#EF553B", size=14, symbol="star"),
+                        marker=dict(color="#45A750", size=14, symbol="star"),
                     ))
                 fig_sz.update_layout(
-                    title="Net Annual Bill vs. Battery Size",
+                    title=dict(text="Net Annual Bill vs. Battery Size",
+                               font=dict(size=15, color="#0E2841")),
                     xaxis_title="Battery Capacity (kWh)",
                     yaxis_title="Net Annual Bill ($)",
                     template="plotly_white", height=400,
+                    font=dict(family="Aptos Narrow, Aptos, Calibri, Arial Narrow, sans-serif",
+                              size=12, color="#1A1A1A"),
+                    margin=dict(l=60, r=30, t=70, b=55),
+                    xaxis=dict(gridcolor="#E5E7EB", tickfont=dict(color="#1A1A1A")),
+                    yaxis=dict(gridcolor="#E5E7EB", tickfont=dict(color="#1A1A1A")),
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                                xanchor="right", x=1, font=dict(color="#1A1A1A", size=11)),
                 )
                 st.plotly_chart(fig_sz, width="stretch")
 
@@ -5824,6 +5916,35 @@ def _render_results():
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
+        # --- Monte Carlo sensitivity (if run) ---
+        _mc_df = st.session_state.get("sensitivity_mc_df")
+        if _mc_df is not None and len(_mc_df):
+            st.divider()
+            st.markdown("**Sensitivity — Monte Carlo samples**")
+            st.caption(
+                f"{len(_mc_df):,} samples from the last Monte Carlo run. Each row "
+                "contains the sampled lever values and the resulting NPV of "
+                "customer savings."
+            )
+            _mc_csv = _mc_df.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                label="Download Monte Carlo Samples (.csv)",
+                data=_mc_csv,
+                file_name="monte_carlo_samples.csv",
+                mime="text/csv",
+                key="dl_mc_csv",
+            )
+        _tornado_df = st.session_state.get("sensitivity_tornado_df")
+        if _tornado_df is not None and len(_tornado_df):
+            _t_csv = _tornado_df.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                label="Download Tornado Results (.csv)",
+                data=_t_csv,
+                file_name="tornado_sensitivity.csv",
+                mime="text/csv",
+                key="dl_tornado_csv",
+            )
+
         # --- Customer Proposal (PPTX) ---
         st.divider()
         st.subheader("Customer Proposal (PPTX)")
@@ -5949,6 +6070,47 @@ def _render_results():
             _batt_cfg = st.session_state.get("battery_config")
             _batt_kw = _batt_cap / (_batt_cfg.battery_hours if _batt_cfg else 4.0) if _batt_cap > 0 else 0
 
+            # --- AI executive summary narrative (optional) ---
+            _narrative_on = st.checkbox(
+                "Include AI-generated executive summary bullets",
+                value=bool(st.session_state.get("ai_narrative_bullets")),
+                key="prop_narrative_toggle",
+                help=(
+                    "Generates 3–5 factual bullets from the current simulation "
+                    "and uses them in place of the default takeaway sentence on "
+                    "the Executive Summary slide. Requires ANTHROPIC_API_KEY."
+                ),
+            )
+            _narrative_bullets = st.session_state.get("ai_narrative_bullets")
+            if _narrative_on:
+                if _narrative_bullets:
+                    with st.expander("Preview bullets", expanded=False):
+                        for _b in _narrative_bullets:
+                            st.markdown(f"- {_b}")
+                if st.button("Regenerate bullets", key="prop_narrative_regen"):
+                    try:
+                        _prop_life_sav = float(_scenario.get("lifetime_savings") or 0.0)
+                        _ctx = _AIProposalContext(
+                            customer_name=prop_customer or "Customer",
+                            site_address=prop_address or "",
+                            system_size_kw=float(system_size_kw or 0.0),
+                            battery_capacity_kwh=float(_batt_cap or 0.0),
+                            nem_regime=nem_regime_1 or "NEM-3",
+                            year1_savings_usd=float(getattr(result, "annual_savings", 0.0) or 0.0),
+                            year1_bill_without_solar_usd=float(getattr(result, "annual_bill_without_solar", 0.0) or 0.0),
+                            year1_bill_with_solar_usd=float(getattr(result, "annual_bill_with_solar", 0.0) or 0.0),
+                            savings_pct=float(getattr(result, "savings_pct", 0.0) or 0.0),
+                            horizon_years=int(prop_term),
+                            total_projected_savings_usd=_prop_life_sav,
+                            ppa_rate_usd_per_kwh=(_prop_ppa_rate if _prop_ppa_rate > 0 else None),
+                        )
+                        _bullets = _ai_generate_exec_summary(_ctx)
+                        st.session_state["ai_narrative_bullets"] = _bullets
+                        _narrative_bullets = _bullets
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Narrative generation failed: {exc}")
+
             if st.button("Generate Customer Proposal", type="primary", key="btn_gen_proposal"):
                 if not prop_customer:
                     st.warning("Please enter a customer name.")
@@ -6005,6 +6167,10 @@ def _render_results():
                             customer_savings_pct_2=_prop_sav_2 if nem_switch else None,
                             ppa_rate_regime_2=_prop_ppa_rate_r2,
                             annual_proj_df_original=_prop_proj_original,
+                            narrative_bullets=(
+                                st.session_state.get("ai_narrative_bullets")
+                                if _narrative_on else None
+                            ),
                         )
                     _safe_name = prop_customer.replace(" ", "_")[:30]
                     st.download_button(
