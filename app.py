@@ -229,6 +229,321 @@ def _check_battery_solver(result: "BillingResult"):
             )
 
 
+def _render_savings_dashboard(
+    *,
+    result,
+    pv_only_result,
+    pv_batt_result,
+    system_cost: float,
+    system_life_years: int,
+    has_battery: bool,
+    main_projection,
+) -> None:
+    """Dashboard-style Savings & Payback view.
+
+    Headline KPIs top, a view toggle to switch the contextual chart between
+    Financial Impact / Energy Flow / Scenario Comparison / Cumulative Payback,
+    and a unified Scenario Comparison table + optional Rate Shift block.
+    """
+    import plotly.graph_objects as go
+    from modules.outputs import (
+        build_savings_summary,
+    )
+
+    NAVY, GREEN, BLUE, TEAL, AMBER = "#0E2841", "#45A750", "#1D6FA9", "#518484", "#D48A1A"
+    INK = "#1A1A1A"
+    FONT = "Aptos Narrow, Aptos, Calibri, Arial Narrow, sans-serif"
+
+    st.subheader("Savings & Payback")
+
+    summary = build_savings_summary(result, system_cost)
+    annual_savings = float(summary["annual_savings"])
+    savings_pct = float(summary["savings_pct"])
+    payback_yrs = summary.get("simple_payback_years")
+
+    # Cumulative 20-yr savings from the projection (more accurate than annual * N
+    # because it reflects escalators / degradation).
+    try:
+        lifetime_savings = float(main_projection["Cumulative Savings ($)"].iloc[-1])
+    except Exception:
+        lifetime_savings = annual_savings * int(system_life_years)
+
+    # ── Headline KPI row ─────────────────────────────────────────────────
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Year-1 Savings", f"${annual_savings:,.0f}", delta=f"{savings_pct:.1f}%")
+    k2.metric(f"{system_life_years}-yr Cumulative Savings",
+              f"${lifetime_savings:,.0f}")
+    k3.metric("Simple Payback",
+              f"{payback_yrs:.1f} yrs" if payback_yrs is not None else "N/A")
+    k4.metric("System Cost", f"${float(system_cost):,.0f}")
+
+    st.markdown("")  # visual breather
+
+    # ── View toggle ──────────────────────────────────────────────────────
+    view = st.radio(
+        "Dashboard view",
+        ["💰 Financial Impact", "⚡ Energy Flow", "📊 Scenario Comparison", "📈 Cumulative Payback"],
+        horizontal=True,
+        key="sp_view",
+        label_visibility="collapsed",
+    )
+
+    st.divider()
+
+    if view.endswith("Financial Impact"):
+        _sp_financial_view(result, pv_only_result, has_battery,
+                           NAVY, GREEN, BLUE, TEAL, AMBER, INK, FONT)
+    elif view.endswith("Energy Flow"):
+        _sp_energy_view(result, NAVY, GREEN, BLUE, TEAL, INK, FONT)
+    elif view.endswith("Scenario Comparison"):
+        _sp_scenario_view(result, pv_only_result, pv_batt_result, has_battery)
+    elif view.endswith("Cumulative Payback"):
+        _sp_payback_view(main_projection, system_cost, NAVY, GREEN, BLUE, INK, FONT)
+
+    # ── Rate shift (conditional, always visible when applicable) ────────
+    if summary.get("rate_shift_annual_savings") is not None:
+        st.divider()
+        st.markdown("##### Rate Shift Analysis")
+        rs1, rs2, rs3 = st.columns(3)
+        rs1.metric("Old Rate Baseline",
+                   f"${float(result.old_rate_annual_baseline):,.0f}")
+        rs2.metric("Rate Shift Savings",
+                   f"${float(summary['rate_shift_annual_savings']):,.0f}/yr")
+        rs3.metric("Total Combined Savings",
+                   f"${float(summary['total_annual_savings']):,.0f}/yr")
+
+
+def _sp_financial_view(result, pv_only_result, has_battery, NAVY, GREEN, BLUE, TEAL, AMBER, INK, FONT) -> None:
+    """Monthly bill: no-solar baseline vs with-solar stacked components.
+    Savings shown as a filled band between the two."""
+    import plotly.graph_objects as go
+    df = result.monthly_summary
+    months = MONTH_NAMES
+    fig = go.Figure()
+
+    # With-solar stacked components (positive)
+    fig.add_trace(go.Bar(x=months, y=df["energy_cost"], name="Energy",
+                         marker_color=NAVY, opacity=0.92))
+    fig.add_trace(go.Bar(x=months, y=df["total_demand_charge"], name="Demand",
+                         marker_color=BLUE, opacity=0.92))
+    fig.add_trace(go.Bar(x=months, y=df["fixed_charge"], name="Fixed",
+                         marker_color=TEAL, opacity=0.92))
+    if "nbc_charge" in df.columns and df["nbc_charge"].sum() > 0:
+        fig.add_trace(go.Bar(x=months, y=df["nbc_charge"], name="NBC",
+                             marker_color=AMBER, opacity=0.92))
+    fig.add_trace(go.Bar(x=months, y=-df["export_credit"], name="Export Credit",
+                         marker_color=GREEN, opacity=0.92))
+
+    # Baseline (no-solar) line
+    if result.monthly_baseline_details is not None:
+        baseline = [d["total"] for d in result.monthly_baseline_details]
+        fig.add_trace(go.Scatter(
+            x=months, y=baseline, name="Bill w/o Solar (baseline)",
+            mode="lines+markers",
+            line=dict(color="#1A1A1A", width=2.5, dash="dash"),
+            marker=dict(size=7, color="#1A1A1A"),
+        ))
+
+    fig.update_layout(
+        title=dict(text="Monthly Bill: With-Solar Components vs No-Solar Baseline",
+                   font=dict(size=15, color=NAVY)),
+        xaxis_title="Month", yaxis_title="Cost ($)",
+        barmode="relative", template="plotly_white", height=420,
+        font=dict(family=FONT, size=12, color=INK),
+        margin=dict(l=60, r=30, t=70, b=55),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                    xanchor="right", x=1, font=dict(color=INK, size=11)),
+        xaxis=dict(tickfont=dict(color=INK), title_font=dict(color=INK)),
+        yaxis=dict(tickfont=dict(color=INK), title_font=dict(color=INK),
+                   gridcolor="#E5E7EB"),
+    )
+    st.plotly_chart(fig, use_container_width=True, key="sp_financial_chart")
+
+    if has_battery and pv_only_result is not None:
+        batt_value = (pv_only_result.annual_bill_with_solar
+                      - result.annual_bill_with_solar)
+        st.caption(
+            f"Battery contributes **${batt_value:,.0f}/yr** of additional savings "
+            f"beyond PV-only (demand reduction + export arbitrage)."
+        )
+
+
+def _sp_energy_view(result, NAVY, GREEN, BLUE, TEAL, INK, FONT) -> None:
+    """Monthly load / solar / import / export — kWh view of the same year."""
+    import plotly.graph_objects as go
+    df = result.monthly_summary
+    months = MONTH_NAMES
+    fig = go.Figure()
+
+    fig.add_trace(go.Bar(x=months, y=df["load_kwh"], name="Load",
+                         marker_color=NAVY, opacity=0.88))
+    fig.add_trace(go.Bar(x=months, y=df["solar_kwh"], name="Solar Production",
+                         marker_color=GREEN, opacity=0.88))
+    fig.add_trace(go.Scatter(x=months, y=df["import_kwh"], name="Net Import",
+                             mode="lines+markers",
+                             line=dict(color=BLUE, width=2.5),
+                             marker=dict(size=7, color=BLUE)))
+    fig.add_trace(go.Scatter(x=months, y=df["export_kwh"], name="Net Export",
+                             mode="lines+markers",
+                             line=dict(color=TEAL, width=2.5, dash="dot"),
+                             marker=dict(size=7, color=TEAL)))
+
+    # Self-consumption fraction overlay (secondary axis)
+    self_cons = (df["solar_kwh"] - df["export_kwh"]).clip(lower=0)
+    self_cons_pct = (self_cons / df["solar_kwh"].replace(0, np.nan) * 100).fillna(0)
+    fig.add_trace(go.Scatter(
+        x=months, y=self_cons_pct, name="Self-Consumption %",
+        mode="lines+markers", yaxis="y2",
+        line=dict(color="#D48A1A", width=2, dash="dashdot"),
+        marker=dict(size=6, color="#D48A1A"),
+    ))
+    fig.update_layout(
+        title=dict(text="Monthly Energy Flow: Load, Solar, Grid Exchange",
+                   font=dict(size=15, color=NAVY)),
+        xaxis_title="Month", yaxis_title="Energy (kWh)",
+        yaxis2=dict(title="Self-Consumption (%)", overlaying="y", side="right",
+                    range=[0, 100], tickfont=dict(color="#D48A1A"),
+                    title_font=dict(color="#D48A1A")),
+        barmode="group", template="plotly_white", height=440,
+        font=dict(family=FONT, size=12, color=INK),
+        margin=dict(l=60, r=70, t=70, b=55),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                    xanchor="right", x=1, font=dict(color=INK, size=11)),
+        xaxis=dict(tickfont=dict(color=INK)),
+        yaxis=dict(tickfont=dict(color=INK), gridcolor="#E5E7EB"),
+    )
+    st.plotly_chart(fig, use_container_width=True, key="sp_energy_chart")
+
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Annual Load", f"{result.annual_load_kwh:,.0f} kWh")
+    k2.metric("Annual Solar", f"{result.annual_solar_kwh:,.0f} kWh")
+    solar_offset_pct = (
+        result.annual_solar_kwh / result.annual_load_kwh * 100
+        if result.annual_load_kwh > 0 else 0.0
+    )
+    k3.metric("Solar Offset", f"{solar_offset_pct:.1f}%")
+    annual_self_pct = (
+        (result.annual_solar_kwh - result.annual_export_kwh)
+        / result.annual_solar_kwh * 100
+        if result.annual_solar_kwh > 0 else 0.0
+    )
+    k4.metric("Self-Consumption", f"{annual_self_pct:.1f}%")
+
+
+def _sp_scenario_view(result, pv_only_result, pv_batt_result, has_battery) -> None:
+    """Side-by-side No-Solar / PV-Only / PV+Battery comparison. The existing
+    detailed table surfaces the per-component breakdown; this view is the
+    primary way to see the battery's incremental value."""
+    if not has_battery or pv_only_result is None or pv_batt_result is None:
+        st.info(
+            "Scenario comparison is most useful when a battery is enabled — "
+            "it shows the PV-only vs PV+Battery delta. With PV only, the "
+            "primary savings number is the headline above."
+        )
+        pv_only_result = pv_only_result or result
+
+    cmp_data = {
+        "Metric": [
+            "Annual Bill",
+            "Energy Charges",
+            "Demand Charges",
+            "Export Credit",
+            "Savings vs No-Solar",
+        ],
+        "No Solar": [
+            fmt_dollar(-result.annual_bill_without_solar),
+            "—", "—", "—", "—",
+        ],
+        "PV Only": [
+            fmt_dollar(-pv_only_result.annual_bill_with_solar),
+            fmt_dollar(-pv_only_result.annual_energy_cost),
+            fmt_dollar(-pv_only_result.annual_demand_cost),
+            fmt_dollar(pv_only_result.annual_export_credit),
+            fmt_dollar(pv_only_result.annual_savings),
+        ],
+    }
+    if has_battery and pv_batt_result is not None:
+        cmp_data["PV + Battery"] = [
+            fmt_dollar(-pv_batt_result.annual_bill_with_solar),
+            fmt_dollar(-pv_batt_result.annual_energy_cost),
+            fmt_dollar(-pv_batt_result.annual_demand_cost),
+            fmt_dollar(pv_batt_result.annual_export_credit),
+            fmt_dollar(pv_batt_result.annual_savings),
+        ]
+        battery_value = (pv_only_result.annual_bill_with_solar
+                         - pv_batt_result.annual_bill_with_solar)
+        cmp_data["Metric"].append("Battery Incremental Value")
+        cmp_data["No Solar"].append("—")
+        cmp_data["PV Only"].append("—")
+        cmp_data["PV + Battery"].append(fmt_dollar(battery_value))
+
+    if (st.session_state.get("rate_shift_enabled")
+            and pv_only_result.rate_shift_annual_savings is not None):
+        cmp_data["Metric"].append("Rate Shift Savings")
+        cmp_data["No Solar"].append("—")
+        cmp_data["PV Only"].append(fmt_dollar(pv_only_result.rate_shift_annual_savings))
+        if has_battery and pv_batt_result is not None:
+            cmp_data["PV + Battery"].append(fmt_dollar(pv_batt_result.rate_shift_annual_savings))
+
+    st.markdown(
+        render_styled_table(pd.DataFrame(cmp_data), bold_cols=["Metric"]),
+        unsafe_allow_html=True,
+    )
+    st.caption(
+        "Bill components shown as accounting negatives; Export Credit and Savings "
+        "are positive. Battery Incremental Value = PV-only annual bill − PV+Battery annual bill."
+    )
+
+
+def _sp_payback_view(projection, system_cost, NAVY, GREEN, BLUE, INK, FONT) -> None:
+    """Cumulative savings vs system cost — crosspoint visualises payback."""
+    import plotly.graph_objects as go
+    if projection is None or "Cumulative Savings ($)" not in projection.columns:
+        st.info("Projection not available.")
+        return
+
+    x = projection["Year"]
+    cum = projection["Cumulative Savings ($)"]
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=x, y=cum, name="Cumulative Solar Savings",
+        mode="lines+markers",
+        line=dict(color=GREEN, width=3),
+        marker=dict(size=7, color=GREEN),
+        fill="tozeroy",
+        fillcolor="rgba(69,167,80,0.12)",
+    ))
+    fig.add_hline(
+        y=system_cost, line_dash="dash", line_color=NAVY, line_width=2.5,
+        annotation_text=f"<b>System Cost</b>: ${system_cost:,.0f}",
+        annotation_position="top left",
+        annotation_font=dict(color=NAVY, size=12),
+    )
+    # Find approximate payback year (first year cum >= cost)
+    crossed = cum[cum >= system_cost]
+    if len(crossed):
+        xp = projection.loc[crossed.index[0], "Year"]
+        fig.add_vline(
+            x=xp, line_dash="dot", line_color=BLUE, line_width=2,
+            annotation_text=f"<b>Payback</b> yr {int(xp)}",
+            annotation_position="top",
+            annotation_font=dict(color=BLUE, size=12),
+        )
+    fig.update_layout(
+        title=dict(text="Cumulative Savings vs System Cost",
+                   font=dict(size=15, color=NAVY)),
+        xaxis_title="Year", yaxis_title="$",
+        template="plotly_white", height=420,
+        font=dict(family=FONT, size=12, color=INK),
+        margin=dict(l=60, r=30, t=70, b=55),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                    xanchor="right", x=1, font=dict(color=INK, size=11)),
+        xaxis=dict(gridcolor="#E5E7EB", tickfont=dict(color=INK)),
+        yaxis=dict(gridcolor="#E5E7EB", tickfont=dict(color=INK)),
+    )
+    st.plotly_chart(fig, use_container_width=True, key="sp_payback_chart")
+
+
 def _render_ai_assistant_tab(
     *,
     result,
@@ -369,14 +684,24 @@ def _render_sensitivity_tab(
     import numpy as np
     import plotly.graph_objects as go
 
-    st.subheader("Sensitivity Analysis")
-    st.caption(
-        "Projection-level Monte Carlo and tornado — year-1 billing is held "
-        "fixed; escalators and degradation are perturbed around the base "
-        "case to quantify 20-year NPV risk."
-    )
+    # 38DN palette
+    NAVY = "#0E2841"
+    GREEN = "#45A750"
+    BLUE = "#1D6FA9"
+    TEAL = "#518484"
+    GRAY50 = "#666666"
 
-    cfg_col, out_col = st.columns([0.38, 0.62])
+    st.subheader("Sensitivity Analysis")
+    st.markdown(
+        "Projection-level Monte Carlo and tornado — **year-1 billing is held fixed**; "
+        "escalators and degradation are perturbed around the base case. "
+        "The reported metric is **NPV of customer savings** over the horizon, "
+        "discounted at the chosen rate, net of the up-front system cost. "
+        "Positive values = customer comes out ahead."
+    )
+    st.markdown("")  # one-line visual breather
+
+    cfg_col, out_col = st.columns([0.38, 0.62], gap="large")
 
     with cfg_col:
         years = st.number_input(
@@ -419,29 +744,46 @@ def _render_sensitivity_tab(
     with out_col:
         placeholder = st.empty()
 
+        # Counter for unique Plotly chart keys — Streamlit rejects duplicates,
+        # and the final draw happens at the same len(npvs) as the last progress tick.
+        draw_counter = {"n": 0}
+
         def _draw_mc(npvs: "np.ndarray", final: bool) -> None:
+            draw_counter["n"] += 1
             pct = _sens_percentiles(npvs)
             fig = go.Figure()
             fig.add_trace(go.Histogram(
-                x=npvs, nbinsx=40, marker_color="#2E86AB", opacity=0.85, name="NPV",
+                x=npvs, nbinsx=40, marker_color=NAVY, opacity=0.88,
+                name="NPV of customer savings",
             ))
-            for p, color in [(10, "#D62728"), (50, "#111111"), (90, "#2CA02C")]:
+            for p, color in [(10, BLUE), (50, NAVY), (90, GREEN)]:
                 fig.add_vline(
-                    x=pct[p], line_dash="dash", line_color=color,
-                    annotation_text=f"P{p}=${pct[p]/1000:,.0f}k",
+                    x=pct[p], line_dash="dash", line_color=color, line_width=2,
+                    annotation_text=f"<b>P{p}</b>  ${pct[p]/1000:,.0f}k",
                     annotation_position="top",
+                    annotation_font=dict(color=color, size=12),
                 )
             fig.update_layout(
-                title=f"NPV distribution — {len(npvs):,} sample{'s' if len(npvs)!=1 else ''}"
-                      + (" (final)" if final else " (running…)"),
-                xaxis_title="20-year NPV ($)",
+                title=dict(
+                    text=f"NPV of customer savings — {len(npvs):,} sample"
+                         f"{'s' if len(npvs)!=1 else ''}"
+                         + (" (final)" if final else " (running…)"),
+                    font=dict(size=15, color=NAVY),
+                ),
+                xaxis_title="NPV ($)",
                 yaxis_title="Count",
                 template="plotly_white",
                 bargap=0.02,
-                height=380,
-                margin=dict(l=40, r=20, t=50, b=40),
+                height=400,
+                font=dict(family="Aptos Narrow, Aptos, Calibri, Arial Narrow, sans-serif",
+                          size=12, color="#1A1A1A"),
+                margin=dict(l=50, r=30, t=70, b=50),
+                showlegend=False,
             )
-            placeholder.plotly_chart(fig, use_container_width=True, key=f"mc_{len(npvs)}")
+            placeholder.plotly_chart(
+                fig, use_container_width=True,
+                key=f"mc_{draw_counter['n']}_{'final' if final else 'live'}",
+            )
 
         if run_mc:
             with st.status("Running Monte Carlo…", expanded=True) as status:
@@ -489,29 +831,43 @@ def _render_sensitivity_tab(
             base = tdf.attrs.get("base_npv", 0.0)
 
             fig = go.Figure()
-            # Bars drawn as (base -> low) and (base -> high) segments.
+            # Bars drawn as (base -> low) and (base -> high) segments around base NPV.
             for _, row in tdf[::-1].iterrows():
                 fig.add_trace(go.Bar(
                     y=[row["lever"]], x=[row["low_npv"] - base],
                     base=base, orientation="h",
-                    marker_color="#D62728", showlegend=False,
-                    hovertemplate=f"{row['lever']}: low→${{:,.0f}}".replace("{", "{"),
+                    marker_color=BLUE, opacity=0.9, showlegend=False,
+                    hovertemplate=(
+                        f"{row['lever']}<br>low: ${row['low_npv']/1000:,.1f}k<extra></extra>"
+                    ),
                 ))
                 fig.add_trace(go.Bar(
                     y=[row["lever"]], x=[row["high_npv"] - base],
                     base=base, orientation="h",
-                    marker_color="#2CA02C", showlegend=False,
+                    marker_color=GREEN, opacity=0.9, showlegend=False,
+                    hovertemplate=(
+                        f"{row['lever']}<br>high: ${row['high_npv']/1000:,.1f}k<extra></extra>"
+                    ),
                 ))
-            fig.add_vline(x=base, line_color="#111111", line_width=2,
-                          annotation_text=f"Base NPV=${base/1000:,.0f}k",
-                          annotation_position="top")
+            fig.add_vline(
+                x=base, line_color=NAVY, line_width=2.5,
+                annotation_text=f"<b>Base NPV</b>  ${base/1000:,.0f}k",
+                annotation_position="top",
+                annotation_font=dict(color=NAVY, size=12),
+            )
             fig.update_layout(
-                title="Tornado — ±10% around base",
+                title=dict(
+                    text="Tornado — impact on NPV of customer savings (±10% lever swing around base)",
+                    font=dict(size=15, color=NAVY),
+                ),
                 xaxis_title="NPV ($)",
+                yaxis_title="",
                 barmode="overlay",
                 template="plotly_white",
-                height=380,
-                margin=dict(l=40, r=20, t=50, b=40),
+                height=max(260, 80 + 55 * len(tdf)),
+                font=dict(family="Aptos Narrow, Aptos, Calibri, Arial Narrow, sans-serif",
+                          size=12, color="#1A1A1A"),
+                margin=dict(l=120, r=30, t=70, b=50),
             )
             st.plotly_chart(fig, use_container_width=True)
             st.dataframe(
@@ -647,6 +1003,9 @@ def _parse_8760_csv(df: pd.DataFrame) -> np.ndarray:
 
     If the first numeric column is an hour-year index (1-8760 sequential integers),
     skip it and use the next numeric column instead.
+
+    Raises if the selected column has blank / non-numeric cells — those would
+    become NaN and silently poison downstream billing + projection math.
     """
     numeric_cols = df.select_dtypes(include=[np.number]).columns
     if len(numeric_cols) == 0:
@@ -656,10 +1015,47 @@ def _parse_8760_csv(df: pd.DataFrame) -> np.ndarray:
         first_vals = df[col].values
         if np.array_equal(first_vals, np.arange(1, 8761)):
             col = numeric_cols[1]
-    values = np.asarray(df[col].values)
+    values = np.asarray(df[col].values, dtype=float)
     if len(values) != 8760:
         raise ValueError(f"Expected 8760 rows, got {len(values)}.")
-    return values
+
+    bad = ~np.isfinite(values)
+    n_bad = int(bad.sum())
+    if n_bad == 0:
+        return values
+
+    # Largest run of consecutive NaNs.
+    run = max_run = 0
+    for flag in bad:
+        run = run + 1 if flag else 0
+        max_run = max(max_run, run)
+
+    MAX_FILLABLE_HOURS = 10
+    MAX_FILLABLE_RUN = 3
+    if n_bad > MAX_FILLABLE_HOURS or max_run > MAX_FILLABLE_RUN:
+        bad_idx = np.where(bad)[0]
+        sample = ", ".join(str(int(i) + 2) for i in bad_idx[:5])
+        more = f" (+{len(bad_idx) - 5} more)" if len(bad_idx) > 5 else ""
+        raise ValueError(
+            f"Column '{col}' has {n_bad:,} blank/non-numeric cells "
+            f"(longest consecutive gap: {max_run} hour{'s' if max_run != 1 else ''}). "
+            f"First at CSV row{'s' if n_bad > 1 else ''}: {sample}{more}. "
+            f"Too many gaps to auto-fill — clean the CSV and re-upload."
+        )
+
+    # Small, isolated gaps — linear-interpolate with a visible warning.
+    filled = pd.Series(values).interpolate(method="linear",
+                                           limit=MAX_FILLABLE_RUN,
+                                           limit_direction="both").to_numpy()
+    bad_idx = np.where(bad)[0]
+    rows_str = ", ".join(str(int(i) + 2) for i in bad_idx[:5])
+    more = f" (+{len(bad_idx) - 5} more)" if len(bad_idx) > 5 else ""
+    st.warning(
+        f"Filled {n_bad} missing hour{'s' if n_bad != 1 else ''} in column '{col}' "
+        f"via linear interpolation (CSV row{'s' if n_bad > 1 else ''}: {rows_str}{more}). "
+        f"Review the source data if this was unexpected."
+    )
+    return filled
 
 
 # =============================================================================
@@ -4492,28 +4888,28 @@ def _render_results():
             "Solar (kWh)": fmt_num(raw['solar_kwh'].sum()),
             "Import (kWh)": fmt_num(raw['import_kwh'].sum()),
             "Export (kWh)": fmt_num(raw['export_kwh'].sum()),
-            "Export Peak (kWh)": fmt_num(raw['export_peak_kwh'].sum()),
-            "Export Off-Peak (kWh)": fmt_num(raw['export_offpeak_kwh'].sum()),
+            "↳ Peak (kWh)": fmt_num(raw['export_peak_kwh'].sum()),
+            "↳ Off-Peak (kWh)": fmt_num(raw['export_offpeak_kwh'].sum()),
         })
         if pv_only_for_display is not None:
             totals["Demand kW (PV)"] = fmt_num(pv_only_for_display.monthly_summary['peak_demand_kw'].max())
             totals["Demand kW (PV+BESS)"] = fmt_num(raw['peak_demand_kw'].max())
         else:
             totals["Demand kW (PV)"] = fmt_num(raw['peak_demand_kw'].max())
+        # Cost outflows negated so they render as red accounting negatives,
+        # matching build_monthly_summary_display row formatting.
         totals.update({
-            "Energy ($)": fmt_dollar(raw['energy_cost'].sum()),
-            "Demand ($)": fmt_dollar(raw['total_demand_charge'].sum()),
-            "Fixed ($)": fmt_dollar(raw['fixed_charge'].sum()),
+            "Energy ($)": fmt_dollar(-raw['energy_cost'].sum()),
+            "Demand ($)": fmt_dollar(-raw['total_demand_charge'].sum()),
+            "Fixed ($)": fmt_dollar(-raw['fixed_charge'].sum()),
         })
-        # NBC column (NEM-2 only)
         _has_nbc = "nbc_charge" in raw.columns and raw["nbc_charge"].sum() > 0
         if _has_nbc:
-            totals["NBC ($)"] = fmt_dollar(raw['nbc_charge'].sum())
+            totals["NBC ($)"] = fmt_dollar(-raw['nbc_charge'].sum())
         totals.update({
-            "Export Credit ($)": fmt_dollar(raw['export_credit'].sum()),
-            "Net Bill ($)": fmt_dollar(raw['net_bill'].sum()),
+            "Export Credit ($)": fmt_dollar(raw['export_credit'].sum()),  # inflow, stays positive
+            "Net Bill ($)": fmt_dollar(-raw['net_bill'].sum()),
         })
-        # Rate shift savings total
         if result.old_rate_monthly_baselines is not None and result.monthly_baseline_details is not None:
             _rs_old = result.old_rate_monthly_baselines
             _rs_new = [d["total"] for d in result.monthly_baseline_details]
@@ -4521,7 +4917,18 @@ def _render_results():
         totals_row = pd.DataFrame([totals])
         display_with_totals = pd.concat([display_df, totals_row], ignore_index=True)
 
-        st.markdown(render_styled_table(display_with_totals, bold_last_row=True, bold_cols=["Month"]), unsafe_allow_html=True)
+        st.markdown(
+            render_styled_table(
+                display_with_totals,
+                bold_last_row=True,
+                bold_cols=["Month", "Export (kWh)", "Net Bill ($)"],
+            ),
+            unsafe_allow_html=True,
+        )
+        st.caption(
+            "Bill components shown as accounting negatives; Export Credit is positive. "
+            "Export Peak and Off-Peak are sub-components of the bolded Export (kWh) total."
+        )
 
         # Show NSC adjustment info if applicable
         if hasattr(result, 'annual_nsc_adjustment') and result.annual_nsc_adjustment > 0:
@@ -4554,15 +4961,26 @@ def _render_results():
             )
 
             display_proj = st.session_state["_proj_display_df"].copy()
+            # Cost outflows rendered as accounting negatives. Export (kWh)
+            # stays positive (volume quantity, not a dollar flow) and
+            # Export Credit stays positive (inflow).
             outflow_dollar_cols = [
                 "Bill w/o Solar ($)", "Energy ($)", "Demand ($)",
-                "Fixed ($)", "Bill w/ Solar ($)",
+                "Fixed ($)", "NBC ($)", "Bill w/ Solar ($)",
             ]
             for col in outflow_dollar_cols:
                 if col in display_proj.columns:
                     display_proj[col] = display_proj[col].apply(lambda x: -x)
-            if "Export (kWh)" in display_proj.columns:
-                display_proj["Export (kWh)"] = display_proj["Export (kWh)"].apply(lambda x: -x)
+
+            # Rename export sub-components with the ↳ indent prefix so the
+            # "Export (kWh)" total visually owns its Peak / Off-Peak rows.
+            _rename = {}
+            if "Export Peak (kWh)" in display_proj.columns:
+                _rename["Export Peak (kWh)"] = "↳ Peak (kWh)"
+            if "Export Off-Peak (kWh)" in display_proj.columns:
+                _rename["Export Off-Peak (kWh)"] = "↳ Off-Peak (kWh)"
+            if _rename:
+                display_proj = display_proj.rename(columns=_rename)
 
             kwh_proj_cols = [c for c in display_proj.columns if "(kWh)" in c]
             for col in kwh_proj_cols:
@@ -4578,7 +4996,7 @@ def _render_results():
                 _drop_cols = [
                     "Load (kWh)", "Customer Load (kWh)", "Solar (kWh)",
                     "Solar Offset (kWh)", "Import (kWh)", "Export (kWh)",
-                    "Export Peak (kWh)", "Export Off-Peak (kWh)",
+                    "↳ Peak (kWh)", "↳ Off-Peak (kWh)",
                     "Demand kW (PV)", "Demand kW (PV+BESS)",
                     "Energy ($)", "Demand ($)", "Fixed ($)",
                     "NBC ($)", "NSC Adj ($)",
@@ -4588,6 +5006,10 @@ def _render_results():
                 )
 
             _proj_bold = ["Calendar Year"] if "Calendar Year" in display_proj.columns else ["Year"]
+            if "Export (kWh)" in display_proj.columns:
+                _proj_bold.append("Export (kWh)")
+            if "Bill w/ Solar ($)" in display_proj.columns:
+                _proj_bold.append("Bill w/ Solar ($)")
             _proj_highlight = ["Cumulative Savings ($)"]
             if "Cumulative Total Savings ($)" in display_proj.columns:
                 _proj_highlight.append("Cumulative Total Savings ($)")
@@ -4596,10 +5018,15 @@ def _render_results():
                 bold_cols=_proj_bold,
                 highlight_cols=_proj_highlight,
             ), unsafe_allow_html=True)
+            st.caption(
+                "Cost components shown as accounting negatives; Export Credit "
+                "and Savings columns are positive. Export Peak / Off-Peak are "
+                "sub-components of the bolded Export (kWh) total."
+            )
 
         _render_projection_table()
 
-        # Cumulative savings chart
+        # Cumulative savings chart — 38DN palette
         import plotly.graph_objects as go
         fig = go.Figure()
         fig.add_trace(go.Scatter(
@@ -4607,7 +5034,8 @@ def _render_results():
             y=projection_df["Cumulative Savings ($)"],
             name="Cumulative Solar Savings",
             mode="lines+markers",
-            line=dict(color="#00CC96", width=2.5),
+            line=dict(color="#45A750", width=2.8),
+            marker=dict(size=7, color="#45A750"),
         ))
         if "Cumulative Total Savings ($)" in projection_df.columns:
             fig.add_trace(go.Scatter(
@@ -4615,16 +5043,28 @@ def _render_results():
                 y=projection_df["Cumulative Total Savings ($)"],
                 name="Cumulative Total Savings (incl. Rate Shift)",
                 mode="lines+markers",
-                line=dict(color="#636EFA", width=2.5),
+                line=dict(color="#1D6FA9", width=2.8),
+                marker=dict(size=7, color="#1D6FA9"),
             ))
         fig.add_hline(
-            y=system_cost, line_dash="dash", line_color="#EF553B",
-            annotation_text=f"System Cost: ${system_cost:,.0f}",
+            y=system_cost, line_dash="dash", line_color="#0E2841",
+            line_width=2,
+            annotation_text=f"<b>System Cost</b>: ${system_cost:,.0f}",
+            annotation_font=dict(color="#0E2841", size=12),
         )
         fig.update_layout(
-            title="Cumulative Savings vs. System Cost",
+            title=dict(text="Cumulative Savings vs. System Cost",
+                       font=dict(size=15, color="#0E2841")),
             xaxis_title="Year", yaxis_title="$",
-            template="plotly_white", height=350,
+            template="plotly_white", height=380,
+            font=dict(family="Aptos Narrow, Aptos, Calibri, Arial Narrow, sans-serif",
+                      size=12, color="#1A1A1A"),
+            margin=dict(l=60, r=30, t=70, b=55),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                        xanchor="right", x=1,
+                        font=dict(color="#1A1A1A", size=11)),
+            xaxis=dict(gridcolor="#E5E7EB", tickfont=dict(color="#1A1A1A")),
+            yaxis=dict(gridcolor="#E5E7EB", tickfont=dict(color="#1A1A1A")),
         )
         st.plotly_chart(fig, width="stretch")
 
@@ -4637,104 +5077,17 @@ def _render_results():
         fig_bill = create_monthly_bill_chart(result)
         st.plotly_chart(fig_bill, width="stretch")
 
-    # --- Tab 4: Savings & Payback ---
+    # --- Tab 4: Savings & Payback ───────────────────────────────────────
     with tab4:
-        st.subheader("Annual Savings & Payback")
-        summary = build_savings_summary(result, system_cost)
-
-        # --- Scenario comparison when battery is active ---
-        if has_battery and st.session_state["billing_result_pv_only"] is not None:
-            pv_only = cast(BillingResult, st.session_state["billing_result_pv_only"])
-            pv_batt = cast(BillingResult, st.session_state["billing_result_batt"])
-
-            st.markdown("**Scenario Comparison**")
-            cmp_data = {
-                "Metric": [
-                    "Annual Bill",
-                    "Energy Charges",
-                    "Demand Charges",
-                    "Export Credit",
-                    "Savings vs No-Solar",
-                ],
-                "No Solar": [
-                    fmt_dollar(result.annual_bill_without_solar),
-                    "—", "—", "—",
-                    "—",
-                ],
-                "PV Only": [
-                    fmt_dollar(pv_only.annual_bill_with_solar),
-                    fmt_dollar(pv_only.annual_energy_cost),
-                    fmt_dollar(pv_only.annual_demand_cost),
-                    fmt_dollar(pv_only.annual_export_credit),
-                    fmt_dollar(pv_only.annual_savings),
-                ],
-                "PV + Battery": [
-                    fmt_dollar(pv_batt.annual_bill_with_solar),
-                    fmt_dollar(pv_batt.annual_energy_cost),
-                    fmt_dollar(pv_batt.annual_demand_cost),
-                    fmt_dollar(pv_batt.annual_export_credit),
-                    fmt_dollar(pv_batt.annual_savings),
-                ],
-            }
-            battery_value = pv_only.annual_bill_with_solar - pv_batt.annual_bill_with_solar
-            cmp_data["Metric"].append("Battery Value")
-            cmp_data["No Solar"].append("—")
-            cmp_data["PV Only"].append("—")
-            cmp_data["PV + Battery"].append(fmt_dollar(battery_value))
-
-            # Rate shift rows
-            if st.session_state.get("rate_shift_enabled") and pv_only.rate_shift_annual_savings is not None:
-                cmp_data["Metric"].append("Rate Shift Savings")
-                cmp_data["No Solar"].append("—")
-                cmp_data["PV Only"].append(fmt_dollar(pv_only.rate_shift_annual_savings))
-                cmp_data["PV + Battery"].append(fmt_dollar(pv_batt.rate_shift_annual_savings))
-
-                pv_total = pv_only.annual_savings + pv_only.rate_shift_annual_savings
-                batt_total = pv_batt.annual_savings + pv_batt.rate_shift_annual_savings
-                cmp_data["Metric"].append("Total Savings")
-                cmp_data["No Solar"].append("—")
-                cmp_data["PV Only"].append(fmt_dollar(pv_total))
-                cmp_data["PV + Battery"].append(fmt_dollar(batt_total))
-
-            cmp_df = pd.DataFrame(cmp_data)
-            st.markdown(render_styled_table(cmp_df), unsafe_allow_html=True)
-            st.divider()
-
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("Annual Load", f"{summary['annual_load_kwh']:,.0f} kWh")
-            st.metric("Annual Solar", f"{summary['annual_solar_kwh']:,.0f} kWh")
-            st.metric("Solar Offset", f"{summary['solar_offset_pct']:.1f}%")
-        with col2:
-            label_bill = "Bill WITH Solar + Battery" if has_battery else "Bill WITH Solar"
-            st.metric("Bill WITHOUT Solar", f"${summary['annual_bill_without_solar']:,.0f}")
-            st.metric(label_bill, f"${summary['annual_bill_with_solar']:,.0f}")
-            st.metric("Annual Savings", f"${summary['annual_savings']:,.0f}", delta=f"{summary['savings_pct']:.1f}%")
-        with col3:
-            st.metric("System Cost", f"${summary['system_cost']:,.0f}")
-            if summary["simple_payback_years"] is not None:
-                st.metric("Simple Payback", f"{summary['simple_payback_years']:.1f} years")
-            else:
-                st.metric("Simple Payback", "N/A")
-        # Rate shift savings display
-        if summary.get("rate_shift_annual_savings") is not None:
-            st.divider()
-            st.subheader("Rate Shift Analysis")
-            rs_c1, rs_c2, rs_c3 = st.columns(3)
-            with rs_c1:
-                st.metric("Old Rate Baseline", f"${result.old_rate_annual_baseline:,.0f}")
-            with rs_c2:
-                st.metric("Rate Shift Savings", f"${summary['rate_shift_annual_savings']:,.0f}/yr")
-            with rs_c3:
-                st.metric("Total Combined Savings", f"${summary['total_annual_savings']:,.0f}/yr")
-
-        st.divider()
-        st.subheader("Energy Balance")
-        col_a, col_b = st.columns(2)
-        with col_a:
-            st.metric("Grid Import", f"{summary['annual_import_kwh']:,.0f} kWh")
-        with col_b:
-            st.metric("Grid Export", f"{summary['annual_export_kwh']:,.0f} kWh")
+        _render_savings_dashboard(
+            result=result,
+            pv_only_result=st.session_state.get("billing_result_pv_only"),
+            pv_batt_result=st.session_state.get("billing_result_batt"),
+            system_cost=system_cost,
+            system_life_years=system_life_years,
+            has_battery=has_battery,
+            main_projection=_main_projection,
+        )
 
     # --- Battery Analysis tab (only when battery enabled) ---
     if tab_batt is not None:
@@ -4948,60 +5301,179 @@ def _render_results():
 
         _x = _cd["Calendar Year"].astype(int) if "Calendar Year" in _cd.columns else _cd["Year"]
         import plotly.graph_objects as go
+
+        # 38DN palette
+        _NAVY, _GREEN, _BLUE, _TEAL, _AMBER = "#0E2841", "#45A750", "#1D6FA9", "#518484", "#D48A1A"
+
         _fig = go.Figure()
 
-        # Utility-only trajectory (plotted first as the upper boundary)
+        # Utility-only trajectory
         _fig.add_trace(go.Scatter(
             x=_x, y=(_bill_no / 1000).round(1),
             name="Utility Only",
             mode="lines",
-            line=dict(color="#D94F3B", width=2.5, dash="dot"),
+            line=dict(color=_NAVY, width=2.5, dash="dot"),
             hovertemplate="%{x}<br><b>$%{y:.1f}K</b><extra>Utility Only</extra>",
         ))
-        # PPA + Solar trajectory with savings fill to upper curve
-        _fig.add_trace(go.Scatter(
-            x=_x, y=(_total_ppa / 1000).round(1),
-            name="With Solar + PPA",
-            mode="lines+markers",
-            line=dict(color="#00897B", width=3),
-            marker=dict(size=4, color="#00897B"),
-            fill="tonexty",
-            fillcolor="rgba(0,137,123,0.13)",
-            hovertemplate="%{x}<br><b>$%{y:.1f}K</b><extra>Solar + PPA</extra>",
-        ))
+
+        # Solar + PPA line — split into regime segments when a NEM switch is configured
+        # so the customer-bill discontinuity at the transition is visually obvious.
+        _ppa_k = (_total_ppa / 1000).round(1)
+        if nem_switch and num_years_1 and num_years_1 < len(_cd):
+            _split = int(num_years_1)  # inclusive — last year of regime 1
+            _x_r1, _y_r1 = _x.iloc[:_split].tolist(), _ppa_k.iloc[:_split].tolist()
+            _x_r2, _y_r2 = _x.iloc[_split - 1:].tolist(), _ppa_k.iloc[_split - 1:].tolist()  # overlap for continuous connector
+            _fig.add_trace(go.Scatter(
+                x=_x_r1, y=_y_r1,
+                name=f"Solar + PPA — {nem_regime_1}",
+                mode="lines+markers",
+                line=dict(color=_GREEN, width=3),
+                marker=dict(size=5, color=_GREEN),
+                fill="tonexty",
+                fillcolor="rgba(69,167,80,0.15)",
+                hovertemplate="%{x}<br><b>$%{y:.1f}K</b><extra>" + nem_regime_1 + "</extra>",
+            ))
+            _fig.add_trace(go.Scatter(
+                x=_x_r2, y=_y_r2,
+                name=f"Solar + PPA — {nem_regime_2}",
+                mode="lines+markers",
+                line=dict(color=_BLUE, width=3),
+                marker=dict(size=5, color=_BLUE),
+                fill="tonexty",
+                fillcolor="rgba(29,111,169,0.15)",
+                hovertemplate="%{x}<br><b>$%{y:.1f}K</b><extra>" + nem_regime_2 + "</extra>",
+            ))
+            # Vertical transition marker
+            _switch_x = _x.iloc[_split - 1] if _split - 1 < len(_x) else _x.iloc[-1]
+            _fig.add_vline(
+                x=_switch_x, line_color=_AMBER, line_width=2, line_dash="dash",
+                annotation_text=f"<b>→ {nem_regime_2}</b>",
+                annotation_position="top",
+                annotation_font=dict(color=_AMBER, size=12),
+            )
+        else:
+            _fig.add_trace(go.Scatter(
+                x=_x, y=_ppa_k,
+                name="Solar + PPA",
+                mode="lines+markers",
+                line=dict(color=_GREEN, width=3),
+                marker=dict(size=5, color=_GREEN),
+                fill="tonexty",
+                fillcolor="rgba(69,167,80,0.15)",
+                hovertemplate="%{x}<br><b>$%{y:.1f}K</b><extra>Solar + PPA</extra>",
+            ))
+
+        # Overlay any saved PPA scenarios as thin ghost lines
+        _saved = st.session_state.get("saved_ppa_scenarios", {}) or {}
+        _palette = [_TEAL, _AMBER, "#8E44AD", "#C0392B", "#117864"]
+        for _si, (_sname, _sdata) in enumerate(_saved.items()):
+            _syr = _sdata.get("calendar_year") or _sdata.get("year")
+            _sy = _sdata.get("total_ppa_bill_k")
+            if not _syr or not _sy or len(_syr) != len(_sy):
+                continue
+            _fig.add_trace(go.Scatter(
+                x=_syr, y=_sy,
+                name=f"Saved · {_sname}",
+                mode="lines",
+                line=dict(color=_palette[_si % len(_palette)], width=1.8, dash="dashdot"),
+                opacity=0.75,
+                hovertemplate="%{x}<br>$%{y:.1f}K<extra>" + _sname + "</extra>",
+            ))
 
         _fig.update_layout(
             title=dict(text="Annual Bill: Utility Only vs. Solar + PPA",
-                       font=dict(size=15, color="#0E2841")),
+                       font=dict(size=15, color=_NAVY)),
             xaxis_title="Year",
             yaxis_title="Annual Cost ($K)",
-            yaxis=dict(rangemode="tozero"),
+            yaxis=dict(rangemode="tozero", gridcolor="#E5E7EB"),
+            xaxis=dict(gridcolor="#E5E7EB"),
             template="plotly_white",
-            height=370,
-            margin=dict(l=50, r=30, t=50, b=40),
+            height=420,
+            margin=dict(l=60, r=30, t=70, b=55),
             font=dict(family="Aptos Narrow, Aptos, Calibri, Arial Narrow, sans-serif",
-                      size=12),
+                      size=12, color="#1A1A1A"),
             legend=dict(orientation="h", yanchor="bottom", y=1.02,
-                        xanchor="right", x=1),
+                        xanchor="right", x=1,
+                        font=dict(color="#1A1A1A", size=11)),
             hovermode="x unified",
             transition=dict(duration=350, easing="cubic-in-out"),
         )
-        # Annotate the savings band at the midpoint year
-        _mid = len(_cd) // 2
-        if _mid > 0 and _mid < len(_cd):
-            _gap = float(_bill_no.iloc[_mid] - _total_ppa.iloc[_mid])
-            _mid_y = float((_bill_no.iloc[_mid] + _total_ppa.iloc[_mid]) / 2 / 1000)
-            if _gap > 0:
+        # Savings band annotation at midpoint of each regime (or single midpoint if no switch)
+        def _annotate_savings(lo: int, hi: int, color: str) -> None:
+            if hi <= lo:
+                return
+            mid = (lo + hi) // 2
+            if mid >= len(_cd):
+                return
+            gap = float(_bill_no.iloc[mid] - _total_ppa.iloc[mid])
+            mid_y = float((_bill_no.iloc[mid] + _total_ppa.iloc[mid]) / 2 / 1000)
+            if gap > 0:
                 _fig.add_annotation(
-                    x=_x.iloc[_mid], y=_mid_y,
-                    text=f"<b>${_gap / 1000:.1f}K savings</b>",
+                    x=_x.iloc[mid], y=mid_y,
+                    text=f"<b>${gap / 1000:.1f}K savings</b>",
                     showarrow=False,
-                    font=dict(size=11, color="#00695C"),
-                    bgcolor="rgba(255,255,255,0.85)",
+                    font=dict(size=11, color=color),
+                    bgcolor="rgba(255,255,255,0.88)",
                     borderpad=3,
                 )
 
+        if nem_switch and num_years_1 and num_years_1 < len(_cd):
+            _annotate_savings(0, int(num_years_1), "#2D7A3C")
+            _annotate_savings(int(num_years_1), len(_cd), "#13477A")
+        else:
+            _annotate_savings(0, len(_cd), "#2D7A3C")
+
         st.plotly_chart(_fig, use_container_width=True, key="ppa_dashboard_chart")
+
+        # ── Save PPA scenario ──────────────────────────────────────
+        st.divider()
+        st.markdown("**Save this PPA structure**")
+        st.caption("Name and save the current PPA configuration to overlay on the chart and compare against other PPA structures you try.")
+        sv_name_col, sv_btn_col, sv_clear_col = st.columns([0.5, 0.25, 0.25])
+        with sv_name_col:
+            _sv_name = st.text_input(
+                "Scenario name", value="", key="ppa_save_name",
+                placeholder="e.g. 2.9% escalator 10% savings",
+                label_visibility="collapsed",
+            )
+        with sv_btn_col:
+            if st.button("💾 Save PPA", key="ppa_save_btn", use_container_width=True):
+                name = (_sv_name or "").strip() or f"Scenario {len(st.session_state.get('saved_ppa_scenarios', {})) + 1}"
+                saved = st.session_state.setdefault("saved_ppa_scenarios", {})
+                saved[name] = {
+                    "calendar_year": _x.tolist(),
+                    "total_ppa_bill_k": (_total_ppa / 1000).round(2).tolist(),
+                    "year1_rate": _yr1_rate,
+                    "ppa_escalator_r1": float(it_ppa_esc_1),
+                    "ppa_escalator_r2": float(it_ppa_esc_2) if nem_switch else None,
+                    "savings_pct": float(it_savings_pct),
+                    "nem_regime_1": nem_regime_1,
+                    "nem_regime_2": nem_regime_2 if nem_switch else None,
+                    "lifetime_savings": float(_life_sav),
+                }
+                st.rerun()
+        with sv_clear_col:
+            if st.button("Clear saved", key="ppa_clear_btn", use_container_width=True):
+                st.session_state["saved_ppa_scenarios"] = {}
+                st.rerun()
+
+        if st.session_state.get("saved_ppa_scenarios"):
+            sv_df = pd.DataFrame([
+                {
+                    "Scenario": n,
+                    "Yr-1 PPA ($/kWh)": f"${d['year1_rate']:.4f}",
+                    f"Esc. {d['nem_regime_1']} (%/yr)": f"{d['ppa_escalator_r1']:.1f}",
+                    f"Esc. {d['nem_regime_2']} (%/yr)" if d.get("nem_regime_2") else "": (
+                        f"{d['ppa_escalator_r2']:.1f}" if d.get("ppa_escalator_r2") is not None else ""),
+                    "Savings target (%)": f"{d['savings_pct']:.1f}",
+                    "Lifetime savings": fmt_dollar(d["lifetime_savings"]),
+                }
+                for n, d in st.session_state["saved_ppa_scenarios"].items()
+            ])
+            # Drop any blank column headers (from missing regime 2)
+            sv_df = sv_df.loc[:, [c for c in sv_df.columns if c != ""]]
+            st.markdown(render_styled_table(sv_df, bold_cols=["Scenario"]),
+                        unsafe_allow_html=True)
 
         # ── Data Table (Annual / Monthly) ──────────────────────────
         if it_view == "Annual":

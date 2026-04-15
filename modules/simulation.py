@@ -91,6 +91,7 @@ def run_simulation(inputs: SimulationInputs) -> SimulationResult:
     capacity are supplied, runs a second pass with LP dispatch and returns
     that as the canonical ``billing_result``.
     """
+    _validate_inputs(inputs)
     pv_only = _run_billing(inputs, with_battery=False)
 
     has_battery = (
@@ -108,6 +109,35 @@ def run_simulation(inputs: SimulationInputs) -> SimulationResult:
         pv_only_result=pv_only,
         has_battery=False,
     )
+
+
+def _validate_inputs(inputs: SimulationInputs) -> None:
+    """Fail fast with a readable error when a Series contains NaN.
+
+    NaN silently flows all the way into ``build_annual_projection`` and
+    surfaces as ``cannot convert float NaN to integer`` in ``round()`` —
+    a diagnostic dead end. Catching it here names the offending field
+    and the first bad timestamp.
+    """
+    import numpy as np
+
+    for name, series in (
+        ("load_8760", inputs.load_8760),
+        ("production_8760", inputs.production_8760),
+        ("export_rates_8760", inputs.export_rates_8760),
+    ):
+        values = np.asarray(getattr(series, "values", series))
+        if len(values) == 0:
+            raise ValueError(f"{name} is empty")
+        if not np.isfinite(values).all():
+            bad = np.where(~np.isfinite(values))[0]
+            first_bad_idx = int(bad[0])
+            idx = getattr(series, "index", None)
+            ts = str(idx[first_bad_idx]) if idx is not None and len(idx) > first_bad_idx else f"position {first_bad_idx}"
+            raise ValueError(
+                f"{name} contains {len(bad):,} non-finite values (NaN/Inf). "
+                f"First at {ts}. Re-upload the profile or check the CSV for blank rows / DST gaps."
+            )
 
 
 def _run_billing(inputs: SimulationInputs, *, with_battery: bool) -> BillingResult:
