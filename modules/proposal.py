@@ -985,9 +985,12 @@ def _slide_system(prs, pg, total, ex, sys_kw, dc_ac, batt_kwh, batt_kw,
 
     _action_title(sl, t, exhibit=ex)
     _subtitle(sl, "System sized to optimize load offset and demand charge reduction under current tariff structure")
+    _takeaway(sl,
+        f"38DN owns, installs, insures, and maintains the system for {term} years — "
+        f"customer pays only for delivered solar kWh, with no capex, O&M, or performance risk.")
 
     # PV panel
-    pw = Inches(5.2); ph = Inches(2.8); py = Inches(1.25)
+    pw = Inches(5.2); ph = Inches(2.8); py = Inches(1.70)
     _rect(sl, ML, py, pw, ph, fill=None, line=TBL_BORDER, line_w=Pt(1))
     _rect(sl, ML, py, pw, Pt(3.5), fill=ACCENT1)
     _txt(sl, ML + Inches(0.25), py + Inches(0.15), Inches(4), Inches(0.25),
@@ -1021,7 +1024,7 @@ def _slide_system(prs, pg, total, ex, sys_kw, dc_ac, batt_kwh, batt_kw,
                  sz=Pt(10.5), bold=True, color=DK1)
 
     # Deal terms bar
-    by = Inches(4.4)
+    by = Inches(4.70)
     _rect(sl, ML, by, CW, Inches(0.48), fill=DK1)
     parts = []
     if ppa is not None:
@@ -1525,7 +1528,12 @@ def _savings_matrix_table(sl, l, t, w, col_ws, group_hdrs, sub_hdrs, rows,
     """
     nr = len(rows) + 2  # 2 header rows + data rows
     nc = len(sub_hdrs)
-    row_h = 0.19
+    # Scale row_h so the table always clears the source line at 6.85".
+    # t is an Emu integer (Inches(1.05)); 914400 EMU = 1 inch.
+    # At Pt(6) font the minimum legible row_h is ~0.16".
+    t_in = t / 914400.0
+    _avail = 6.85 - t_in - 0.05
+    row_h = min(0.19, max(0.16, _avail / nr)) if nr > 0 else 0.19
     sh = sl.shapes.add_table(nr, nc, l, t, w, Inches(row_h * nr))
     tbl = sh.table
     for i, cw in enumerate(col_ws):
@@ -1909,8 +1917,11 @@ def _slide_process(prs, pg, total, sys_kw, batt_kwh, batt_kw,
     """Process overview — numbered steps."""
     sl = prs.slides.add_slide(prs.slide_layouts[6])
     _accent_rule(sl)
-    _action_title(sl, "Process Overview")
-    _subtitle(sl, "From proposal to commercial operation")
+    _action_title(sl, f"From signed LOI to commercial operation — 38DN manages every step of the {term}-year term")
+    _subtitle(sl, "Turnkey delivery: engineering, permitting, construction, and O&M all handled by 38DN")
+    _takeaway(sl,
+        "Customer commitment is limited to signing the LOI and PPA; "
+        "all development, capital, and operational risk sits with 38DN.")
 
     steps = [
         ("System Installation",
@@ -1935,12 +1946,12 @@ def _slide_process(prs, pg, total, sys_kw, batt_kwh, batt_kw,
         steps.append(("Immediate Day-1 Savings",
             "Total electricity cost drops from Day 1; gap widens as utility rates rise."))
 
-    # Two columns
+    # Two columns (top-Y shifted to clear the takeaway box above)
     col1 = steps[:3]; col2 = steps[3:]
     for i, (t, d) in enumerate(col1):
-        _step(sl, ML + Inches(0.15), Inches(1.30 + i * 1.10), i+1, t, d)
+        _step(sl, ML + Inches(0.15), Inches(1.70 + i * 1.05), i+1, t, d)
     for i, (t, d) in enumerate(col2):
-        _step(sl, ML + Inches(6.3), Inches(1.30 + i * 1.10), len(col1)+i+1, t, d)
+        _step(sl, ML + Inches(6.3), Inches(1.70 + i * 1.05), len(col1)+i+1, t, d)
 
     # Ownership bar
     _rect(sl, ML, Inches(5.7), CW, Inches(0.42), fill=DK1)
