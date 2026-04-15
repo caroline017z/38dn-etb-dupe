@@ -11,7 +11,7 @@ Public surface:
   replacement.
 """
 
-from .theme import install_theme
+from .theme import install_theme, set_dense_mode
 from .tokens import PALETTE, TYPO, SP, RADIUS, PLOTLY_LAYOUT
 from .components import (
     section_header,
@@ -21,10 +21,12 @@ from .components import (
     pill,
     segmented_control,
     empty_state,
+    sparkline_svg,
 )
 
 __all__ = [
     "install_theme",
+    "set_dense_mode",
     "PALETTE",
     "TYPO",
     "SP",
@@ -37,4 +39,5 @@ __all__ = [
     "pill",
     "segmented_control",
     "empty_state",
+    "sparkline_svg",
 ]

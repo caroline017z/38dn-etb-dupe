@@ -14,6 +14,106 @@ import streamlit as st
 from .tokens import PALETTE
 
 
+# ─────────────────────────────────────────────────────────────────────
+# Inline sparkline — SVG, embeds directly in HTML tables
+# ─────────────────────────────────────────────────────────────────────
+def sparkline_svg(
+    values: list[float],
+    *,
+    width: int = 80,
+    height: int = 20,
+    color: str | None = None,
+    fill: bool = True,
+) -> str:
+    """Return an inline SVG sparkline for ``values``.
+
+    Designed to embed inside HTML table cells (via ``render_styled_table``)
+    so finance analysts get a trend line adjacent to the numeric figure.
+    Values are auto-scaled to the SVG viewport; ``None`` / non-finite
+    values render as gaps.
+
+    Args:
+        values: sequence of y-values (x is implicitly the index).
+        width / height: SVG pixel dimensions.
+        color: stroke + fill color; defaults to 38DN green for positive
+            trends, red for negative.
+        fill: when True, the area under the line gets a subtle fill
+            matching the stroke color at 12% opacity.
+    """
+    if not values:
+        return f'<svg width="{width}" height="{height}"></svg>'
+
+    clean = [float(v) if (v is not None and v == v) else None for v in values]
+    finite = [v for v in clean if v is not None]
+    if not finite:
+        return f'<svg width="{width}" height="{height}"></svg>'
+
+    lo, hi = min(finite), max(finite)
+    span = hi - lo or 1.0
+    n = len(clean)
+
+    # Auto-color: green if net positive slope, red if negative, navy if flat.
+    if color is None:
+        if finite[0] < finite[-1]:
+            color = PALETTE["green"]
+        elif finite[0] > finite[-1]:
+            color = PALETTE["red"]
+        else:
+            color = PALETTE["navy"]
+
+    pad = 1.5
+    def _x(i: int) -> float:
+        return pad + i * (width - 2 * pad) / max(n - 1, 1)
+    def _y(v: float) -> float:
+        return height - pad - (v - lo) * (height - 2 * pad) / span
+
+    # Build the polyline — skip over gaps by ending the current segment
+    # and starting a new one when a None is encountered.
+    segments: list[list[tuple[float, float]]] = []
+    current: list[tuple[float, float]] = []
+    for i, v in enumerate(clean):
+        if v is None:
+            if current:
+                segments.append(current)
+                current = []
+            continue
+        current.append((_x(i), _y(v)))
+    if current:
+        segments.append(current)
+
+    polylines = "".join(
+        f'<polyline fill="none" stroke="{color}" stroke-width="1.5" '
+        f'stroke-linecap="round" stroke-linejoin="round" '
+        f'points="{" ".join(f"{x:.2f},{y:.2f}" for x, y in seg)}" />'
+        for seg in segments if len(seg) >= 2
+    )
+
+    # Fill path — one continuous area under all segments joined to baseline.
+    fill_path = ""
+    if fill and segments:
+        fill_segments = []
+        for seg in segments:
+            if len(seg) < 2:
+                continue
+            pts = " ".join(f"{x:.2f},{y:.2f}" for x, y in seg)
+            first_x, _ = seg[0]
+            last_x, _ = seg[-1]
+            fill_segments.append(
+                f'<polygon fill="{color}" fill-opacity="0.12" '
+                f'stroke="none" points="{first_x:.2f},{height - pad:.2f} '
+                f'{pts} {last_x:.2f},{height - pad:.2f}" />'
+            )
+        fill_path = "".join(fill_segments)
+
+    return (
+        f'<svg width="{width}" height="{height}" '
+        f'viewBox="0 0 {width} {height}" xmlns="http://www.w3.org/2000/svg" '
+        f'style="display:inline-block;vertical-align:middle;">'
+        f'{fill_path}{polylines}</svg>'
+    )
+
+
+
 _PILL_VARIANTS = {"primary", "green", "blue", "amber", "muted"}
 
 

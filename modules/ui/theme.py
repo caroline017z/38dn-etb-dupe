@@ -42,3 +42,28 @@ def install_theme() -> None:
     st.markdown(_FONTS_HTML, unsafe_allow_html=True)
     if css:
         st.markdown(f"<style>{css}</style>", unsafe_allow_html=True)
+
+
+def set_dense_mode(enabled: bool) -> None:
+    """Toggle the ``data-dense`` attribute on the Streamlit app root.
+
+    The theme stylesheet responds to ``.stApp[data-dense='true']`` by
+    tightening padding, metric value sizes, table row height, and tab
+    spacing. Works by injecting a tiny inline script that walks up to
+    the root and flips the attribute on every rerun.
+    """
+    flag = "true" if enabled else "false"
+    st.markdown(
+        f"""<script>
+        (function() {{
+            const doc = window.parent && window.parent.document
+                ? window.parent.document : document;
+            const root = doc.querySelector('.stApp')
+                      || doc.querySelector('[data-testid=\"stAppViewContainer\"]');
+            if (root) {{
+                root.setAttribute('data-dense', '{flag}');
+            }}
+        }})();
+        </script>""",
+        unsafe_allow_html=True,
+    )

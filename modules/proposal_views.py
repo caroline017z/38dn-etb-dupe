@@ -18,6 +18,7 @@ import pandas as pd
 import plotly.graph_objects as go
 
 from .proposals import PPASnapshot, Proposal
+from .ui.components import sparkline_svg
 
 _NAVY = "#0E2841"
 _GREEN = "#45A750"
@@ -100,6 +101,15 @@ def build_comparison_table(proposal: Proposal) -> pd.DataFrame:
     _row("Effective PPA $/kWh", eff_rates)
 
     _row("Term", [f"{s.term_years} yrs" for s in snaps])
+
+    # Inline sparkline of PPA rate trajectory — lets the reader eyeball
+    # the shape (flat vs escalating vs regime-switch drop) without opening
+    # the chart. Rendered as SVG so it embeds directly into the HTML table.
+    _row("Rate trajectory", [
+        sparkline_svg(list(s.rate_per_year), width=110, height=22)
+        if s.rate_per_year else "—"
+        for s in snaps
+    ])
 
     return pd.DataFrame(rows)
 
