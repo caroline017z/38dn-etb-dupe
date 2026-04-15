@@ -27,6 +27,12 @@ DEFAULT_MODEL = "claude-sonnet-4-6"
 DEFAULT_MAX_TOKENS = 1024
 
 
+class AnthropicCreditError(RuntimeError):
+    """Raised when the Anthropic API returns a 400 with "credit balance
+    too low". Callers catch this separately to surface a friendlier
+    message than dumping the raw 400 body in the UI."""
+
+
 def _resolve_api_key() -> str | None:
     try:
         import streamlit as st
@@ -108,7 +114,26 @@ def call_with_cache(
     }
     if tools:
         kwargs["tools"] = tools
-    return client.messages.create(**kwargs)
+    try:
+        return client.messages.create(**kwargs)
+    except anthropic.BadRequestError as exc:
+        # 400 Bad Request from Anthropic covers a few cases, but the most
+        # common runtime surprise for a deployed app is a depleted workspace
+        # credit balance. Re-raise with a tighter error type so the UI
+        # layer can show a friendlier message.
+        msg = str(getattr(exc, "message", exc)) or ""
+        body = getattr(exc, "body", None)
+        body_msg = ""
+        if isinstance(body, dict):
+            body_msg = (body.get("error", {}) or {}).get("message", "")
+        combined = f"{msg} {body_msg}".lower()
+        if "credit balance" in combined or "credits" in combined:
+            raise AnthropicCreditError(
+                body_msg or msg
+                or "Anthropic API credit balance is too low. Top up credits "
+                   "in the Anthropic console to re-enable AI features."
+            ) from exc
+        raise
 
 
 def text_from(message: anthropic.types.Message) -> str:
@@ -133,6 +158,7 @@ def tool_use_input(message: anthropic.types.Message, tool_name: str) -> dict[str
 __all__ = [
     "DEFAULT_MODEL",
     "CachedBlock",
+    "AnthropicCreditError",
     "get_client",
     "call_with_cache",
     "text_from",

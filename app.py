@@ -61,6 +61,33 @@ from modules.ai.proposal_narrative import (
 )
 from modules.ai.bill_ingest import extract_bill as _ai_extract_bill
 from modules.ai.tariff_qa import ask as _ai_tariff_ask
+from modules.ai.client import AnthropicCreditError as _AnthropicCreditError
+
+
+def _render_ai_error(exc: Exception, action_label: str) -> None:
+    """Show a friendly error message for AI failures. Handles the common
+    depleted-credit case with a direct call-out; falls back to a generic
+    message with the underlying exception text for everything else."""
+    if isinstance(exc, _AnthropicCreditError):
+        st.markdown(
+            '<div style="background:#FDF3E2;border:1px solid #F0D7A8;'
+            'border-left:3px solid #D48A1A;border-radius:6px;'
+            'padding:12px 16px;margin:8px 0;font-size:13px;line-height:1.55;'
+            'color:#0E2841;">'
+            '<div style="font-size:10px;font-weight:600;color:#D48A1A;'
+            'text-transform:uppercase;letter-spacing:0.06em;margin-bottom:6px;">'
+            'Anthropic API credits depleted</div>'
+            f"Top up your workspace credit balance at "
+            '<a href="https://console.anthropic.com/settings/billing" '
+            'target="_blank" style="color:#1D6FA9;font-weight:600;">'
+            'console.anthropic.com &rarr; Plans &amp; Billing</a> '
+            f"to re-enable {action_label}. The rest of the app continues "
+            "to work without AI features."
+            '</div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.error(f"{action_label} failed: {exc}")
 
 # Phase 4: Proposals (named PPA bundles per simulation, with comparison).
 # See modules/proposals.py for the data model; modules/proposal_views.py
@@ -1109,7 +1136,7 @@ def _render_ai_assistant_tab(
                 bullets = _ai_generate_exec_summary(ctx)
                 st.session_state["ai_narrative_bullets"] = bullets
             except Exception as exc:
-                st.error(f"Narrative generation failed: {exc}")
+                _render_ai_error(exc, "Narrative generation")
 
         if st.session_state.get("ai_narrative_bullets"):
             for b in st.session_state["ai_narrative_bullets"]:
@@ -1125,7 +1152,7 @@ def _render_ai_assistant_tab(
                 extraction = _ai_extract_bill(up.getvalue())
                 st.session_state["ai_bill_extraction"] = extraction
             except Exception as exc:
-                st.error(f"Bill extraction failed: {exc}")
+                _render_ai_error(exc, "Bill extraction")
 
         extraction = st.session_state.get("ai_bill_extraction")
         if extraction is not None:
@@ -1197,7 +1224,7 @@ def _render_ai_assistant_tab(
                 )
                 st.markdown(answer)
             except Exception as exc:
-                st.error(f"Q&A failed: {exc}")
+                _render_ai_error(exc, "Q&A")
 
 
 @st.fragment
@@ -2363,10 +2390,11 @@ def _render_top_bar():
 
     # --- Proposals popover ---
     # Mirrors the Save flow from the opposite direction: every saved Proposal
-    # for the active simulation appears here, with a "View All" that opens
-    # the Proposals tab. GCS-persisted Proposals are already hydrated into
-    # st.session_state["proposals"] on simulation load, so this popover
-    # reads the same source of truth as the Proposals tab.
+    # for the active simulation appears here, with a "+ New Proposal" that
+    # primes the Proposals-tab builder. Streamlit doesn't expose a way to
+    # programmatically switch tabs, so after clicking a button here we
+    # surface a st.toast confirming the state change and nudging the user
+    # to open the "PPA & Proposals → Proposals" tab.
     with _mgmt_btn_cols[7]:
         with st.popover("Proposals", width="stretch"):
             _top_sim_name = (
@@ -2401,6 +2429,10 @@ def _render_top_bar():
                         help=_help,
                     ):
                         st.session_state["active_proposal_id"] = _p.id
+                        st.session_state["_proposal_toast_pending"] = (
+                            f"Activated: {_p.name}",
+                            "📁",
+                        )
                         st.rerun()
                 if len(_top_props) > 4:
                     st.caption(f"+ {len(_top_props) - 4} more")
@@ -2419,7 +2451,20 @@ def _render_top_bar():
             if _new_btn:
                 st.session_state["_proposals_tab_new"] = True
                 st.session_state["active_proposal_id"] = None
+                st.session_state["_proposal_toast_pending"] = (
+                    "New Proposal started — open **PPA & Proposals → Proposals** to continue",
+                    "➕",
+                )
                 st.rerun()
+
+    # Fire any pending toast from the popover buttons. Streamlit's
+    # st.toast call has to run at the top level of the script (not inside
+    # a popover context) to render reliably, so we stage it in
+    # session_state and flush it here on the next rerun.
+    _pending_toast = st.session_state.pop("_proposal_toast_pending", None)
+    if _pending_toast:
+        _msg, _icon = _pending_toast
+        st.toast(_msg, icon=_icon)
 
 
     # ---- LOAD PROFILES SECTION ----
