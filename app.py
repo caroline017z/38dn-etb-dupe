@@ -108,6 +108,30 @@ from modules.proposals import (
     load_proposals_for_simulation as _load_proposals_gcs,
     delete_persisted_proposal as _delete_proposal_gcs,
 )
+
+# Background-persist a Proposal to GCS so the UI thread doesn't block on a
+# ~1–2s round-trip. Session state is the source of truth for the current
+# page render; GCS is the durable store for cross-session reloads. On
+# thread exit the GCS blob is committed; if the user closes the tab in
+# under a second the save may not reach GCS, so the caller also runs a
+# synchronous fallback when the last-ditch save matters (e.g. explicit
+# "save and close" flows).
+import threading as _threading
+import logging as _prop_logging
+_bg_logger = _prop_logging.getLogger("proposals.bg_persist")
+
+
+def _persist_proposal_async(proposal: _ProposalObj) -> None:
+    """Fire-and-forget GCS persist; exceptions are logged, not raised."""
+    def _worker() -> None:
+        try:
+            _persist_proposal_gcs(proposal)
+        except Exception:
+            _bg_logger.warning(
+                "background GCS persist of Proposal %s failed",
+                proposal.id, exc_info=True,
+            )
+    _threading.Thread(target=_worker, daemon=True).start()
 from modules.proposal_views import (
     build_comparison_chart as _build_prop_chart,
     build_comparison_table as _build_prop_table,
@@ -2429,8 +2453,12 @@ def _render_top_bar():
                         help=_help,
                     ):
                         st.session_state["active_proposal_id"] = _p.id
+                        # Deep-link: auto-focus the Downloads top-level tab
+                        # so the user lands on the export surface for the
+                        # Proposal they just picked.
+                        st.session_state["_focus_downloads_tab"] = True
                         st.session_state["_proposal_toast_pending"] = (
-                            f"Activated: {_p.name}",
+                            f"Activated: {_p.name} — loaded Downloads",
                             "📁",
                         )
                         st.rerun()
@@ -5823,17 +5851,20 @@ def _render_results():
             st.session_state["_proposals_tab_new"] = True
             st.session_state["active_proposal_id"] = None
 
-    # Phase 6: top-level navigation consolidated from 9 flat tabs to 4
-    # institutional sections (Overview / Bills & Projection / PPA &
-    # Proposals / Analysis). Each section renders a second tab row below
-    # for sub-views. The legacy tab variables (tab1, tab2, ...) are
-    # re-pointed at the appropriate sub-tab container so every existing
+    # Phase 6+: top-level navigation is now five institutional sections
+    # (Overview / Bills & Projection / PPA & Proposals / Analysis /
+    # Downloads). Downloads is promoted out of Analysis so the export
+    # surface is a first-class destination, and so the top-bar Proposals
+    # popover can deep-link into it. Each section renders a second tab
+    # row for its sub-views; legacy tab variables (tab1, tab2, ...) are
+    # re-pointed at the appropriate sub-tab containers so every existing
     # `with tab_X:` body below continues to work verbatim.
     section_tabs = st.tabs([
         "Overview",
         "Bills & Projection",
         "PPA & Proposals",
         "Analysis",
+        "Downloads",
     ])
 
     # — Overview: headline KPIs + energy flow charts —
@@ -5851,9 +5882,9 @@ def _render_results():
     with section_tabs[2]:
         _ppa_sub = st.tabs(["PPA Rate", "Proposals"])
 
-    # — Analysis: sensitivity, AI assistant, downloads —
+    # — Analysis: sensitivity + AI assistant (Downloads moved out) —
     with section_tabs[3]:
-        _analysis_sub = st.tabs(["Sensitivity", "AI Assistant", "Downloads"])
+        _analysis_sub = st.tabs(["Sensitivity", "AI Assistant"])
 
     # Re-point legacy tab variables into the new nested structure.
     tab3 = _overview_sub[0]            # Production vs Load
@@ -5865,7 +5896,41 @@ def _render_results():
     tab_proposals = _ppa_sub[1]        # Proposals (Phase 4)
     tab_sensitivity = _analysis_sub[0] # Monte Carlo + tornado
     tab_ai = _analysis_sub[1]          # AI Assistant
-    tab5 = _analysis_sub[2]            # Downloads
+    tab5 = section_tabs[4]             # Downloads (top-level now)
+
+    # When the user activates a Proposal from the top-bar popover, focus
+    # the Downloads section on the next render. Streamlit's st.tabs has
+    # no programmatic selection API, so we inject a small JS snippet
+    # that clicks the Downloads tab button once it mounts. The flag in
+    # session_state is cleared after the injection.
+    if st.session_state.pop("_focus_downloads_tab", False):
+        st.components.v1.html(
+            """
+            <script>
+            (function focusDownloads() {
+                function click() {
+                    const doc = window.parent.document;
+                    const tabs = doc.querySelectorAll(
+                        '.stTabs [data-baseweb="tab-list"] > button'
+                    );
+                    if (!tabs || tabs.length === 0) return false;
+                    for (const t of tabs) {
+                        const label = (t.innerText || "").trim();
+                        if (label === "Downloads") { t.click(); return true; }
+                    }
+                    return false;
+                }
+                if (!click()) {
+                    const iv = setInterval(function () {
+                        if (click()) clearInterval(iv);
+                    }, 100);
+                    setTimeout(function () { clearInterval(iv); }, 3000);
+                }
+            })();
+            </script>
+            """,
+            height=0,
+        )
 
     # Compute peak period index from tariff
     _tariff_for_peak = st.session_state["tariff"]
@@ -6487,7 +6552,15 @@ def _render_results():
                     "💾 Add to Proposal" if _active_prop and _active_prop.simulation_name == _active_sim_name
                     else "💾 Save PPA + Start Proposal"
                 )
-                if st.button(_sv_btn_label, key="ppa_save_btn", use_container_width=True):
+                _save_clicked = st.button(
+                    _sv_btn_label, key="ppa_save_btn", use_container_width=True,
+                )
+            if _save_clicked:
+                # Spinner so the save-button click feels acknowledged instead
+                # of dead during the session + GCS write. The blocking work
+                # below is cheap (dict assignments, dataclass construction);
+                # the slow step was GCS upload which is now asynchronous.
+                with st.spinner("Saving PPA to Proposal…"):
                     name = (_sv_name or "").strip() or f"Scenario {len(st.session_state.get('saved_ppa_scenarios', {})) + 1}"
 
                     # --- 1. Persist to the session-wide scenarios pool so the
@@ -6542,8 +6615,12 @@ def _render_results():
                         )
                         if _current is None:
                             # Auto-create a Proposal: first PPA is the primary.
+                            # Name follows a consistent "Deal Folder · {sim}
+                            # · {date}" pattern so proposals are easy to
+                            # recognise in the top-bar popover and GCS.
                             _default_proposal_name = (
-                                f"{_active_sim_name or 'Deal'} — {date.today().strftime('%b %d %Y')}"
+                                f"Deal Folder · {_active_sim_name or 'Untitled Sim'} "
+                                f"· {date.today().strftime('%Y-%m-%d')}"
                             )
                             _proposal_obj = _create_proposal_obj(
                                 name=_default_proposal_name,
@@ -6579,11 +6656,12 @@ def _render_results():
                                 f"({len(_existing_comps)}/{_PROP_MAX_COMPARISONS} comparisons)"
                             )
                         _save_proposal_session(st.session_state, _proposal_obj)
-                        try:
-                            _persist_proposal_gcs(_proposal_obj)
-                        except Exception:
-                            # Non-fatal — session save already succeeded.
-                            pass
+                        # Fire-and-forget GCS persist so the ~1–2s upload
+                        # round-trip doesn't delay the fragment rerun. The
+                        # session-state write above is the source of truth
+                        # for the current render; GCS is the durable store
+                        # that backs a subsequent simulation reload.
+                        _persist_proposal_async(_proposal_obj)
                         st.session_state["_proposal_toast_pending"] = (
                             _toast_msg + " · open the Proposals tab to review",
                             "📁",
