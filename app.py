@@ -6964,11 +6964,18 @@ def _render_results():
                 hovertemplate=f"%{{x}}<br><b>{_hover_unit}</b><extra>{nem_regime_2}</extra>",
             ))
             _switch_x = _x.iloc[_split - 1] if _split - 1 < len(_x) else _x.iloc[-1]
+            # Position the regime-switch label along the right-hand side of
+            # the vertical rule at a mid y-value so it never collides with
+            # the chart title or legend at the top.
             _fig.add_vline(
                 x=_switch_x, line_color=_AMBER, line_width=2, line_dash="dash",
-                annotation_text=f"<b>→ {nem_regime_2}</b>",
-                annotation_position="top",
-                annotation_font=dict(color=_AMBER, size=12),
+                annotation_text=f"→ {nem_regime_2}",
+                annotation_position="top right",
+                annotation_font=dict(color=_AMBER, size=11),
+                annotation_bgcolor="rgba(255,255,255,0.9)",
+                annotation_bordercolor=_AMBER,
+                annotation_borderwidth=1,
+                annotation_borderpad=3,
             )
         else:
             _fig.add_trace(go.Scatter(
@@ -7002,29 +7009,43 @@ def _render_results():
                 hovertemplate=f"%{{x}}<br>{_hover_unit}<extra>{_sname}</extra>",
             ))
 
+        # Legend goes BELOW the plot so it never collides with the title
+        # or regime-switch label. Top margin shrinks; bottom margin grows
+        # to make room for a 2-row legend when many PPAs are overlaid.
+        _num_traces = max(1, len(_fig.data))
+        _legend_rows = 1 if _num_traces <= 3 else 2
+        _bottom_margin = 70 + (_legend_rows - 1) * 22
         _fig.update_layout(
             title=dict(
                 text=("Annual Bill: Utility Only vs Solar + PPA" if _bill_mode
                       else "Effective $/kWh Paid: Utility Only vs Solar + PPA"),
                 font=dict(size=15, color=_NAVY),
+                y=0.96, x=0.01, xanchor="left",
             ),
             xaxis_title="Year",
             yaxis_title=_y_axis_title,
-            yaxis=dict(rangemode="tozero", gridcolor="#E5E7EB"),
-            xaxis=dict(gridcolor="#E5E7EB"),
+            yaxis=dict(rangemode="tozero", gridcolor="#E5E7EB", automargin=True),
+            xaxis=dict(gridcolor="#E5E7EB", automargin=True),
             template="plotly_white",
-            height=440,
-            margin=dict(l=60, r=30, t=70, b=55),
-            font=dict(family="Aptos Narrow, Aptos, Calibri, Arial Narrow, sans-serif",
+            height=500,
+            margin=dict(l=70, r=40, t=60, b=_bottom_margin),
+            font=dict(family="Inter, Aptos Narrow, sans-serif",
                       size=12, color="#1A1A1A"),
-            legend=dict(orientation="h", yanchor="bottom", y=1.02,
-                        xanchor="right", x=1,
-                        font=dict(color="#1A1A1A", size=11)),
+            legend=dict(
+                orientation="h",
+                yanchor="top", y=-0.18,
+                xanchor="center", x=0.5,
+                font=dict(color="#1A1A1A", size=11),
+                bgcolor="rgba(255,255,255,0)",
+                borderwidth=0,
+            ),
             hovermode="x unified",
             transition=dict(duration=350, easing="cubic-in-out"),
         )
 
-        # Savings band midpoint annotations — only meaningful in bill-mode.
+        # Savings band midpoint annotations — bill-mode only. Place them
+        # in the upper half of the savings band so the text doesn't sit on
+        # top of either line or clip the fill patterning.
         if _bill_mode:
             def _annotate_savings(lo: int, hi: int, color: str) -> None:
                 if hi <= lo:
@@ -7033,15 +7054,22 @@ def _render_results():
                 if mid >= len(_cd):
                     return
                 gap = float(_bill_no.iloc[mid] - _total_ppa.iloc[mid])
-                mid_y = float((_bill_no.iloc[mid] + _total_ppa.iloc[mid]) / 2 / 1000)
+                # Anchor the label ~25% down from the utility line toward
+                # the PPA line so it sits inside the savings band without
+                # overlapping either line.
+                band_y = float(
+                    (0.75 * _bill_no.iloc[mid] + 0.25 * _total_ppa.iloc[mid]) / 1000
+                )
                 if gap > 0:
                     _fig.add_annotation(
-                        x=_x.iloc[mid], y=mid_y,
+                        x=_x.iloc[mid], y=band_y,
                         text=f"<b>${gap / 1000:.1f}K savings</b>",
                         showarrow=False,
                         font=dict(size=11, color=color),
-                        bgcolor="rgba(255,255,255,0.88)",
-                        borderpad=3,
+                        bgcolor="rgba(255,255,255,0.94)",
+                        bordercolor=color,
+                        borderwidth=1,
+                        borderpad=4,
                     )
 
             if nem_switch and num_years_1 and num_years_1 < len(_cd):
