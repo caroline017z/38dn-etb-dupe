@@ -11,6 +11,8 @@ from urllib3.util.retry import Retry
 from dataclasses import dataclass, field
 from dotenv import load_dotenv
 
+from .cache import disk_cached
+
 load_dotenv()
 
 
@@ -95,6 +97,7 @@ class TariffSchedule:
 
 
 @st.cache_data(ttl=3600, show_spinner="Fetching rates...")
+@disk_cached(namespace="urdb_rate_list", ttl=7 * 24 * 3600)
 def fetch_available_rates(utility_name: str) -> list[dict]:
     """
     Fetch available rate schedules for a given utility from OpenEI URDB.
@@ -139,6 +142,7 @@ def fetch_available_rates(utility_name: str) -> list[dict]:
 
 
 @st.cache_data(ttl=3600, show_spinner="Loading tariff...")
+@disk_cached(namespace="urdb_tariff_detail")
 def fetch_tariff_detail(rate_label: str) -> TariffSchedule:
     """
     Fetch and parse the full tariff detail for a given rate label from OpenEI.
