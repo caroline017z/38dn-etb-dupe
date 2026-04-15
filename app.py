@@ -6041,41 +6041,45 @@ def _render_results():
     #      itself after a button inside it triggers a rerun. We simulate
     #      an Escape key press on the document (BaseWeb popovers listen
     #      for it) and click outside the popover as a fallback.
-    if st.session_state.pop("_focus_proposals_tab", False):
+    _focus_ppa_tab = st.session_state.pop("_focus_ppa_rate_tab", False)
+    _focus_proposals = st.session_state.pop("_focus_proposals_tab", False)
+    if _focus_proposals or _focus_ppa_tab:
+        _sub_label = "Proposals" if _focus_proposals else "PPA Rate"
         st.components.v1.html(
-            """
+            f"""
             <script>
-            (function focusProposalsAndClosePopover() {
+            (function focusProposalsAndClosePopover() {{
                 const doc = window.parent.document;
+                const subLabel = {json.dumps(_sub_label)};
 
-                function clickTab(labels) {
+                function clickTab(labels) {{
                     const tabs = doc.querySelectorAll(
                         '.stTabs [data-baseweb="tab-list"] > button'
                     );
                     if (!tabs || tabs.length === 0) return false;
-                    for (const t of tabs) {
+                    for (const t of tabs) {{
                         const text = (t.innerText || "").trim();
-                        if (labels.includes(text)) { t.click(); return true; }
-                    }
+                        if (labels.includes(text)) {{ t.click(); return true; }}
+                    }}
                     return false;
-                }
+                }}
 
-                function focusProposals() {
+                function focusProposals() {{
                     /* First click the top-level PPA & Proposals section,
-                     * then the Proposals sub-tab. */
+                     * then the requested sub-tab. */
                     const topOk = clickTab(["PPA & Proposals"]);
                     if (!topOk) return false;
                     /* Sub-tab clicks must wait for DOM mount. */
-                    setTimeout(function () { clickTab(["Proposals"]); }, 150);
+                    setTimeout(function () {{ clickTab([subLabel]); }}, 150);
                     return true;
-                }
+                }}
 
-                function closeAnyOpenPopover() {
+                function closeAnyOpenPopover() {{
                     /* BaseWeb popovers listen for Escape on the document. */
-                    const esc = new KeyboardEvent("keydown", {
+                    const esc = new KeyboardEvent("keydown", {{
                         key: "Escape", code: "Escape",
                         keyCode: 27, which: 27, bubbles: true,
-                    });
+                    }});
                     doc.dispatchEvent(esc);
                     doc.body.dispatchEvent(esc);
                     /* Fallback: click outside any visible popover layer. */
@@ -6085,21 +6089,21 @@ def _render_results():
                     if (layers.length === 0) return;
                     const outside = doc.querySelector('.block-container');
                     if (outside) outside.click();
-                }
+                }}
 
                 /* Try once immediately, then poll briefly for late mounts. */
                 let done = focusProposals();
                 closeAnyOpenPopover();
-                if (!done) {
-                    const iv = setInterval(function () {
-                        if (focusProposals()) {
+                if (!done) {{
+                    const iv = setInterval(function () {{
+                        if (focusProposals()) {{
                             closeAnyOpenPopover();
                             clearInterval(iv);
-                        }
-                    }, 100);
-                    setTimeout(function () { clearInterval(iv); }, 3000);
-                }
-            })();
+                        }}
+                    }}, 100);
+                    setTimeout(function () {{ clearInterval(iv); }}, 3000);
+                }}
+            }})();
             </script>
             """,
             height=0,
@@ -6857,22 +6861,20 @@ def _render_results():
                             f"Saved PPA '{name}' (no Proposal link)", "💾",
                         )
 
-                    # Fragment-scoped rerun so the teal Active-Proposal card
-                    # and the scenarios table below refresh immediately
-                    # without bouncing the user back to the Overview tab.
-                    try:
-                        st.rerun(scope="fragment")
-                    except TypeError:
-                        # Streamlit <1.32 doesn't support the scope kwarg.
-                        pass
+                    # Full rerun so the top-bar Proposals popover also
+                    # picks up the newly created / updated Proposal — a
+                    # fragment-scoped rerun would leave it stale since the
+                    # popover renders outside this fragment. The JS focus
+                    # handler below re-opens the PPA Rate sub-tab so the
+                    # user stays where they were.
+                    st.session_state["_focus_ppa_rate_tab"] = True
+                    st.rerun()
             with sv_clear_col:
                 if st.button("Clear PPA pool", key="ppa_clear_btn", use_container_width=True,
                              help="Clears the session's PPA scenarios pool (saved Proposals are untouched)."):
                     st.session_state["saved_ppa_scenarios"] = {}
-                    try:
-                        st.rerun(scope="fragment")
-                    except TypeError:
-                        pass
+                    st.session_state["_focus_ppa_rate_tab"] = True
+                    st.rerun()
 
         # Saved scenarios table (above chart so the user sees their saved
         # trajectories before looking at the overlay).
