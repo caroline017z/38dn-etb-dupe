@@ -1,0 +1,20 @@
+{
+  "description": "Two-period TOU under NEM-2 with NBC. Exercises TOU netting + NBC path.",
+  "tariff": {
+    "kind": "tou",
+    "peak_rate": 0.35,
+    "offpeak_rate": 0.12,
+    "peak_hours": [16, 17, 18, 19, 20],
+    "fixed_monthly": 15.0,
+    "label": "golden_tou",
+    "name": "Golden TOU",
+    "utility": "PG&E"
+  },
+  "load": {"kind": "seed", "mean": 40.0, "std": 12.0, "seed": 42},
+  "solar": {"kind": "bell", "peak": 80.0},
+  "export_rate": {"kind": "zero"},
+  "nem_regime": "NEM-2",
+  "nbc_rate": 0.025,
+  "nsc_rate": 0.04,
+  "billing_option": "ABO"
+}
