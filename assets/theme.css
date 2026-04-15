@@ -176,9 +176,25 @@ p, li, div, label, input, select, textarea, .stMarkdown {
     color: inherit !important;
 }
 .stButton > button:hover:not(:disabled) {
+    /* Subtle: border deepens + hairline inner ring, no background flash. */
     border-color: var(--38dn-navy) !important;
-    background: var(--38dn-surface-1) !important;
+    background: var(--38dn-surface-0) !important;
+    box-shadow: inset 0 0 0 1px var(--38dn-navy) !important;
 }
+.stButton > button:focus:not(:disabled),
+.stButton > button:focus-visible:not(:disabled) {
+    outline: none !important;
+    box-shadow: inset 0 0 0 1px var(--38dn-navy),
+                0 0 0 3px rgba(14, 40, 65, 0.12) !important;
+    border-color: var(--38dn-navy) !important;
+}
+/* Kill BaseWeb's built-in pressed-state white flash. */
+.stButton > button:active:not(:disabled) {
+    background: var(--38dn-surface-2) !important;
+    box-shadow: inset 0 0 0 1px var(--38dn-navy) !important;
+    transform: none !important;
+}
+
 .stButton > button[kind="primary"],
 .stButton > button[data-testid="stBaseButton-primary"] {
     background: var(--38dn-navy) !important;
@@ -187,8 +203,16 @@ p, li, div, label, input, select, textarea, .stMarkdown {
 }
 .stButton > button[kind="primary"]:hover:not(:disabled),
 .stButton > button[data-testid="stBaseButton-primary"]:hover:not(:disabled) {
-    background: #061a2d !important;
-    border-color: #061a2d !important;
+    /* Slightly deeper navy — no white flash, no outline ring. */
+    background: #0a1e31 !important;
+    border-color: #0a1e31 !important;
+    box-shadow: 0 0 0 3px rgba(14, 40, 65, 0.18) !important;
+}
+.stButton > button[kind="primary"]:active:not(:disabled),
+.stButton > button[data-testid="stBaseButton-primary"]:active:not(:disabled) {
+    background: #061727 !important;
+    border-color: #061727 !important;
+    box-shadow: none !important;
 }
 /* Disabled primary — preserve contrast so the label stays legible. */
 .stButton > button[kind="primary"]:disabled,
@@ -229,8 +253,18 @@ button[data-testid="stBaseButton-secondary"] *,
 button[data-testid="stPopoverButton"]:hover:not(:disabled),
 button[data-testid="stBaseButton-secondary"]:hover:not(:disabled),
 .stPopover button:hover:not(:disabled) {
+    /* Same subtle inner-ring treatment as .stButton — no background flash. */
     border-color: var(--38dn-navy) !important;
-    background: var(--38dn-surface-1) !important;
+    background: var(--38dn-surface-0) !important;
+    box-shadow: inset 0 0 0 1px var(--38dn-navy) !important;
+}
+[data-testid="stPopover"] button:active:not(:disabled),
+button[data-testid="stPopoverButton"]:active:not(:disabled),
+button[data-testid="stBaseButton-secondary"]:active:not(:disabled),
+.stPopover button:active:not(:disabled) {
+    background: var(--38dn-surface-2) !important;
+    box-shadow: inset 0 0 0 1px var(--38dn-navy) !important;
+    transform: none !important;
 }
 /* Nav-bar context overrides these back to the navy chrome. */
 .nav-bar-wrapper button[data-testid="stPopoverButton"],
@@ -254,8 +288,16 @@ button[data-testid="stBaseButton-secondary"]:hover:not(:disabled),
 }
 [data-testid="stDownloadButton"] button:hover:not(:disabled),
 .stDownloadButton button:hover:not(:disabled) {
+    /* Subtle inner-ring on hover — no white flash. */
     border-color: var(--38dn-navy) !important;
-    background: var(--38dn-surface-1) !important;
+    background: var(--38dn-surface-0) !important;
+    box-shadow: inset 0 0 0 1px var(--38dn-navy) !important;
+}
+[data-testid="stDownloadButton"] button:active:not(:disabled),
+.stDownloadButton button:active:not(:disabled) {
+    background: var(--38dn-surface-2) !important;
+    box-shadow: inset 0 0 0 1px var(--38dn-navy) !important;
+    transform: none !important;
 }
 
 /* Selectbox / multiselect / text input chrome — ensure the visible text
