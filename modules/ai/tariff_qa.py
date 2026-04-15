@@ -1,8 +1,9 @@
-"""Grounded Q&A assistant for the currently-selected URDB tariff.
+"""Grounded Q&A assistant for the selected system, tariff, NEM regime, and
+billing structure.
 
-Intentionally minimal: no tool use, no browsing — the model answers
-strictly from the URDB JSON we attach as a cached context block. Short
-answers, direct quotes where appropriate.
+No tool use, no browsing — the model answers strictly from the context
+attached as a cached block. Callers pass either the URDB tariff JSON alone
+or a composite dict with `urdb_tariff` + `system_context` keys.
 """
 
 from __future__ import annotations
@@ -13,10 +14,18 @@ from .client import CachedBlock, call_with_cache, text_from
 
 
 _SYSTEM = (
-    "You answer short factual questions about a California utility tariff. "
-    "Answer only from the URDB JSON in the user turn — if the answer is not "
-    "there, say 'Not stated in the tariff JSON.' Keep answers under 80 words. "
-    "Cite dollar amounts, kWh/kW thresholds, and TOU windows verbatim."
+    "You answer short factual questions about a California PV+BESS project's "
+    "selected system, tariff, NEM regime, and billing structure. The user turn "
+    "attaches a JSON context with two keys: `urdb_tariff` (the tariff rate "
+    "structure from the URDB) and `system_context` (the selected PV/BESS size, "
+    "NEM regime, utility). "
+    "Ground every answer in the attached context. If a question cannot be "
+    "answered from the context, say so explicitly. Keep answers under 100 "
+    "words. Cite dollar amounts, kWh/kW thresholds, and TOU windows verbatim "
+    "from the tariff where relevant. For NEM regime questions, explain how the "
+    "regime treats exports (retail TOU netting for NEM-1/2, hourly ACC "
+    "settlement for NEM-3) and point to the specific tariff fields that drive "
+    "the math (energy rate structure, export compensation mechanism, NBC/NSC)."
 )
 
 
