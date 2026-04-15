@@ -163,18 +163,24 @@ def summarize_result(result: Any) -> dict[str, Any]:
     m = result.monthly_summary
     monthly_cols = {}
     for col in [
-        "total_bill",
+        "net_bill",
         "energy_cost",
         "export_credit",
         "fixed_charge",
-        "net_energy_charge",
+        "total_demand_charge",
+        "nbc_charge",
     ]:
         if col in m.columns:
             monthly_cols[col] = [round(float(v), 4) for v in m[col].tolist()]
+
+    baseline = getattr(result, "old_rate_annual_baseline", None)
     return {
-        "annual_total_bill": round(float(m["total_bill"].sum()), 4) if "total_bill" in m else None,
+        "annual_net_bill": round(float(m["net_bill"].sum()), 4) if "net_bill" in m else None,
         "annual_energy_cost": round(float(m["energy_cost"].sum()), 4) if "energy_cost" in m else None,
         "annual_export_credit": round(float(m["export_credit"].sum()), 4) if "export_credit" in m else None,
-        "old_rate_annual_baseline": round(float(getattr(result, "old_rate_annual_baseline", 0.0)), 4),
+        "annual_bill_with_solar": round(float(result.annual_bill_with_solar), 4),
+        "annual_bill_without_solar": round(float(result.annual_bill_without_solar), 4),
+        "annual_savings": round(float(result.annual_savings), 4),
+        "old_rate_annual_baseline": round(float(baseline), 4) if baseline is not None else None,
         "monthly": monthly_cols,
     }
