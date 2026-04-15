@@ -6348,9 +6348,21 @@ def _render_results():
         if _yr1_rate_r2 is not None:
             _k1, _k2, _k3, _k4, _k5 = st.columns(5)
             _k1.metric(f"Yr-1 PPA · {nem_regime_1}", f"${_yr1_rate_r1:.4f}/kWh")
-            _k2.metric(f"Yr-1 PPA · {nem_regime_2}", f"${_yr1_rate_r2:.4f}/kWh",
-                       delta=f"${(_yr1_rate_r2 - _yr1_rate_r1):+.4f}/kWh",
-                       delta_color="inverse")
+
+            # Streamlit's st.metric parses the delta's sign from the FIRST
+            # non-whitespace character of the string. A leading "$" hides
+            # the minus sign and causes ▼-for-negative to render as ▲.
+            # Put the sign at position 0 explicitly — produces "-$0.0345/kWh"
+            # for a rate drop (shows ▼ green under delta_color=inverse) and
+            # "+$0.0345/kWh" for a rise (▲ red).
+            _ppa_diff = _yr1_rate_r2 - _yr1_rate_r1
+            _delta_sign = "-" if _ppa_diff < 0 else "+"
+            _delta_str = f"{_delta_sign}${abs(_ppa_diff):.4f}/kWh"
+            _k2.metric(
+                f"Yr-1 PPA · {nem_regime_2}", f"${_yr1_rate_r2:.4f}/kWh",
+                delta=_delta_str,
+                delta_color="inverse",
+            )
             _k3.metric("Year-1 Savings", f"${_yr1_sav:,.0f}")
             _k4.metric("Savings %", f"{_yr1_pct:.1f}%")
             _k5.metric("Lifetime Savings", f"${_life_sav:,.0f}")
