@@ -1,0 +1,18 @@
+{
+  "description": "Flat-rate tariff under NEM-3 with flat export compensation. Sanity baseline.",
+  "tariff": {
+    "kind": "flat",
+    "rate": 0.20,
+    "fixed_monthly": 10.0,
+    "label": "golden_flat",
+    "name": "Golden Flat",
+    "utility": "PG&E"
+  },
+  "load": {"kind": "diurnal", "base": 20.0, "peak": 80.0, "peak_hours": [13, 14, 15, 16, 17, 18]},
+  "solar": {"kind": "bell", "peak": 60.0},
+  "export_rate": {"kind": "flat", "value": 0.05},
+  "nem_regime": "NEM-3",
+  "nbc_rate": 0.0,
+  "nsc_rate": 0.04,
+  "billing_option": "ABO"
+}

@@ -9,8 +9,9 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import pandas as pd
 import numpy as np
-from dataclasses import dataclass
-from functools import lru_cache
+from dataclasses import dataclass, asdict
+
+from .cache import disk_cached
 
 _retry = Retry(total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
 _session = requests.Session()
@@ -62,7 +63,7 @@ def _geocode_nominatim(address: str) -> tuple[float, float]:
     return location.latitude, location.longitude  # type: ignore[union-attr]
 
 
-@lru_cache(maxsize=128)
+@disk_cached(namespace="geocode")
 def geocode_address(address: str) -> tuple[float, float]:
     """Convert address string to (lat, lon).
 
@@ -83,6 +84,27 @@ def geocode_address(address: str) -> tuple[float, float]:
     return _geocode_nominatim(address)
 
 
+def _pvwatts_cache_key(
+    api_key: str,
+    lat: float,
+    lon: float,
+    config: "PVSystemConfig",
+    start_year: int = 2026,
+) -> str:
+    # API key intentionally excluded — same inputs, any valid key produces
+    # identical results from NREL (TMY data). Lat/lon are rounded to 4 decimals
+    # (~11m) so trivial geocoding jitter doesn't miss the cache.
+    payload = {
+        "lat": round(lat, 4),
+        "lon": round(lon, 4),
+        "cfg": asdict(config),
+        "year": start_year,
+    }
+    import hashlib, json
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
+
+@disk_cached(namespace="pvwatts_8760", key_fn=_pvwatts_cache_key)
 def fetch_production_8760(
     api_key: str,
     lat: float,
