@@ -617,6 +617,139 @@ def _sp_payback_view(projection, system_cost, NAVY, GREEN, BLUE, INK, FONT) -> N
     st.plotly_chart(fig, use_container_width=True, key="sp_payback_chart")
 
 
+def _proposal_comparison_payload(source: "_ProposalObj") -> list[dict]:
+    """Shape the primary + comparison PPASnapshots into the dict list that
+    ``generate_proposal_pptx``'s ``comparison_ppas`` kwarg expects for the
+    Alternatives Considered appendix slide.
+    """
+    return [
+        {
+            "name": "Recommended",
+            "year1_rate_r1": source.primary_ppa.year1_rate_r1,
+            "year1_rate_r2": source.primary_ppa.year1_rate_r2,
+            "escalator_r1_pct": source.primary_ppa.escalator_r1_pct,
+            "escalator_r2_pct": source.primary_ppa.escalator_r2_pct,
+            "savings_pct": source.primary_ppa.savings_pct,
+            "lifetime_savings_usd": source.primary_ppa.lifetime_savings_usd,
+            "term_years": source.primary_ppa.term_years,
+        },
+        *[
+            {
+                "name": s.name,
+                "year1_rate_r1": s.year1_rate_r1,
+                "year1_rate_r2": s.year1_rate_r2,
+                "escalator_r1_pct": s.escalator_r1_pct,
+                "escalator_r2_pct": s.escalator_r2_pct,
+                "savings_pct": s.savings_pct,
+                "lifetime_savings_usd": s.lifetime_savings_usd,
+                "term_years": s.term_years,
+            }
+            for s in source.comparison_ppas
+        ],
+    ]
+
+
+def _build_proposal_deck_bytes(
+    *,
+    source: "_ProposalObj",
+    include_appendix: bool,
+    result,
+    pv_only_result,
+    system_cost: float,
+    rate_escalator: float,
+    load_escalator: float,
+    compound_escalation: bool,
+    rs_old_baseline,
+    es_offset_annual,
+    common_nem_kw: dict,
+    utility_name: str,
+    selected_rate_name: str | None,
+    system_size_kw: float,
+    dc_ac_ratio: float,
+    battery_cap_kwh: float,
+    nem_regime_1: str,
+    nem_regime_2: str | None,
+    num_years_1: int | None,
+) -> bytes:
+    """Assemble the proposal-term projection, inject PPA cost per year, and
+    hand off to generate_proposal_pptx. Used from both the Proposals tab
+    export buttons and the Downloads tab builder so outputs converge.
+    """
+    primary = source.primary_ppa
+    base_proj = build_annual_projection(
+        result=result,
+        system_cost=system_cost,
+        rate_escalator_pct=rate_escalator,
+        load_escalator_pct=load_escalator,
+        years=source.term_years,
+        export_rates_multiyear=st.session_state.get("export_rates_multiyear"),
+        result_pv_only=pv_only_result,
+        compound_escalation=compound_escalation,
+        rate_shift_old_baseline=rs_old_baseline,
+        existing_solar_offset_kwh=es_offset_annual,
+        **common_nem_kw,
+    )
+
+    # Align snapshot rate-per-year to the proposal term — extrapolate at the
+    # regime-2 escalator when short, truncate when long.
+    rates = list(primary.rate_per_year)
+    if len(rates) < source.term_years:
+        tail_esc = (primary.escalator_r2_pct or primary.escalator_r1_pct) / 100.0
+        last = rates[-1] if rates else primary.year1_rate_r1
+        for _ in range(source.term_years - len(rates)):
+            last = last * (1.0 + tail_esc)
+            rates.append(round(last, 5))
+    elif len(rates) > source.term_years:
+        rates = rates[: source.term_years]
+
+    proj_df = base_proj.copy()
+    rate_lookup = dict(enumerate(rates, start=1))
+    for idx, row in proj_df.iterrows():
+        yr = int(row["Year"])
+        rate_yr = float(rate_lookup.get(yr, 0.0))
+        solar_kwh = row["Solar (kWh)"]
+        ppa_cost = max(rate_yr, 0.0) * solar_kwh
+        util_residual = row["Bill w/ Solar ($)"]
+        total_cost = util_residual + ppa_cost
+        bill_no = row["Bill w/o Solar ($)"]
+        proj_df.at[idx, "PPA Cost ($)"] = round(ppa_cost, 2)
+        proj_df.at[idx, "Bill w/ Solar ($)"] = round(total_cost, 2)
+        proj_df.at[idx, "Annual Savings ($)"] = round(bill_no - total_cost, 2)
+    proj_df["Cumulative Savings ($)"] = proj_df["Annual Savings ($)"].cumsum().round(2)
+
+    return generate_proposal_pptx(
+        customer_name=source.customer_name or "Customer",
+        address=source.site_address,
+        utility_account=source.utility_account,
+        utility_name=utility_name,
+        tariff_name=selected_rate_name or "",
+        date_str=date.today().strftime("%B %Y"),
+        system_size_kw=float(system_size_kw or 0.0),
+        dc_ac_ratio=float(dc_ac_ratio or 1.0),
+        battery_kwh=float(battery_cap_kwh or 0.0),
+        battery_kw=0.0,
+        ppa_rate=primary.year1_rate_r1 or None,
+        ppa_escalator_pct=primary.escalator_r1_pct,
+        ppa_escalator_pct_2=primary.escalator_r2_pct,
+        term_years=source.term_years,
+        rate_escalator_pct=rate_escalator,
+        result=result,
+        annual_proj_df=proj_df,
+        nem_regime_1=nem_regime_1,
+        nem_regime_2=nem_regime_2,
+        num_years_1=num_years_1,
+        customer_savings_pct=primary.savings_pct,
+        customer_savings_pct_2=primary.savings_pct,
+        ppa_rate_regime_2=primary.year1_rate_r2,
+        annual_proj_df_original=base_proj,
+        narrative_bullets=list(source.narrative_bullets) or None,
+        comparison_ppas=(
+            _proposal_comparison_payload(source)
+            if include_appendix and source.comparison_ppas else None
+        ),
+    )
+
+
 def _render_proposals_tab(
     *,
     simulation_name,
