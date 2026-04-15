@@ -42,6 +42,12 @@ from modules.export_value import (
     parse_multiyear_export_rates,
 )
 from modules.billing import run_billing_simulation, BillingResult, compute_old_rate_baseline
+from modules.simulation import (
+    SimulationInputs,
+    run_simulation,
+    inputs_from_session_state,
+)
+from dataclasses import replace as _dc_replace
 from modules.billing_aggregation import (
     MeterConfig,
     NemAProfile,
@@ -3873,18 +3879,21 @@ def _run_simulation():
                 )
 
             else:
-                # ============ Single-meter Custom billing path (original) ============
-                # --- Step 1: PV-only billing ---
-                result_pv_only = run_billing_simulation(
-                    load_8760=st.session_state["load_8760"],
-                    production_8760=st.session_state["production_8760"],
-                    tariff=st.session_state["tariff"],
-                    export_rates_8760=_export_rates_for_sim,
+                # ============ Single-meter Custom billing path ============
+                # Phase 1: pipeline runs through modules.simulation.run_simulation
+                # so Monte Carlo / AI callers share one code path.
+                _base_sim_inputs = inputs_from_session_state(
+                    st.session_state,
                     nem_regime=nem_regime_1,
                     nbc_rate=_nem_nbc,
                     nsc_rate=_nem_nsc,
                     billing_option=_nem_billing,
+                    export_rates_placeholder=_export_rates_for_sim,
+                    include_battery=False,
                 )
+
+                # --- Step 1: PV-only billing ---
+                result_pv_only = run_simulation(_base_sim_inputs).pv_only_result
                 st.session_state["billing_result_pv_only"] = result_pv_only
                 st.session_state["sizing_result"] = None
 
@@ -3928,19 +3937,14 @@ def _run_simulation():
 
 
                             # Run full billing with best size to get proper BillingResult
-                            result_batt = run_billing_simulation(
-                                load_8760=st.session_state["load_8760"],
-                                production_8760=st.session_state["production_8760"],
-                                tariff=st.session_state["tariff"],
-                                export_rates_8760=_export_rates_for_sim,
-                                battery_config=batt_cfg,
-                                capacity_kwh=sizing_res.best_size_kwh,
-                                monthly_dispatch=_use_monthly,
-                                nem_regime=nem_regime_1,
-                                nbc_rate=_nem_nbc,
-                                nsc_rate=_nem_nsc,
-                                billing_option=_nem_billing,
-                            )
+                            result_batt = run_simulation(
+                                _dc_replace(
+                                    _base_sim_inputs,
+                                    battery_config=batt_cfg,
+                                    battery_capacity_kwh=sizing_res.best_size_kwh,
+                                    monthly_dispatch=_use_monthly,
+                                )
+                            ).billing_result
                             st.session_state["billing_result"] = result_batt
                             st.session_state["billing_result_batt"] = result_batt
                             _check_battery_solver(result_batt)
@@ -3959,19 +3963,14 @@ def _run_simulation():
                         # ---- Fixed-size dispatch ----
                         batt_cap = st.session_state.get("battery_capacity_kwh", 0)
                         if batt_cap > 0:
-                            result_batt = run_billing_simulation(
-                                load_8760=st.session_state["load_8760"],
-                                production_8760=st.session_state["production_8760"],
-                                tariff=st.session_state["tariff"],
-                                export_rates_8760=_export_rates_for_sim,
-                                battery_config=batt_cfg,
-                                capacity_kwh=batt_cap,
-                                monthly_dispatch=_use_monthly,
-                                nem_regime=nem_regime_1,
-                                nbc_rate=_nem_nbc,
-                                nsc_rate=_nem_nsc,
-                                billing_option=_nem_billing,
-                            )
+                            result_batt = run_simulation(
+                                _dc_replace(
+                                    _base_sim_inputs,
+                                    battery_config=batt_cfg,
+                                    battery_capacity_kwh=batt_cap,
+                                    monthly_dispatch=_use_monthly,
+                                )
+                            ).billing_result
                             st.session_state["billing_result"] = result_batt
                             st.session_state["billing_result_batt"] = result_batt
                             _check_battery_solver(result_batt)
