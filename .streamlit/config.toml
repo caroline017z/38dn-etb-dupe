@@ -1,2 +1,8 @@
+# 38DN institutional theme (Phase 5). Matches assets/theme.css tokens.
 [theme]
-primaryColor = "#2A7B7B"
+base = "light"
+primaryColor = "#0E2841"        # navy — primary brand
+backgroundColor = "#F8FAFC"     # page background (neutral slate-50)
+secondaryBackgroundColor = "#FFFFFF"  # card surfaces
+textColor = "#0E2841"           # primary ink
+font = "sans serif"             # overridden to Inter via theme.css

@@ -645,8 +645,14 @@ def _slide_exec_summary(prs, pg, total, name, result, tariff, utility,
                         sys_kw, batt_kwh, ppa_rate, esc_pct, term,
                         customer_savings_pct=None, customer_savings_pct_2=None,
                         nem_regime_1=None, nem_regime_2=None,
-                        ppa_rate_regime_2=None, ppa_cost=None):
-    """Executive Summary — two-column financial + technical overview."""
+                        ppa_rate_regime_2=None, ppa_cost=None,
+                        narrative_bullets=None):
+    """Executive Summary — two-column financial + technical overview.
+
+    When ``narrative_bullets`` is supplied (list of short strings from the AI
+    narrative generator), they replace the auto-generated takeaway sentence
+    joined by `•` separators. Layout is preserved.
+    """
     sl = prs.slides.add_slide(prs.slide_layouts[6])
     _accent_rule(sl)
 
@@ -659,9 +665,13 @@ def _slide_exec_summary(prs, pg, total, name, result, tariff, utility,
     _action_title(sl, "Executive Summary")
     _subtitle(sl, f"{name}  |  {utility} {tariff}  |  {sys_kw:,.0f} kW-DC Solar"
               + (f" + {batt_kwh:,.0f} kWh BESS" if batt_kwh > 0 else ""))
-    _takeaway(sl,
-        f"Day-1 savings of {_fd(sav)} ({pct:.1f}%) with zero upfront capital. "
-        f"System offsets {offset:.0f}% of annual load and provides long-term rate certainty.")
+    if narrative_bullets:
+        # Join as a single callout; PPTX layout is tight so multiline risks overflow.
+        _takeaway(sl, "  •  ".join(str(b).strip() for b in narrative_bullets if b))
+    else:
+        _takeaway(sl,
+            f"Day-1 savings of {_fd(sav)} ({pct:.1f}%) with zero upfront capital. "
+            f"System offsets {offset:.0f}% of annual load and provides long-term rate certainty.")
 
     # ── Left column: Financial ──
     cx1 = ML; cx2 = ML + Inches(6.2)
@@ -1809,6 +1819,102 @@ def _slide_process(prs, pg, total, sys_kw, batt_kwh, batt_kw,
     _footer(sl, pg, total)
 
 
+def _slide_label_for_primary(
+    nem_regime_1, nem_regime_2, ppa_rate, ppa_rate_r2, esc_1, esc_2,
+) -> str:
+    """Short label for the primary PPA on the alternatives-considered slide."""
+    parts = []
+    if ppa_rate is not None:
+        parts.append(f"${ppa_rate:.3f}/kWh")
+    if esc_1 is not None:
+        parts.append(f"{esc_1:.1f}% esc")
+    if ppa_rate_r2 is not None and nem_regime_2:
+        parts.append(f"→ ${ppa_rate_r2:.3f}/kWh ({nem_regime_2})")
+    return "Recommended: " + ", ".join(parts) if parts else "Recommended offer"
+
+
+def _slide_alternatives_considered(prs, pg, total, *, primary_label: str, alternatives: list):
+    """Appendix slide: Primary vs Alternative PPAs in a compact table.
+
+    ``alternatives`` is a list of dicts with keys matching the ``PPASnapshot``
+    field names we care about: ``name``, ``year1_rate_r1``, ``year1_rate_r2``,
+    ``escalator_r1_pct``, ``escalator_r2_pct``, ``savings_pct``,
+    ``lifetime_savings_usd``, ``term_years``.
+    """
+    sl = prs.slides.add_slide(prs.slide_layouts[6])
+    _accent_rule(sl)
+    _action_title(sl, "Alternatives Considered")
+    _subtitle(sl, "Side-by-side view of the recommended offer and alternatives reviewed during pricing.")
+    _takeaway(sl, primary_label)
+
+    # Header + rows
+    rows = [
+        ("", "Recommended") + tuple(a.get("name", f"Alt {i+1}") for i, a in enumerate(alternatives)),
+    ]
+
+    def _fmt_rate_pair(r1, r2):
+        if r1 is None:
+            return "—"
+        if r2 is not None:
+            return f"${r1:.3f} → ${r2:.3f}/kWh"
+        return f"${r1:.3f}/kWh"
+
+    def _fmt_pct(v):
+        return f"{v:.1f}%" if v is not None else "—"
+
+    def _fmt_usd(v):
+        return f"${v:,.0f}" if v is not None else "—"
+
+    primary_like = alternatives[0].get("_recommended_view", None) if alternatives else None
+
+    # Metric rows — include the recommended values in the first column of each row.
+    metric_rows = [
+        ("Yr-1 PPA Rate", primary_like.get("year1_rate") if primary_like else None,
+         lambda a: _fmt_rate_pair(a.get("year1_rate_r1"), a.get("year1_rate_r2"))),
+        ("Escalator (Yr-1 regime)", primary_like.get("escalator") if primary_like else None,
+         lambda a: f"{(a.get('escalator_r1_pct') or 0):.1f}%/yr"),
+        ("Savings Target", primary_like.get("savings_pct") if primary_like else None,
+         lambda a: _fmt_pct(a.get("savings_pct"))),
+        ("Lifetime Savings", None,
+         lambda a: _fmt_usd(a.get("lifetime_savings_usd"))),
+        ("Term", None,
+         lambda a: f"{int(a.get('term_years') or 0)} yrs"),
+    ]
+
+    # We lay out as a simple grid of text boxes — python-pptx tables are
+    # heavyweight for a compact appendix and styling doesn't match the deck.
+    cols = 1 + len(alternatives)  # metric col + N PPAs
+    col_w = CW / cols
+    y0 = Inches(1.80)
+    row_h = Inches(0.42)
+
+    # Column headers
+    _txt(sl, ML, y0, col_w, row_h, text="Metric",
+         sz=Pt(11), bold=True, color=WHITE, align=PP_ALIGN.LEFT)
+    _rect(sl, ML, y0, col_w, row_h, fill=DK1)
+    for i, a in enumerate(alternatives):
+        x = ML + col_w * (i + 1)
+        _rect(sl, x, y0, col_w, row_h, fill=DK1)
+        label = "Recommended" if i == 0 else a.get("name", f"Alt {i}")
+        _txt(sl, x, y0, col_w, row_h, text=label,
+             sz=Pt(11), bold=True, color=WHITE, align=PP_ALIGN.CENTER)
+
+    # Re-render on top of the filled rects with the same text (so fill+text coexist).
+    for r, (metric, _unused_primary, getter) in enumerate(metric_rows, start=1):
+        y = y0 + row_h * r
+        bg = TBL_ALT if r % 2 == 1 else WHITE
+        _rect(sl, ML, y, CW, row_h, fill=bg)
+        _txt(sl, ML + Inches(0.12), y, col_w - Inches(0.12), row_h,
+             text=metric, sz=Pt(11), bold=True, color=DK1, align=PP_ALIGN.LEFT)
+        for i, a in enumerate(alternatives):
+            x = ML + col_w * (i + 1)
+            _txt(sl, x, y, col_w, row_h, text=getter(a),
+                 sz=Pt(11), color=DK1, align=PP_ALIGN.CENTER)
+
+    _source(sl, "38DN pricing model; values reflect the current simulation.")
+    _footer(sl, pg, total)
+
+
 def _slide_next_steps(prs, pg, total, ppa, esc, term):
     """Next Steps — navy background, green circles."""
     sl = prs.slides.add_slide(prs.slide_layouts[6])
@@ -1879,6 +1985,8 @@ def generate_proposal_pptx(
     customer_savings_pct_2: float | None = None,
     ppa_rate_regime_2: float | None = None,
     annual_proj_df_original: pd.DataFrame | None = None,
+    narrative_bullets: list[str] | None = None,
+    comparison_ppas: list[dict] | None = None,
 ) -> bytes:
     """Generate an institutional-quality branded customer proposal PPTX."""
     prs = Presentation()
@@ -1901,6 +2009,7 @@ def generate_proposal_pptx(
     total += 1  # process
     total += 1  # rate hedge
     if has_p: total += 1  # savings matrix
+    if comparison_ppas: total += 1  # alternatives considered appendix
     total += 1  # next steps
 
     pg = 0; ex = 0
@@ -1924,7 +2033,8 @@ def generate_proposal_pptx(
                             nem_regime_1=nem_regime_1,
                             nem_regime_2=nem_regime_2,
                             ppa_rate_regime_2=ppa_rate_regime_2,
-                            ppa_cost=_yr1_ppa_cost)
+                            ppa_cost=_yr1_ppa_cost,
+                            narrative_bullets=narrative_bullets)
 
     # Current Cost
     if has_r:
@@ -2021,6 +2131,15 @@ def generate_proposal_pptx(
                               term_years=term_years,
                               ppa_escalator_pct=ppa_escalator_pct or 0.0,
                               ppa_escalator_pct_2=ppa_escalator_pct_2)
+
+    # Alternatives Considered (Proposal comparison appendix)
+    if comparison_ppas:
+        pg += 1
+        _slide_alternatives_considered(
+            prs, pg, total,
+            primary_label=f"{_slide_label_for_primary(nem_regime_1, nem_regime_2, ppa_rate, ppa_rate_regime_2, ppa_escalator_pct, ppa_escalator_pct_2)}",
+            alternatives=comparison_ppas,
+        )
 
     # Next Steps
     pg += 1

@@ -598,6 +598,16 @@ def populate_session_from_simulation(st_session_state, sim_data: dict):
     # 10) Rate shift config
     st_session_state["rate_shift_enabled"] = inp.get("rate_shift_enabled", False)
 
-    # 11) Close saved view and flag editing mode
+    # 11) Restore saved PPA scenarios (Phase 3) and Proposals (Phase 4) if
+    # present on the saved sim dict. Older simulations predate both keys;
+    # default to empty so the PPA + Proposals tabs render clean empty-states
+    # instead of crashing on a missing key.
+    st_session_state["saved_ppa_scenarios"] = (
+        sim_data.get("saved_ppa_scenarios") or {}
+    )
+    st_session_state["proposals"] = sim_data.get("proposals") or {}
+    st_session_state["active_proposal_id"] = sim_data.get("active_proposal_id")
+
+    # 12) Close saved view and flag editing mode
     st_session_state["saved_view"] = None
     st_session_state["editing_saved_sim"] = True

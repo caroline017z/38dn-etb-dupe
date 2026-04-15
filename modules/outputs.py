@@ -77,7 +77,8 @@ def style_negative_red(styler):
     """Apply red styling to any cell whose text contains '(' (accounting negative)."""
     def _color(val):
         if isinstance(val, str) and "(" in val:
-            return "color: #cc0000; background-color: #ffe0e0"
+            # WCAG-friendly: darker red text, paler background (was #cc0000/#ffe0e0).
+            return "color: #a8141a; background-color: #fff5f5"
         return ""
     return styler.map(_color)
 
@@ -88,54 +89,50 @@ def render_styled_table(
     bold_cols: list[str] | None = None,
     highlight_cols: list[str] | None = None,
 ) -> str:
-    """Render a DataFrame as an HTML table string with red-negative styling.
+    """Render a DataFrame as an HTML table using the 38DN institutional
+    table style (see ``assets/theme.css::.tbl-38dn``).
 
-    This bypasses st.dataframe's unreliable Styler support by generating
-    raw HTML that st.markdown can render directly.
+    Classes are applied on cells; the stylesheet handles colors, typography,
+    zebra stripes, hover, and negatives. Output is class-based — re-skinning
+    only requires editing ``assets/theme.css``.
 
     Args:
-        df: Pre-formatted DataFrame (all values already strings).
-        bold_last_row: If True, bold the last row (TOTAL).
-        bold_cols: Column names whose headers and values should be bold.
-        highlight_cols: Column names to highlight with a light blue background.
-
-    Returns:
-        HTML string suitable for st.markdown(..., unsafe_allow_html=True).
+        df: pre-formatted DataFrame (every cell is a display-ready string).
+        bold_last_row: marks the last row as a TOTAL (navy top border + weight).
+        bold_cols: columns whose header + cells render semibold.
+        highlight_cols: columns rendered with a subtle info-blue background
+            (reserved for "pay attention here" totals like Cumulative Savings).
     """
     bold_set = set(bold_cols) if bold_cols else set()
     highlight_set = set(highlight_cols) if highlight_cols else set()
     col_list = list(df.columns)
 
-    html = [
-        '<div style="overflow-x:auto;">',
-        '<table style="width:100%; border-collapse:collapse; font-size:13px; font-family:Aptos Narrow,Aptos,Calibri,Arial Narrow,sans-serif;">',
-        "<thead><tr>",
-    ]
+    html = ['<div class="tbl-38dn">', "<table>", "<thead><tr>"]
     for col in col_list:
-        weight = "font-weight:700;" if col in bold_set else "font-weight:600;"
-        html.append(
-            f'<th style="text-align:right; padding:6px 8px;'
-            f' background:#0E2841; color:#ffffff; white-space:nowrap; {weight}">{_esc(str(col))}</th>'
-        )
+        extra = ' class="cell-bold"' if col in bold_set else ""
+        html.append(f"<th{extra}>{_esc(str(col))}</th>")
     html.append("</tr></thead><tbody>")
 
     for i, (_, row) in enumerate(df.iterrows()):
-        is_last = i == len(df) - 1
-        row_weight = "font-weight:700;" if (bold_last_row and is_last) else ""
-        border = "border-top:1.5px solid #d1d5db;" if (bold_last_row and is_last) else ""
-        row_bg = "background-color:#fafbfc;" if (i % 2 == 0 and not (bold_last_row and is_last)) else ""
-        html.append(f"<tr style='{row_weight}{border}{row_bg}'>")
+        is_total = bold_last_row and i == len(df) - 1
+        tr_cls = ' class="total-row"' if is_total else ""
+        html.append(f"<tr{tr_cls}>")
         for j, val in enumerate(row):
             s = str(val)
-            col_bold = "font-weight:700;" if col_list[j] in bold_set else ""
-            cell_style = f"text-align:right; padding:4px 8px; white-space:nowrap; {col_bold}"
-            if j == 0:
-                cell_style = f"text-align:left; padding:4px 8px; white-space:nowrap; {col_bold}"
+            # Pre-rendered SVG (sparklines) passes through unescaped. Every
+            # other cell is HTML-escaped to prevent injection.
+            is_raw_svg = s.lstrip().startswith("<svg")
+            classes: list[str] = []
+            if col_list[j] in bold_set or is_total:
+                classes.append("cell-bold")
             if col_list[j] in highlight_set:
-                cell_style += " background-color:#e3f2fd;"
-            elif "(" in s:
-                cell_style += " color:#cc0000; background-color:#ffe0e0;"
-            html.append(f"<td style='{cell_style}'>{_esc(s)}</td>")
+                classes.append("cell-highlight")
+            elif "(" in s and not is_raw_svg:
+                # Accounting negative: `$(1,234)` format rendered red.
+                classes.append("cell-negative")
+            cls_attr = f' class="{" ".join(classes)}"' if classes else ""
+            cell_html = s if is_raw_svg else _esc(s)
+            html.append(f"<td{cls_attr}>{cell_html}</td>")
         html.append("</tr>")
 
     html.append("</tbody></table></div>")
@@ -224,6 +221,7 @@ def build_monthly_summary_display(
         ]
         display_cols.append("rate_shift_savings")
 
+    # Sub-component export kWh columns indented under the total Export (kWh) column.
     rename_map.update({
         "energy_cost": "Energy ($)",
         "total_demand_charge": "Demand ($)",
@@ -232,11 +230,21 @@ def build_monthly_summary_display(
         "export_credit": "Export Credit ($)",
         "net_bill": "Net Bill ($)",
         "rate_shift_savings": "Rate Shift Savings ($)",
+        "export_peak_kwh": "↳ Peak (kWh)",
+        "export_offpeak_kwh": "↳ Off-Peak (kWh)",
     })
 
     # Only include columns that exist
     display_cols = [c for c in display_cols if c in df.columns]
     df = df[display_cols].rename(columns=rename_map)
+
+    # Negate cost-outflow columns so the bill rows render as accounting negatives
+    # (Energy/Demand/Fixed/NBC/Net Bill as red parentheses, Export Credit as
+    # positive). Export Credit and Rate Shift Savings stay positive.
+    COST_OUTFLOWS = ("Energy ($)", "Demand ($)", "Fixed ($)", "NBC ($)", "Net Bill ($)")
+    for col in COST_OUTFLOWS:
+        if col in df.columns:
+            df[col] = df[col] * -1
 
     # Format kWh columns
     kwh_cols = [c for c in df.columns if "(kWh)" in c]
@@ -795,30 +803,80 @@ def build_annual_projection(
     return pd.DataFrame(rows)
 
 
+# ─── 38DN brand palette — delegates to modules.ui.tokens ────────────────────
+# Kept as module-level aliases so existing code in app.py that imports them
+# directly (if any) continues to work. New code should import PALETTE from
+# modules.ui.tokens instead.
+from modules.ui.tokens import PALETTE as _PAL, PLOTLY_LAYOUT as _PLY_BASE
+_38DN_NAVY   = _PAL["navy"]
+_38DN_GREEN  = _PAL["green"]
+_38DN_TEAL   = _PAL["teal"]
+_38DN_BLUE   = _PAL["blue"]
+_38DN_AMBER  = _PAL["amber"]
+_38DN_GRAY50 = _PAL["slate_50"]
+_38DN_INK    = _PAL["ink"]
+_38DN_FONT   = "Inter, Aptos Narrow, sans-serif"
+
+
+def _apply_38dn_layout(fig: go.Figure, *, title: str, x_title: str, y_title: str,
+                       height: int = 400, barmode: str | None = None) -> go.Figure:
+    """Apply consistent 38DN chart styling via the token-backed base layout
+    in :mod:`modules.ui.tokens`. Callers override title / axis labels /
+    height / barmode; everything else is uniform across the app.
+    """
+    # Deep-merge: Plotly's update_layout treats nested dicts positionally,
+    # so we spread the base layout then overlay chart-specific overrides.
+    fig.update_layout(**_PLY_BASE)
+    fig.update_layout(
+        title=dict(text=title, font=dict(size=15, color=_38DN_NAVY)),
+        xaxis_title=x_title,
+        yaxis_title=y_title,
+        height=height,
+    )
+    if barmode:
+        fig.update_layout(barmode=barmode)
+    return fig
+
+
 def create_production_vs_load_chart(result: BillingResult) -> go.Figure:
-    """Create a monthly grouped bar chart: Load vs Solar Production."""
+    """Monthly grouped bar chart: Load vs Solar Production with Net Import overlay."""
     df = result.monthly_summary
     fig = go.Figure()
-    fig.add_trace(go.Bar(x=MONTH_NAMES, y=df["load_kwh"], name="Load", marker_color="#EF553B", opacity=0.85))
-    fig.add_trace(go.Bar(x=MONTH_NAMES, y=df["solar_kwh"], name="Solar Production", marker_color="#FFB347", opacity=0.85))
-    fig.add_trace(go.Scatter(x=MONTH_NAMES, y=df["import_kwh"], name="Net Import", mode="lines+markers", line=dict(color="#636EFA", width=2.5), marker=dict(size=7)))
-    fig.update_layout(title="Monthly Production vs. Load", xaxis_title="Month", yaxis_title="Energy (kWh)", barmode="group", template="plotly_white", legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1), height=380, font=dict(family="Aptos Narrow, Aptos, Calibri, Arial Narrow, sans-serif", size=12), title_font=dict(size=15, color="#0E2841"), margin=dict(l=40, r=20, t=50, b=40))
-    return fig
+    fig.add_trace(go.Bar(x=MONTH_NAMES, y=df["load_kwh"], name="Load",
+                         marker_color=_38DN_NAVY, opacity=0.88))
+    fig.add_trace(go.Bar(x=MONTH_NAMES, y=df["solar_kwh"], name="Solar Production",
+                         marker_color=_38DN_GREEN, opacity=0.88))
+    fig.add_trace(go.Scatter(x=MONTH_NAMES, y=df["import_kwh"], name="Net Import",
+                             mode="lines+markers",
+                             line=dict(color=_38DN_BLUE, width=2.5),
+                             marker=dict(size=8, color=_38DN_BLUE)))
+    return _apply_38dn_layout(
+        fig, title="Monthly Production vs. Load",
+        x_title="Month", y_title="Energy (kWh)", barmode="group",
+    )
 
 
 def create_monthly_bill_chart(result: BillingResult) -> go.Figure:
-    """Create a stacked bar chart showing monthly bill components."""
+    """Stacked bar chart of monthly bill components. Charges stack up,
+    export credit stacks down (below zero) for visual separation."""
     df = result.monthly_summary
     fig = go.Figure()
-    fig.add_trace(go.Bar(x=MONTH_NAMES, y=df["energy_cost"], name="Energy Charges", marker_color="#636EFA"))
-    fig.add_trace(go.Bar(x=MONTH_NAMES, y=df["total_demand_charge"], name="Demand Charges", marker_color="#EF553B"))
-    fig.add_trace(go.Bar(x=MONTH_NAMES, y=df["fixed_charge"], name="Fixed Charges", marker_color="#AB63FA"))
-    # NBC bar (NEM-2 only)
+    fig.add_trace(go.Bar(x=MONTH_NAMES, y=df["energy_cost"], name="Energy Charges",
+                         marker_color=_38DN_NAVY, opacity=0.92))
+    fig.add_trace(go.Bar(x=MONTH_NAMES, y=df["total_demand_charge"],
+                         name="Demand Charges",
+                         marker_color=_38DN_BLUE, opacity=0.92))
+    fig.add_trace(go.Bar(x=MONTH_NAMES, y=df["fixed_charge"], name="Fixed Charges",
+                         marker_color=_38DN_TEAL, opacity=0.92))
     if "nbc_charge" in df.columns and df["nbc_charge"].sum() > 0:
-        fig.add_trace(go.Bar(x=MONTH_NAMES, y=df["nbc_charge"], name="NBC Charges", marker_color="#FFA15A"))
-    fig.add_trace(go.Bar(x=MONTH_NAMES, y=-df["export_credit"], name="Export Credit", marker_color="#00CC96"))
-    fig.update_layout(title="Monthly Bill Breakdown (With Solar)", xaxis_title="Month", yaxis_title="Cost ($)", barmode="relative", template="plotly_white", legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1), height=380, font=dict(family="Aptos Narrow, Aptos, Calibri, Arial Narrow, sans-serif", size=12), title_font=dict(size=15, color="#0E2841"), margin=dict(l=40, r=20, t=50, b=40))
-    return fig
+        fig.add_trace(go.Bar(x=MONTH_NAMES, y=df["nbc_charge"], name="NBC Charges",
+                             marker_color=_38DN_AMBER, opacity=0.92))
+    fig.add_trace(go.Bar(x=MONTH_NAMES, y=-df["export_credit"], name="Export Credit",
+                         marker_color=_38DN_GREEN, opacity=0.92))
+    return _apply_38dn_layout(
+        fig, title="Monthly Bill Breakdown (With Solar)",
+        x_title="Month", y_title="Cost ($)", barmode="relative",
+    )
 
 
 def generate_hourly_csv(result: BillingResult, cod_date=None) -> str:
@@ -1454,24 +1512,29 @@ def build_grid_exchange_summary(
             "Month": MONTH_NAMES[m - 1],
             "Degraded Solar- Assumed Demand Offset (kWh)": round(solar_m, 0),
             "Import Total (kWh)": round(imp_total, 0),
-            "Import Peak (kWh)": round(imp_peak, 0),
-            "Import Off-Peak (kWh)": round(imp_offpeak, 0),
+            "↳ Peak (kWh)": round(imp_peak, 0),
+            "↳ Off-Peak (kWh)": round(imp_offpeak, 0),
             "Export Total (kWh)": round(exp_total, 0),
         }
         if _has_bess:
             bess_exp = float(hd.loc[mm, "batt_to_grid_kwh"].sum())
             pv_exp = max(0.0, exp_total - bess_exp)
-            row["Export PV (kWh)"] = round(pv_exp, 0)
-            row["Export BESS (kWh)"] = round(bess_exp, 0)
+            row["↳ PV (kWh)"] = round(pv_exp, 0)
+            row["↳ BESS (kWh)"] = round(bess_exp, 0)
+        # Export totals and sub-components — sub-cols labelled with a trailing
+        # column-specific disambiguator because the Import block above already
+        # uses "↳ Peak (kWh)" / "↳ Off-Peak (kWh)" as its sub-cols.
         row.update({
-            "Export Peak (kWh)": round(exp_peak, 0),
-            "Export Off-Peak (kWh)": round(exp_offpeak, 0),
-            "Import Cost Total ($)": round(cost_total, 0),
-            "Import Cost Peak ($)": round(cost_peak, 0),
-            "Import Cost Off-Peak ($)": round(cost_offpeak, 0),
-            "Export Credit Total ($)": -round(credit_total, 0),
-            "Export Credit Peak ($)": -round(credit_peak, 0),
-            "Export Credit Off-Peak ($)": -round(credit_offpeak, 0),
+            "↳ Export Peak (kWh)": round(exp_peak, 0),
+            "↳ Export Off-Peak (kWh)": round(exp_offpeak, 0),
+            # Import cost = outflow → negated so it renders red accounting-negative.
+            "Import Cost Total ($)": -round(cost_total, 0),
+            "↳ Cost Peak ($)": -round(cost_peak, 0),
+            "↳ Cost Off-Peak ($)": -round(cost_offpeak, 0),
+            # Export credit = inflow → stays positive.
+            "Export Credit Total ($)": round(credit_total, 0),
+            "↳ Credit Peak ($)": round(credit_peak, 0),
+            "↳ Credit Off-Peak ($)": round(credit_offpeak, 0),
         })
         rows.append(row)
 
