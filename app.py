@@ -61,6 +61,31 @@ from modules.ai.proposal_narrative import (
 )
 from modules.ai.bill_ingest import extract_bill as _ai_extract_bill
 from modules.ai.tariff_qa import ask as _ai_tariff_ask
+
+# Phase 4: Proposals (named PPA bundles per simulation, with comparison).
+# See modules/proposals.py for the data model; modules/proposal_views.py
+# supplies the comparison chart + XLSX export helpers.
+from modules import proposals as _proposals
+from modules.proposals import (
+    MAX_COMPARISON_PPAS as _PROP_MAX_COMPARISONS,
+    Proposal as _ProposalObj,
+    PPASnapshot as _PPASnapshot,
+    create_proposal as _create_proposal_obj,
+    update_proposal as _update_proposal_obj,
+    snapshot_from_saved as _snapshot_from_saved,
+    save_proposal_to_session as _save_proposal_session,
+    delete_proposal_from_session as _delete_proposal_session,
+    list_proposals_in_session as _list_proposals_session,
+    get_active_proposal as _get_active_proposal,
+    persist_proposal as _persist_proposal_gcs,
+    load_proposals_for_simulation as _load_proposals_gcs,
+    delete_persisted_proposal as _delete_proposal_gcs,
+)
+from modules.proposal_views import (
+    build_comparison_chart as _build_prop_chart,
+    build_comparison_table as _build_prop_table,
+    export_comparison_xlsx as _export_prop_xlsx,
+)
 from modules.billing_aggregation import (
     MeterConfig,
     NemAProfile,
@@ -539,6 +564,494 @@ def _sp_payback_view(projection, system_cost, NAVY, GREEN, BLUE, INK, FONT) -> N
         yaxis=dict(gridcolor="#E5E7EB", tickfont=dict(color=INK)),
     )
     st.plotly_chart(fig, use_container_width=True, key="sp_payback_chart")
+
+
+def _render_proposals_tab(
+    *,
+    simulation_name,
+    result,
+    pv_only_result,
+    main_projection,
+    system_size_kw,
+    dc_ac_ratio,
+    battery_cap_kwh,
+    system_cost,
+    system_life_years,
+    nem_regime_1,
+    nem_regime_2,
+    num_years_1,
+    utility_name,
+    selected_rate_name,
+    rate_escalator,
+    load_escalator,
+    compound_escalation,
+    cod_date,
+    annual_degradation_pct,
+    common_nem_kw,
+    rs_old_baseline,
+    es_offset_annual,
+) -> None:
+    """Named-Proposal workspace. Two-pane split:
+
+    Left (Builder): create/edit; pick primary + up to 3 comparison PPAs from
+    ``saved_ppa_scenarios``; customer/site/account/term fields; narrative toggle.
+
+    Right (Preview & Export): comparison metric grid, chart (overlay / grouped
+    bar toggle), and three export buttons (Deck PPTX, Deck + Appendix PPTX,
+    Comparison XLSX). All exports draw from the current Proposal snapshots,
+    so they stay in sync with what's saved — not the live PPA library.
+    """
+    st.subheader("Proposals")
+    st.caption(
+        "A Proposal bundles a **primary PPA** and up to three **comparison PPAs** "
+        "for a single simulation, plus customer/site metadata. PPAs are snapshot "
+        "into the Proposal — later edits on the PPA Rate tab don't silently "
+        "mutate a saved deal."
+    )
+
+    saved_ppas = st.session_state.get("saved_ppa_scenarios") or {}
+    if not saved_ppas:
+        st.info(
+            "No saved PPA structures yet. Open the **PPA Rate** tab, configure "
+            "a PPA, and click **💾 Save PPA** — then come back to bundle them "
+            "into a Proposal."
+        )
+        return
+
+    existing_proposals = _list_proposals_session(
+        st.session_state, simulation_name=simulation_name,
+    )
+    active_id = st.session_state.get("active_proposal_id")
+    is_new_mode = bool(st.session_state.pop("_proposals_tab_new", False)) or (
+        not existing_proposals
+    )
+    active_proposal = None
+    if not is_new_mode and active_id:
+        active_proposal = _get_active_proposal(st.session_state)
+
+    cfg_col, out_col = st.columns([0.42, 0.58], gap="large")
+
+    # ── Left: Builder ────────────────────────────────────────────────────
+    with cfg_col:
+        _mode_label = "Create new Proposal" if (is_new_mode or not active_proposal) else "Edit Proposal"
+        st.markdown(f"**{_mode_label}**")
+
+        defaults = {
+            "name": (active_proposal.name if active_proposal else ""),
+            "customer_name": (active_proposal.customer_name if active_proposal else ""),
+            "site_address": (active_proposal.site_address if active_proposal else ""),
+            "utility_account": (active_proposal.utility_account if active_proposal else ""),
+            "term_years": (active_proposal.term_years if active_proposal else min(25, int(system_life_years))),
+            "notes": (active_proposal.notes if active_proposal else ""),
+            "primary_name": (active_proposal.primary_ppa.name
+                             if active_proposal and active_proposal.primary_ppa.name in saved_ppas
+                             else list(saved_ppas.keys())[0]),
+            "comparison_names": tuple(
+                s.name for s in (active_proposal.comparison_ppas if active_proposal else ())
+                if s.name in saved_ppas
+            ),
+            "narrative_on": bool(active_proposal and active_proposal.narrative_bullets),
+        }
+
+        prop_name = st.text_input(
+            "Proposal name", value=defaults["name"],
+            placeholder="e.g. West Island Cotton — Q1 Standard",
+            key="proposals_tab_name",
+        )
+        c1, c2 = st.columns(2)
+        with c1:
+            customer_name = st.text_input(
+                "Customer / Facility", value=defaults["customer_name"],
+                key="proposals_tab_customer",
+            )
+            site_address = st.text_input(
+                "Site address", value=defaults["site_address"],
+                key="proposals_tab_address",
+            )
+        with c2:
+            utility_account = st.text_input(
+                "Utility account (optional)", value=defaults["utility_account"],
+                key="proposals_tab_account",
+            )
+            term_years = st.number_input(
+                "Term (years)", min_value=1, max_value=40,
+                value=int(defaults["term_years"]), step=1,
+                key="proposals_tab_term",
+            )
+
+        st.markdown("**PPA selection**")
+        ppa_names = list(saved_ppas.keys())
+        primary_name = st.selectbox(
+            "Primary PPA",
+            options=ppa_names,
+            index=ppa_names.index(defaults["primary_name"]) if defaults["primary_name"] in ppa_names else 0,
+            key="proposals_tab_primary",
+            help="The PPA you'd present as the recommended offer.",
+        )
+        comparison_candidates = [n for n in ppa_names if n != primary_name]
+        _default_comps = [c for c in defaults["comparison_names"] if c in comparison_candidates]
+        comparison_names = st.multiselect(
+            f"Comparison PPAs (up to {_PROP_MAX_COMPARISONS})",
+            options=comparison_candidates,
+            default=_default_comps,
+            max_selections=_PROP_MAX_COMPARISONS,
+            key="proposals_tab_comparisons",
+            help="Alternative PPAs to show side-by-side with the primary offer.",
+        )
+
+        narrative_on = st.checkbox(
+            "Include AI-generated executive summary bullets",
+            value=defaults["narrative_on"],
+            key="proposals_tab_narrative",
+            help=(
+                "Generated from the current simulation when the Proposal is saved. "
+                "Requires ANTHROPIC_API_KEY."
+            ),
+        )
+
+        notes = st.text_area(
+            "Internal notes (not included in customer deck)",
+            value=defaults["notes"], height=70, key="proposals_tab_notes",
+        )
+
+        persist_on_save = st.toggle(
+            "Persist to GCS on save",
+            value=True, key="proposals_tab_persist",
+            help="Writes the Proposal JSON to both local disk and GCS so it "
+                 "survives session reloads and is visible to other analysts.",
+        )
+
+        save_col, delete_col = st.columns([0.7, 0.3])
+        with save_col:
+            save_clicked = st.button(
+                "💾 Save Proposal",
+                type="primary", key="proposals_tab_save_btn",
+                width="stretch",
+                disabled=not prop_name.strip(),
+            )
+        with delete_col:
+            delete_clicked = st.button(
+                "Delete",
+                key="proposals_tab_delete_btn",
+                width="stretch",
+                disabled=active_proposal is None,
+            )
+
+        if save_clicked:
+            try:
+                primary_snap = _snapshot_from_saved(
+                    primary_name, saved_ppas[primary_name], term_years=int(term_years),
+                )
+                comparison_snaps = tuple(
+                    _snapshot_from_saved(n, saved_ppas[n], term_years=int(term_years))
+                    for n in comparison_names
+                )
+                bullets: tuple[str, ...] = ()
+                if narrative_on:
+                    try:
+                        _ctx = _AIProposalContext(
+                            customer_name=customer_name or "Customer",
+                            site_address=site_address or "",
+                            system_size_kw=float(system_size_kw or 0.0),
+                            battery_capacity_kwh=float(battery_cap_kwh or 0.0),
+                            nem_regime=nem_regime_1 or "NEM-3",
+                            year1_savings_usd=float(getattr(result, "annual_savings", 0.0) or 0.0),
+                            year1_bill_without_solar_usd=float(getattr(result, "annual_bill_without_solar", 0.0) or 0.0),
+                            year1_bill_with_solar_usd=float(getattr(result, "annual_bill_with_solar", 0.0) or 0.0),
+                            savings_pct=float(getattr(result, "savings_pct", 0.0) or 0.0),
+                            horizon_years=int(term_years),
+                            total_projected_savings_usd=float(primary_snap.lifetime_savings_usd or 0.0),
+                            ppa_rate_usd_per_kwh=(primary_snap.year1_rate_r1 or None),
+                        )
+                        bullets = tuple(_ai_generate_exec_summary(_ctx) or ())
+                    except Exception as exc:
+                        st.warning(f"AI narrative skipped: {exc}")
+
+                if active_proposal is not None:
+                    updated = _update_proposal_obj(
+                        active_proposal,
+                        name=prop_name.strip(),
+                        customer_name=customer_name,
+                        site_address=site_address,
+                        utility_account=utility_account,
+                        term_years=int(term_years),
+                        primary_ppa=primary_snap,
+                        comparison_ppas=comparison_snaps,
+                        narrative_bullets=bullets,
+                        notes=notes,
+                    )
+                else:
+                    updated = _create_proposal_obj(
+                        name=prop_name.strip(),
+                        simulation_name=simulation_name,
+                        customer_name=customer_name,
+                        site_address=site_address,
+                        utility_account=utility_account,
+                        term_years=int(term_years),
+                        primary_ppa=primary_snap,
+                        comparison_ppas=comparison_snaps,
+                        narrative_bullets=bullets,
+                        notes=notes,
+                    )
+                _save_proposal_session(st.session_state, updated)
+                if persist_on_save:
+                    try:
+                        _persist_proposal_gcs(updated)
+                    except Exception as exc:
+                        st.warning(f"GCS persistence skipped: {exc}")
+                st.success(f"Saved Proposal: {updated.name}")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Save failed: {exc}")
+
+        if delete_clicked and active_proposal is not None:
+            try:
+                if persist_on_save:
+                    try:
+                        _delete_proposal_gcs(active_proposal)
+                    except Exception:
+                        pass
+                _delete_proposal_session(st.session_state, active_proposal.id)
+                st.success(f"Deleted Proposal: {active_proposal.name}")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Delete failed: {exc}")
+
+    # ── Right: Preview + Export ──────────────────────────────────────────
+    with out_col:
+        # Use the just-saved active Proposal to drive the preview; fall back to
+        # a live-preview built from the current form state.
+        preview_source: _ProposalObj | None = _get_active_proposal(st.session_state)
+        if preview_source is None and primary_name in saved_ppas:
+            try:
+                _live_primary = _snapshot_from_saved(
+                    primary_name, saved_ppas[primary_name], term_years=int(term_years),
+                )
+                _live_comps = tuple(
+                    _snapshot_from_saved(n, saved_ppas[n], term_years=int(term_years))
+                    for n in comparison_names[:_PROP_MAX_COMPARISONS]
+                )
+                preview_source = _create_proposal_obj(
+                    name=prop_name.strip() or "Preview",
+                    simulation_name=simulation_name,
+                    customer_name=customer_name or "",
+                    site_address=site_address or "",
+                    utility_account=utility_account or "",
+                    term_years=int(term_years),
+                    primary_ppa=_live_primary,
+                    comparison_ppas=_live_comps,
+                    notes="",
+                )
+            except Exception:
+                preview_source = None
+
+        if preview_source is None:
+            st.info("Pick a primary PPA on the left to render the preview.")
+            return
+
+        st.markdown(f"**Preview · {preview_source.name or 'Unsaved'}**")
+        _cmp_df = _build_prop_table(preview_source)
+        st.markdown(
+            render_styled_table(_cmp_df, bold_cols=["Metric"]),
+            unsafe_allow_html=True,
+        )
+
+        _chart_mode = st.radio(
+            "Chart view",
+            options=["Overlay", "Grouped bars (Y1 / Y5 / Y10 / Y20)"],
+            horizontal=True, key="proposals_tab_chart_mode",
+            label_visibility="collapsed",
+        )
+        _mode = "overlay" if _chart_mode.startswith("Overlay") else "grouped"
+        st.plotly_chart(
+            _build_prop_chart(preview_source, mode=_mode),
+            use_container_width=True,
+            key=f"proposals_chart_{preview_source.id}_{_mode}",
+        )
+
+        if preview_source.narrative_bullets:
+            with st.expander("Executive summary bullets", expanded=False):
+                for b in preview_source.narrative_bullets:
+                    st.markdown(f"- {b}")
+
+        # ── Export controls ────────────────────────────────────────
+        st.divider()
+        st.markdown("**Export**")
+        ex1, ex2, ex3 = st.columns(3)
+
+        def _comparison_ppas_payload(source: _ProposalObj) -> list[dict]:
+            """Shape the PPASnapshots for the PPTX alternatives-considered slide."""
+            return [
+                {
+                    "name": "Recommended",
+                    "year1_rate_r1": source.primary_ppa.year1_rate_r1,
+                    "year1_rate_r2": source.primary_ppa.year1_rate_r2,
+                    "escalator_r1_pct": source.primary_ppa.escalator_r1_pct,
+                    "escalator_r2_pct": source.primary_ppa.escalator_r2_pct,
+                    "savings_pct": source.primary_ppa.savings_pct,
+                    "lifetime_savings_usd": source.primary_ppa.lifetime_savings_usd,
+                    "term_years": source.primary_ppa.term_years,
+                },
+                *[
+                    {
+                        "name": s.name,
+                        "year1_rate_r1": s.year1_rate_r1,
+                        "year1_rate_r2": s.year1_rate_r2,
+                        "escalator_r1_pct": s.escalator_r1_pct,
+                        "escalator_r2_pct": s.escalator_r2_pct,
+                        "savings_pct": s.savings_pct,
+                        "lifetime_savings_usd": s.lifetime_savings_usd,
+                        "term_years": s.term_years,
+                    }
+                    for s in source.comparison_ppas
+                ],
+            ]
+
+        def _build_deck(include_appendix: bool) -> bytes:
+            """Assemble the term-length projection + inject PPA cost per year,
+            then hand off to generate_proposal_pptx. Mirrors the old
+            _proposal_fragment logic but sources PPA inputs from the Proposal
+            snapshot, not from live sidebar state."""
+            primary = preview_source.primary_ppa
+            _prop_base_proj = build_annual_projection(
+                result=result,
+                system_cost=system_cost,
+                rate_escalator_pct=rate_escalator,
+                load_escalator_pct=load_escalator,
+                years=preview_source.term_years,
+                export_rates_multiyear=st.session_state.get("export_rates_multiyear"),
+                result_pv_only=pv_only_result,
+                compound_escalation=compound_escalation,
+                rate_shift_old_baseline=rs_old_baseline,
+                existing_solar_offset_kwh=es_offset_annual,
+                **common_nem_kw,
+            )
+
+            # Align the snapshot's rate-per-year to the term. If the snapshot
+            # is shorter, extrapolate at the last regime escalator; if longer,
+            # truncate. Matches the PPA-dashboard logic so outputs converge.
+            rates = list(primary.rate_per_year)
+            if len(rates) < preview_source.term_years:
+                tail_esc = (primary.escalator_r2_pct or primary.escalator_r1_pct) / 100.0
+                last = rates[-1] if rates else primary.year1_rate_r1
+                for _ in range(preview_source.term_years - len(rates)):
+                    last = last * (1.0 + tail_esc)
+                    rates.append(round(last, 5))
+            elif len(rates) > preview_source.term_years:
+                rates = rates[:preview_source.term_years]
+
+            proj_df = _prop_base_proj.copy()
+            rate_lookup = dict(enumerate(rates, start=1))
+            for idx, row in proj_df.iterrows():
+                yr = int(row["Year"])
+                rate_yr = float(rate_lookup.get(yr, 0.0))
+                solar_kwh = row["Solar (kWh)"]
+                ppa_cost = max(rate_yr, 0.0) * solar_kwh
+                util_residual = row["Bill w/ Solar ($)"]
+                total_cost = util_residual + ppa_cost
+                bill_no = row["Bill w/o Solar ($)"]
+                proj_df.at[idx, "PPA Cost ($)"] = round(ppa_cost, 2)
+                proj_df.at[idx, "Bill w/ Solar ($)"] = round(total_cost, 2)
+                proj_df.at[idx, "Annual Savings ($)"] = round(bill_no - total_cost, 2)
+            proj_df["Cumulative Savings ($)"] = proj_df["Annual Savings ($)"].cumsum().round(2)
+
+            return generate_proposal_pptx(
+                customer_name=preview_source.customer_name or "Customer",
+                address=preview_source.site_address,
+                utility_account=preview_source.utility_account,
+                utility_name=utility_name,
+                tariff_name=selected_rate_name or "",
+                date_str=date.today().strftime("%B %Y"),
+                system_size_kw=float(system_size_kw or 0.0),
+                dc_ac_ratio=float(dc_ac_ratio or 1.0),
+                battery_kwh=float(battery_cap_kwh or 0.0),
+                battery_kw=0.0,
+                ppa_rate=primary.year1_rate_r1 or None,
+                ppa_escalator_pct=primary.escalator_r1_pct,
+                ppa_escalator_pct_2=primary.escalator_r2_pct,
+                term_years=preview_source.term_years,
+                rate_escalator_pct=rate_escalator,
+                result=result,
+                annual_proj_df=proj_df,
+                nem_regime_1=nem_regime_1,
+                nem_regime_2=nem_regime_2,
+                num_years_1=num_years_1,
+                customer_savings_pct=primary.savings_pct,
+                customer_savings_pct_2=primary.savings_pct,  # same target assumed
+                ppa_rate_regime_2=primary.year1_rate_r2,
+                annual_proj_df_original=_prop_base_proj,
+                narrative_bullets=list(preview_source.narrative_bullets) or None,
+                comparison_ppas=(
+                    _comparison_ppas_payload(preview_source)
+                    if include_appendix and preview_source.comparison_ppas
+                    else None
+                ),
+            )
+
+        _safe_name = (preview_source.customer_name or "Customer").replace(" ", "_")[:30]
+        _date = date.today().strftime("%Y-%m-%d")
+
+        with ex1:
+            deck_bytes: bytes | None = None
+            if st.button("📄 Build Deck (PPTX)", key="proposals_tab_deck_btn",
+                         width="stretch", type="primary"):
+                try:
+                    with st.spinner("Building customer proposal deck..."):
+                        deck_bytes = _build_deck(include_appendix=False)
+                except Exception as exc:
+                    st.error(f"Deck build failed: {exc}")
+            if deck_bytes:
+                st.download_button(
+                    "Download Deck (.pptx)",
+                    data=deck_bytes,
+                    file_name=f"{_safe_name}_Deck_{_date}.pptx",
+                    mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                    key="proposals_tab_deck_dl",
+                    width="stretch",
+                )
+
+        with ex2:
+            appendix_bytes: bytes | None = None
+            _has_comps = bool(preview_source.comparison_ppas)
+            if st.button(
+                "📊 Deck + Comparison Appendix",
+                key="proposals_tab_appendix_btn",
+                width="stretch",
+                disabled=not _has_comps,
+                help="Adds a final slide listing the primary + comparison PPAs side-by-side.",
+            ):
+                try:
+                    with st.spinner("Building deck with comparison appendix..."):
+                        appendix_bytes = _build_deck(include_appendix=True)
+                except Exception as exc:
+                    st.error(f"Deck+appendix build failed: {exc}")
+            if appendix_bytes:
+                st.download_button(
+                    "Download Deck + Appendix (.pptx)",
+                    data=appendix_bytes,
+                    file_name=f"{_safe_name}_Deck_with_Alternatives_{_date}.pptx",
+                    mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                    key="proposals_tab_appendix_dl",
+                    width="stretch",
+                )
+
+        with ex3:
+            if st.button("📈 Comparison Workbook (XLSX)",
+                         key="proposals_tab_xlsx_btn", width="stretch"):
+                try:
+                    xlsx_bytes = _export_prop_xlsx(preview_source)
+                    st.session_state["_proposals_tab_xlsx"] = xlsx_bytes
+                except Exception as exc:
+                    st.error(f"XLSX export failed: {exc}")
+            if st.session_state.get("_proposals_tab_xlsx"):
+                st.download_button(
+                    "Download Comparison (.xlsx)",
+                    data=st.session_state["_proposals_tab_xlsx"],
+                    file_name=f"{_safe_name}_Proposal_Comparison_{_date}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="proposals_tab_xlsx_dl",
+                    width="stretch",
+                )
 
 
 def _render_ai_assistant_tab(
@@ -1351,6 +1864,19 @@ def _init_session_state():
         _sim_data = _load_simulation(_pending_name)
         touch_simulation_mtime(_pending_name)
         populate_session_from_simulation(st.session_state, _sim_data)
+        # Phase 4: keep the simulation name around so the Proposals selector
+        # and GCS persistence can scope by it.
+        st.session_state["_active_simulation_name"] = _pending_name
+        st.session_state["_last_loaded_simulation_name"] = _pending_name
+        # Hydrate saved proposals from GCS + local disk on load.
+        try:
+            _loaded_props = _load_proposals_gcs(_pending_name)
+            if _loaded_props:
+                st.session_state["proposals"] = {
+                    p.id: _proposals.to_dict(p) for p in _loaded_props
+                }
+        except Exception:
+            pass
         st.rerun()
 
     # --- Handle pending system profile load ---
@@ -3905,6 +4431,22 @@ if save_btn and sim_name and st.session_state.get("billing_result") is not None:
             str(k): list(v.values) for k, v in _raw_nema_save.items()
         }
 
+    # Phase 3+4: PPAs and Proposals travel with the simulation so reopening
+    # a saved sim restores the full deal context (not just the billing run).
+    _saved_ppas = st.session_state.get("saved_ppa_scenarios") or {}
+    if _saved_ppas:
+        extra_save["saved_ppa_scenarios"] = _saved_ppas
+    _proposals_store = st.session_state.get("proposals") or {}
+    if _proposals_store:
+        extra_save["proposals"] = _proposals_store
+    _active_proposal_save = st.session_state.get("active_proposal_id")
+    if _active_proposal_save:
+        extra_save["active_proposal_id"] = _active_proposal_save
+
+    # Track the simulation name for Proposal scoping / GCS persistence.
+    st.session_state["_active_simulation_name"] = sim_name
+    st.session_state["_last_loaded_simulation_name"] = sim_name
+
     _save_simulation(
         name=sim_name,
         result=result_to_save,
@@ -4897,23 +5439,67 @@ def _render_results():
     else:
         result = cast(BillingResult, st.session_state["billing_result"])
 
-    # Persistent "Viewing" badge — survives tab switching so the user never
-    # loses track of which scenario the charts and tables reflect.
+    # Persistent "Viewing" row — scenario badge + active-Proposal selector live
+    # together on a single row so there's only one layer of chrome above the
+    # results tabs. The Proposal selector reads/writes
+    # ``st.session_state["active_proposal_id"]``; the Proposals tab uses it
+    # to drive the comparison preview.
     _scenario_badge_label = (
         (scenario or ("PV + Battery" if has_battery else "PV Only"))
         if has_battery else "PV Only"
     )
     _badge_color = "#45A750" if "Battery" in _scenario_badge_label else "#1D6FA9"
-    st.markdown(
-        f"""<div style="margin:6px 0 10px 0; display:flex; align-items:center; gap:10px;">
-            <span style="font-size:11px; color:#6b7280; text-transform:uppercase; letter-spacing:0.5px;">Viewing</span>
-            <span style="background:{_badge_color}; color:#ffffff; padding:3px 10px;
-                         border-radius:12px; font-size:12px; font-weight:600;">
-                {_scenario_badge_label}
-            </span>
-        </div>""",
-        unsafe_allow_html=True,
+
+    _sim_name_for_props = (
+        st.session_state.get("_active_simulation_name")
+        or st.session_state.get("_last_loaded_simulation_name")
     )
+    _sim_proposals = _list_proposals_session(
+        st.session_state, simulation_name=_sim_name_for_props,
+    )
+    _active_id = st.session_state.get("active_proposal_id")
+    if _active_id and not any(p.id == _active_id for p in _sim_proposals):
+        _active_id = None
+        st.session_state["active_proposal_id"] = None
+
+    _vrow_left, _vrow_sel, _vrow_new = st.columns([0.45, 0.40, 0.15], gap="small")
+    with _vrow_left:
+        st.markdown(
+            f"""<div style="margin:6px 0 0 0; display:flex; align-items:center; gap:10px;">
+                <span style="font-size:11px; color:#6b7280; text-transform:uppercase; letter-spacing:0.5px;">Viewing</span>
+                <span style="background:{_badge_color}; color:#ffffff; padding:3px 10px;
+                             border-radius:12px; font-size:12px; font-weight:600;">
+                    {_scenario_badge_label}
+                </span>
+            </div>""",
+            unsafe_allow_html=True,
+        )
+    with _vrow_sel:
+        if _sim_proposals:
+            _opt_ids = [p.id for p in _sim_proposals]
+            _opt_labels = {p.id: p.name for p in _sim_proposals}
+            _default_idx = _opt_ids.index(_active_id) if _active_id in _opt_ids else 0
+            _picked = st.selectbox(
+                "Active Proposal",
+                options=_opt_ids,
+                index=_default_idx,
+                format_func=lambda pid: f"📁  {_opt_labels.get(pid, pid)}",
+                key="top_proposal_selector",
+                label_visibility="collapsed",
+            )
+            if _picked != st.session_state.get("active_proposal_id"):
+                st.session_state["active_proposal_id"] = _picked
+        else:
+            st.markdown(
+                '<div style="margin:8px 0 0 0; font-size:11px; color:#9ca3af;">'
+                "No Proposals yet — save a PPA on the PPA Rate tab, then open the Proposals tab to bundle them."
+                "</div>",
+                unsafe_allow_html=True,
+            )
+    with _vrow_new:
+        if st.button("➕ New Proposal", key="top_new_proposal_btn", width="stretch"):
+            st.session_state["_proposals_tab_new"] = True
+            st.session_state["active_proposal_id"] = None
 
     # Grid Exchange is now a sub-expander inside Monthly Bills (users were
     # hopping between two tabs to cross-reference the same volumes).
@@ -4921,21 +5507,24 @@ def _render_results():
     if has_battery:
         tab_labels.append("Battery Analysis")
     tab_labels.append("PPA Rate")
+    tab_labels.append("Proposals")        # Phase 4
     tab_labels.append("Sensitivity")
     tab_labels.append("AI Assistant")
     tab_labels.append("Downloads")
     result_tabs = st.tabs(tab_labels)
 
-    # Assign tab variables
+    # Assign tab variables — counted from the end so inserting new tabs in
+    # the middle doesn't shuffle these pointers.
     tab1 = result_tabs[0]
     tab2 = result_tabs[1]
     tab3 = result_tabs[2]
     tab4 = result_tabs[3]
     tab_batt = result_tabs[4] if has_battery else None
-    tab_indexed = result_tabs[-4]      # PPA Rate
-    tab_sensitivity = result_tabs[-3]  # Monte Carlo + tornado
-    tab_ai = result_tabs[-2]           # AI Assistant
-    tab5 = result_tabs[-1]             # Downloads (always last)
+    tab_indexed = result_tabs[-5]       # PPA Rate
+    tab_proposals = result_tabs[-4]     # Proposals (new)
+    tab_sensitivity = result_tabs[-3]   # Monte Carlo + tornado
+    tab_ai = result_tabs[-2]            # AI Assistant
+    tab5 = result_tabs[-1]              # Downloads (always last)
 
     # Compute peak period index from tariff
     _tariff_for_peak = st.session_state["tariff"]
@@ -5778,6 +6367,32 @@ def _render_results():
     with tab_indexed:
         _ppa_dashboard()
 
+    with tab_proposals:
+        _render_proposals_tab(
+            simulation_name=_sim_name_for_props,
+            result=result,
+            pv_only_result=pv_only_for_display,
+            main_projection=_main_projection,
+            system_size_kw=system_size_kw,
+            dc_ac_ratio=dc_ac_ratio,
+            battery_cap_kwh=float(st.session_state.get("battery_capacity_kwh", 0.0) or 0.0),
+            system_cost=system_cost,
+            system_life_years=system_life_years,
+            nem_regime_1=nem_regime_1,
+            nem_regime_2=nem_regime_2 if nem_switch else None,
+            num_years_1=num_years_1 if nem_switch else None,
+            utility_name=utility_name,
+            selected_rate_name=selected_rate_name,
+            rate_escalator=rate_escalator,
+            load_escalator=load_escalator,
+            compound_escalation=compound_escalation,
+            cod_date=cod_date,
+            annual_degradation_pct=annual_degradation_pct,
+            common_nem_kw=_common_nem_kw,
+            rs_old_baseline=_rs_old_baseline_for_proj,
+            es_offset_annual=_es_offset_annual,
+        )
+
     with tab_sensitivity:
         _render_sensitivity_tab(
             result=result,
@@ -5945,242 +6560,58 @@ def _render_results():
                 key="dl_tornado_csv",
             )
 
-        # --- Customer Proposal (PPTX) ---
+        # --- Customer Proposal Deck (PPTX) ---
+        # The builder moved to the Proposals tab (Phase 4). Downloads now lists
+        # every saved Proposal for this simulation with a one-click re-export
+        # for each — keeps a historical view here without duplicating the
+        # builder UI.
         st.divider()
-        st.subheader("Customer Proposal (PPTX)")
+        st.subheader("Customer Proposal Deck (PPTX)")
 
-        @st.fragment
-        def _proposal_fragment():
+        _dl_sim_name = (
+            st.session_state.get("_active_simulation_name")
+            or st.session_state.get("_last_loaded_simulation_name")
+        )
+        _dl_props = _list_proposals_session(
+            st.session_state, simulation_name=_dl_sim_name,
+        )
+        if not _dl_props:
+            st.info(
+                "No saved Proposals yet. Open the **Proposals** tab to build one — "
+                "Deck and Comparison exports live there."
+            )
+        else:
             st.caption(
-                "Generate a branded 38DN customer proposal deck from the current "
-                "simulation. Select a **saved PPA structure** (from the PPA Rate "
-                "tab) and fill in the customer details below."
+                "Re-download any saved Proposal for this simulation. To tweak "
+                "the PPA selection or customer details, use the **Proposals** tab."
             )
+            for _p in _dl_props:
+                with st.container(border=True):
+                    _row_l, _row_r = st.columns([0.65, 0.35])
+                    with _row_l:
+                        st.markdown(f"**{_p.name}**")
+                        _meta_bits = [
+                            f"{_p.customer_name}" if _p.customer_name else None,
+                            f"Primary: {_p.primary_ppa.name}",
+                            (f"+ {len(_p.comparison_ppas)} alt"
+                             f"{'s' if len(_p.comparison_ppas) != 1 else ''}")
+                            if _p.comparison_ppas else None,
+                            f"Updated {_p.updated_at[:10]}" if _p.updated_at else None,
+                        ]
+                        st.caption(" · ".join(b for b in _meta_bits if b))
+                    with _row_r:
+                        if st.button(
+                            "Open in Proposals tab",
+                            key=f"dl_open_prop_{_p.id}",
+                            width="stretch",
+                        ):
+                            st.session_state["active_proposal_id"] = _p.id
+                            st.info("Switch to the **Proposals** tab to rebuild the deck.")
 
-            _saved = st.session_state.get("saved_ppa_scenarios", {}) or {}
-            if not _saved:
-                st.warning(
-                    "No saved PPA structures yet. Open the **PPA Rate** tab, "
-                    "configure a PPA, and click **💾 Save PPA** — the proposal "
-                    "builder pulls from that list."
-                )
-                return
-
-            # --- PPA scenario selector ---
-            _scenario_name = st.selectbox(
-                "PPA structure",
-                list(_saved.keys()),
-                key="prop_ppa_scenario",
-                help="Pick one of the PPA scenarios you saved on the PPA Rate tab.",
-            )
-            _scenario = _saved[_scenario_name]
-
-            _prop_ppa_rate = float(_scenario.get("year1_rate_r1") or 0.0)
-            _prop_ppa_rate_r2 = (float(_scenario["year1_rate_r2"])
-                                 if _scenario.get("year1_rate_r2") is not None else None)
-            _prop_ppa_esc = float(_scenario.get("ppa_escalator_r1") or 0.0)
-            _prop_ppa_esc_2 = (float(_scenario["ppa_escalator_r2"])
-                               if _scenario.get("ppa_escalator_r2") is not None else _prop_ppa_esc)
-            _prop_sav_1 = float(_scenario.get("savings_pct") or 0.0)
-            _prop_sav_2 = float(_scenario.get("savings_pct_r2") or _prop_sav_1)
-
-            # PPA rate per year, aligned to the scenario's own term. We re-use
-            # these arrays later to inject PPA cost into the proposal projection,
-            # so the PPTX numbers match the PPA chart exactly.
-            _scenario_rates = _scenario.get("ppa_rate_per_year") or []
-            _scenario_years = _scenario.get("year_indices") or list(range(1, len(_scenario_rates) + 1))
-            _scenario_term = int(_scenario.get("term_years") or len(_scenario_rates) or system_life_years)
-
-            # --- Customer inputs ---
-            col_p1, col_p2 = st.columns(2)
-            with col_p1:
-                prop_customer = st.text_input("Customer / Facility Name", key="prop_customer")
-                prop_address = st.text_input("Site Address", key="prop_address")
-                prop_account = st.text_input("Utility Account ID (optional)", key="prop_account")
-            with col_p2:
-                prop_term = st.number_input(
-                    "Term (years)", min_value=1, max_value=40,
-                    value=min(_scenario_term, 40), step=1, key="prop_term",
-                    help="Overrides the saved scenario's term if different.",
-                )
-                prop_new_tariff = st.text_input(
-                    "Proposed Tariff (if switching)", key="prop_new_tariff",
-                    help="Leave blank to keep current tariff.",
-                )
-
-            # --- Term-length projection (sized to the proposal term). We then
-            # align the PPA rate-per-year array to this projection: the saved
-            # scenario may have a different term, so we slice / pad accordingly.
-            _prop_base_proj = build_annual_projection(
-                result=result,
-                system_cost=system_cost,
-                rate_escalator_pct=rate_escalator,
-                load_escalator_pct=load_escalator,
-                years=prop_term,
-                export_rates_multiyear=st.session_state.get("export_rates_multiyear"),
-                result_pv_only=pv_only_for_display,
-                compound_escalation=compound_escalation,
-                rate_shift_old_baseline=_rs_old_baseline_for_proj,
-                existing_solar_offset_kwh=_es_offset_annual,
-                **_common_nem_kw,
-            )
-
-            # Align scenario rate-per-year to prop_term:
-            # shorter scenario → extrapolate final year's rate with its escalator.
-            # longer scenario → truncate.
-            _rates_per_year = list(_scenario_rates)
-            if len(_rates_per_year) < prop_term:
-                _last_rate = _rates_per_year[-1] if _rates_per_year else 0.0
-                _tail_esc = _prop_ppa_esc_2 / 100.0
-                for _i in range(prop_term - len(_rates_per_year)):
-                    _last_rate = _last_rate * (1.0 + _tail_esc)
-                    _rates_per_year.append(round(_last_rate, 5))
-            elif len(_rates_per_year) > prop_term:
-                _rates_per_year = _rates_per_year[:prop_term]
-
-            # Build a minimal rate-lookup DataFrame compatible with the existing
-            # PPA-cost injection code (keyed by Year + PPA Rate ($/kWh)).
-            _sum_it_df = pd.DataFrame({
-                "Year": list(range(1, len(_rates_per_year) + 1)),
-                "PPA Rate ($/kWh)": _rates_per_year,
-            })
-
-            # --- Summary metrics from the selected scenario ---
-            if _prop_ppa_rate_r2 is not None and _scenario.get("num_years_1"):
-                _mc1, _mc2, _mc3, _mc4 = st.columns(4)
-                _mc1.metric("Target Savings",
-                            f"{_prop_sav_1:.1f}% → {_prop_sav_2:.1f}%")
-                _mc2.metric(f"Yr-1 PPA · {_scenario['nem_regime_1']}",
-                            f"${_prop_ppa_rate:.4f}/kWh")
-                _mc3.metric(
-                    f"Yr-{int(_scenario['num_years_1']) + 1} PPA · {_scenario['nem_regime_2']}",
-                    f"${_prop_ppa_rate_r2:.4f}/kWh",
-                )
-                _mc4.metric("Lifetime Savings",
-                            fmt_dollar(float(_scenario.get("lifetime_savings") or 0.0)))
-            else:
-                _mc1, _mc2, _mc3 = st.columns(3)
-                _mc1.metric("Target Savings", f"{_prop_sav_1:.1f}%")
-                _mc2.metric("Yr-1 PPA Rate", f"${_prop_ppa_rate:.4f}/kWh")
-                _mc3.metric("Lifetime Savings",
-                            fmt_dollar(float(_scenario.get("lifetime_savings") or 0.0)))
-
-            _prop_date = date.today().strftime("%B %Y")
-            _batt_cap = st.session_state.get("battery_capacity_kwh", 0) or 0
-            _batt_cfg = st.session_state.get("battery_config")
-            _batt_kw = _batt_cap / (_batt_cfg.battery_hours if _batt_cfg else 4.0) if _batt_cap > 0 else 0
-
-            # --- AI executive summary narrative (optional) ---
-            _narrative_on = st.checkbox(
-                "Include AI-generated executive summary bullets",
-                value=bool(st.session_state.get("ai_narrative_bullets")),
-                key="prop_narrative_toggle",
-                help=(
-                    "Generates 3–5 factual bullets from the current simulation "
-                    "and uses them in place of the default takeaway sentence on "
-                    "the Executive Summary slide. Requires ANTHROPIC_API_KEY."
-                ),
-            )
-            _narrative_bullets = st.session_state.get("ai_narrative_bullets")
-            if _narrative_on:
-                if _narrative_bullets:
-                    with st.expander("Preview bullets", expanded=False):
-                        for _b in _narrative_bullets:
-                            st.markdown(f"- {_b}")
-                if st.button("Regenerate bullets", key="prop_narrative_regen"):
-                    try:
-                        _prop_life_sav = float(_scenario.get("lifetime_savings") or 0.0)
-                        _ctx = _AIProposalContext(
-                            customer_name=prop_customer or "Customer",
-                            site_address=prop_address or "",
-                            system_size_kw=float(system_size_kw or 0.0),
-                            battery_capacity_kwh=float(_batt_cap or 0.0),
-                            nem_regime=nem_regime_1 or "NEM-3",
-                            year1_savings_usd=float(getattr(result, "annual_savings", 0.0) or 0.0),
-                            year1_bill_without_solar_usd=float(getattr(result, "annual_bill_without_solar", 0.0) or 0.0),
-                            year1_bill_with_solar_usd=float(getattr(result, "annual_bill_with_solar", 0.0) or 0.0),
-                            savings_pct=float(getattr(result, "savings_pct", 0.0) or 0.0),
-                            horizon_years=int(prop_term),
-                            total_projected_savings_usd=_prop_life_sav,
-                            ppa_rate_usd_per_kwh=(_prop_ppa_rate if _prop_ppa_rate > 0 else None),
-                        )
-                        _bullets = _ai_generate_exec_summary(_ctx)
-                        st.session_state["ai_narrative_bullets"] = _bullets
-                        _narrative_bullets = _bullets
-                        st.rerun()
-                    except Exception as exc:
-                        st.error(f"Narrative generation failed: {exc}")
-
-            if st.button("Generate Customer Proposal", type="primary", key="btn_gen_proposal"):
-                if not prop_customer:
-                    st.warning("Please enter a customer name.")
-                else:
-                    with st.spinner("Building proposal deck..."):
-                        # Reuse the term-length projection and PPA backsolve
-                        # already computed for the summary metrics — ensures
-                        # the PPTX matches the displayed PPA rates exactly.
-                        _prop_proj_original = _prop_base_proj.copy()
-
-                        # Layer per-year PPA cost onto the utility residual so
-                        # the PPTX shows true customer economics:
-                        #   Total Cost = Bill w/ Solar (utility) + PPA Cost
-                        #   Customer Savings = Bill w/o Solar - Total Cost
-                        _prop_proj_df = _prop_base_proj.copy()
-                        if _sum_it_df is not None:
-                            for idx, row in _prop_proj_df.iterrows():
-                                yr = int(row["Year"])
-                                _tariff_row = _sum_it_df[_sum_it_df["Year"] == yr]
-                                ppa_rate_yr = float(_tariff_row["PPA Rate ($/kWh)"].iloc[0]) if len(_tariff_row) else 0.0
-                                solar_kwh_yr = row["Solar (kWh)"]
-                                ppa_cost = max(ppa_rate_yr, 0.0) * solar_kwh_yr
-                                utility_residual = row["Bill w/ Solar ($)"]
-                                total_cost = utility_residual + ppa_cost
-                                bill_no = row["Bill w/o Solar ($)"]
-                                _prop_proj_df.at[idx, "PPA Cost ($)"] = round(ppa_cost, 2)
-                                _prop_proj_df.at[idx, "Bill w/ Solar ($)"] = round(total_cost, 2)
-                                _prop_proj_df.at[idx, "Annual Savings ($)"] = round(bill_no - total_cost, 2)
-                            _prop_proj_df["Cumulative Savings ($)"] = _prop_proj_df["Annual Savings ($)"].cumsum().round(2)
-
-                        proposal_bytes = generate_proposal_pptx(
-                            customer_name=prop_customer,
-                            address=prop_address,
-                            utility_account=prop_account,
-                            utility_name=utility_name,
-                            tariff_name=selected_rate_name or "",
-                            new_tariff_name=prop_new_tariff or None,
-                            date_str=_prop_date,
-                            system_size_kw=system_size_kw,
-                            dc_ac_ratio=dc_ac_ratio,
-                            battery_kwh=_batt_cap,
-                            battery_kw=_batt_kw,
-                            ppa_rate=_prop_ppa_rate if _prop_ppa_rate > 0 else None,
-                            ppa_escalator_pct=_prop_ppa_esc if _prop_ppa_rate > 0 else None,
-                            ppa_escalator_pct_2=_prop_ppa_esc_2 if _prop_ppa_rate > 0 and nem_switch else None,
-                            term_years=prop_term,
-                            rate_escalator_pct=rate_escalator,
-                            result=result,
-                            annual_proj_df=_prop_proj_df,
-                            nem_regime_1=nem_regime_1,
-                            nem_regime_2=nem_regime_2 if nem_switch else None,
-                            num_years_1=num_years_1 if nem_switch else None,
-                            customer_savings_pct=_prop_sav_1,
-                            customer_savings_pct_2=_prop_sav_2 if nem_switch else None,
-                            ppa_rate_regime_2=_prop_ppa_rate_r2,
-                            annual_proj_df_original=_prop_proj_original,
-                            narrative_bullets=(
-                                st.session_state.get("ai_narrative_bullets")
-                                if _narrative_on else None
-                            ),
-                        )
-                    _safe_name = prop_customer.replace(" ", "_")[:30]
-                    st.download_button(
-                        label="Download Customer Proposal (.pptx)",
-                        data=proposal_bytes,
-                        file_name=f"{_safe_name}_Proposal_{_prop_date.replace(' ', '_')}.pptx",
-                        mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                    )
-
-        _proposal_fragment()
+        # Inline deck-builder removed in Phase 4. See `_render_proposals_tab`
+        # in this file and `modules/proposals.py` for the Proposal-scoped
+        # replacement. Downloads above lists every saved Proposal for
+        # this simulation with a jump-to link.
 
 
 if st.session_state["billing_result"] is not None:
