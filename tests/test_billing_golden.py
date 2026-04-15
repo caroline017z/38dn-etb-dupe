@@ -87,13 +87,21 @@ def test_billing_golden(scenario_name: str):
 
 
 def _compare(actual: dict, expected: dict, name: str) -> None:
-    annual_keys = ["annual_total_bill", "annual_energy_cost", "annual_export_credit", "old_rate_annual_baseline"]
+    annual_keys = [
+        "annual_net_bill",
+        "annual_energy_cost",
+        "annual_export_credit",
+        "annual_bill_with_solar",
+        "annual_bill_without_solar",
+        "annual_savings",
+        "old_rate_annual_baseline",
+    ]
     for key in annual_keys:
         a, e = actual.get(key), expected.get(key)
         if a is None and e is None:
             continue
         assert a is not None and e is not None, f"{name}: {key} presence mismatch"
-        assert abs(a - e) <= ANNUAL_TOLERANCE, f"{name}: {key} drift — expected {e}, got {a}"
+        assert abs(a - e) <= ANNUAL_TOLERANCE, f"{name}: {key} drift -- expected {e}, got {a}"
 
     for col, exp_vals in expected.get("monthly", {}).items():
         act_vals = actual["monthly"].get(col)
