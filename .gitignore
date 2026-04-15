@@ -44,3 +44,10 @@ nul
 # Type checking
 .mypy_cache/
 pyrightconfig.json
+
+# Disk cache (URDB/PVWatts/geocode)
+.cache/
+
+# Ad-hoc proposal output (test_proposal_v*.pptx are dev artifacts; keep tracked samples under tests/fixtures/proposals/)
+test_proposal_*.pptx
+/proposal_*.pptx
