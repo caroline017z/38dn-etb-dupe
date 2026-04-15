@@ -1143,84 +1143,29 @@ def _render_proposals_tab(
             ]
 
         def _build_deck(include_appendix: bool) -> bytes:
-            """Assemble the term-length projection + inject PPA cost per year,
-            then hand off to generate_proposal_pptx. Mirrors the old
-            _proposal_fragment logic but sources PPA inputs from the Proposal
-            snapshot, not from live sidebar state."""
-            primary = preview_source.primary_ppa
-            _prop_base_proj = build_annual_projection(
+            """Single-line delegation to the module-level helper so
+            Proposals-tab and any future Downloads-tab builder produce
+            byte-identical decks from the same code path."""
+            return _build_proposal_deck_bytes(
+                source=preview_source,
+                include_appendix=include_appendix,
                 result=result,
+                pv_only_result=pv_only_result,
                 system_cost=system_cost,
-                rate_escalator_pct=rate_escalator,
-                load_escalator_pct=load_escalator,
-                years=preview_source.term_years,
-                export_rates_multiyear=st.session_state.get("export_rates_multiyear"),
-                result_pv_only=pv_only_result,
+                rate_escalator=rate_escalator,
+                load_escalator=load_escalator,
                 compound_escalation=compound_escalation,
-                rate_shift_old_baseline=rs_old_baseline,
-                existing_solar_offset_kwh=es_offset_annual,
-                **common_nem_kw,
-            )
-
-            # Align the snapshot's rate-per-year to the term. If the snapshot
-            # is shorter, extrapolate at the last regime escalator; if longer,
-            # truncate. Matches the PPA-dashboard logic so outputs converge.
-            rates = list(primary.rate_per_year)
-            if len(rates) < preview_source.term_years:
-                tail_esc = (primary.escalator_r2_pct or primary.escalator_r1_pct) / 100.0
-                last = rates[-1] if rates else primary.year1_rate_r1
-                for _ in range(preview_source.term_years - len(rates)):
-                    last = last * (1.0 + tail_esc)
-                    rates.append(round(last, 5))
-            elif len(rates) > preview_source.term_years:
-                rates = rates[:preview_source.term_years]
-
-            proj_df = _prop_base_proj.copy()
-            rate_lookup = dict(enumerate(rates, start=1))
-            for idx, row in proj_df.iterrows():
-                yr = int(row["Year"])
-                rate_yr = float(rate_lookup.get(yr, 0.0))
-                solar_kwh = row["Solar (kWh)"]
-                ppa_cost = max(rate_yr, 0.0) * solar_kwh
-                util_residual = row["Bill w/ Solar ($)"]
-                total_cost = util_residual + ppa_cost
-                bill_no = row["Bill w/o Solar ($)"]
-                proj_df.at[idx, "PPA Cost ($)"] = round(ppa_cost, 2)
-                proj_df.at[idx, "Bill w/ Solar ($)"] = round(total_cost, 2)
-                proj_df.at[idx, "Annual Savings ($)"] = round(bill_no - total_cost, 2)
-            proj_df["Cumulative Savings ($)"] = proj_df["Annual Savings ($)"].cumsum().round(2)
-
-            return generate_proposal_pptx(
-                customer_name=preview_source.customer_name or "Customer",
-                address=preview_source.site_address,
-                utility_account=preview_source.utility_account,
+                rs_old_baseline=rs_old_baseline,
+                es_offset_annual=es_offset_annual,
+                common_nem_kw=common_nem_kw,
                 utility_name=utility_name,
-                tariff_name=selected_rate_name or "",
-                date_str=date.today().strftime("%B %Y"),
-                system_size_kw=float(system_size_kw or 0.0),
-                dc_ac_ratio=float(dc_ac_ratio or 1.0),
-                battery_kwh=float(battery_cap_kwh or 0.0),
-                battery_kw=0.0,
-                ppa_rate=primary.year1_rate_r1 or None,
-                ppa_escalator_pct=primary.escalator_r1_pct,
-                ppa_escalator_pct_2=primary.escalator_r2_pct,
-                term_years=preview_source.term_years,
-                rate_escalator_pct=rate_escalator,
-                result=result,
-                annual_proj_df=proj_df,
+                selected_rate_name=selected_rate_name,
+                system_size_kw=system_size_kw,
+                dc_ac_ratio=dc_ac_ratio,
+                battery_cap_kwh=battery_cap_kwh,
                 nem_regime_1=nem_regime_1,
                 nem_regime_2=nem_regime_2,
                 num_years_1=num_years_1,
-                customer_savings_pct=primary.savings_pct,
-                customer_savings_pct_2=primary.savings_pct,  # same target assumed
-                ppa_rate_regime_2=primary.year1_rate_r2,
-                annual_proj_df_original=_prop_base_proj,
-                narrative_bullets=list(preview_source.narrative_bullets) or None,
-                comparison_ppas=(
-                    _comparison_ppas_payload(preview_source)
-                    if include_appendix and preview_source.comparison_ppas
-                    else None
-                ),
             )
 
         _safe_name = (preview_source.customer_name or "Customer").replace(" ", "_")[:30]
@@ -4394,7 +4339,8 @@ def _render_sidebar():
 
         if not nem_switch:
             # Single export section
-            nem_regime_1 = st.selectbox("NEM Regime", nem_options, index=2, key="sb_nem_regime_1")
+            nem_regime_1 = st.selectbox("NEM Regime", nem_options, index=2,
+                                        key="sb_nem_regime_1_single")
             if billing_engine == "ECC" and nem_regime_1 in ("NEM-1", "NEM-2"):
                 st.warning(
                     "The ECC engine does not support TOU netting or credit carryover used by "
@@ -4422,7 +4368,8 @@ def _render_sidebar():
             # --- Section 1 ---
             st.markdown("---")
             st.markdown("**Section 1 — Export Rates**")
-            nem_regime_1 = st.selectbox("NEM Regime", nem_options, index=0, key="sb_nem_regime_1")
+            nem_regime_1 = st.selectbox("NEM Regime", nem_options, index=0,
+                                        key="sb_nem_regime_1_dual")
             if billing_engine == "ECC" and nem_regime_1 in ("NEM-1", "NEM-2"):
                 st.warning(
                     "The ECC engine does not support TOU netting or credit carryover used by "

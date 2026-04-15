@@ -140,14 +140,19 @@ def render_styled_table(
 
 
 def _negate_outflow_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Negate cost outflow columns and Export (kWh) for display (accounting style)."""
+    """Negate cost outflow columns (accounting style) for display / CSV.
+
+    Cost components only — kWh columns (Export (kWh), Import (kWh), etc.)
+    are quantities, not dollar flows, and stay positive. The on-screen
+    Annual Projection table uses the same rule; this helper exists so the
+    downloaded CSV matches what the user sees without recomputing the
+    negation inline at the download call site.
+    """
     out = df.copy()
     for col in ["Bill w/o Solar ($)", "Energy ($)", "Demand ($)",
-                 "Fixed ($)", "Bill w/ Solar ($)"]:
+                 "Fixed ($)", "NBC ($)", "Bill w/ Solar ($)"]:
         if col in out.columns:
             out[col] = out[col] * -1
-    if "Export (kWh)" in out.columns:
-        out["Export (kWh)"] = out["Export (kWh)"] * -1
     return out
 
 

@@ -12,7 +12,6 @@ dependency-free on ``modules/outputs.py``.
 from __future__ import annotations
 
 import io
-from dataclasses import asdict
 
 import pandas as pd
 import plotly.graph_objects as go
