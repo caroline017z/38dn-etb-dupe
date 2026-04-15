@@ -42,6 +42,14 @@ from .billing import BillingResult
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 38DN BRAND TOKENS  (from theme "38N" extracted from MBR Template)
+#
+# Colour-role hierarchy (keep consistent across all exhibits and the HTML
+# comparison view in ``proposal_views.py``):
+#   DK1 / navy    → baseline, utility-only path, "do nothing" reference
+#   ACCENT1 / grn → primary PPA, customer upside, savings
+#   ACCENT3 / tl  → secondary comparison (battery / regime-2 / alt-1)
+#   ACCENT4 / bl  → tertiary comparison (alt-2)
+#   amber / red   → caution / callouts only — never the dominant series
 # ═══════════════════════════════════════════════════════════════════════════
 FONT       = "Century Gothic"          # majorFont + minorFont
 

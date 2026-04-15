@@ -5,12 +5,18 @@ Kept in its own module so ``modules/proposals.py`` stays I/O-agnostic and
 ``modules/proposal.py`` (the PPTX deck generator) stays focused on a single
 artifact type.
 
-38DN palette is duplicated here intentionally — keeps this module
-dependency-free on ``modules/outputs.py``.
+Colour hierarchy (shared with the PPTX deck):
+  - Navy  = utility-only baseline / "do nothing" path
+  - Green = primary PPA / customer upside
+  - Blue / Teal / Amber = secondary comparison PPAs, ranked by save order
+The Plotly chart chrome (gridlines, hover, font) is driven by
+``modules.ui.tokens.PLOTLY_LAYOUT`` so every on-screen 38DN chart reads
+from one source of truth.
 """
 
 from __future__ import annotations
 
+import copy
 import io
 
 import pandas as pd
@@ -18,16 +24,18 @@ import plotly.graph_objects as go
 
 from .proposals import PPASnapshot, Proposal
 from .ui.components import sparkline_svg
+from .ui.tokens import PALETTE, PLOTLY_LAYOUT
 
-_NAVY = "#0E2841"
-_GREEN = "#45A750"
-_BLUE = "#1D6FA9"
-_TEAL = "#518484"
-_AMBER = "#D48A1A"
-_INK = "#1A1A1A"
-_FONT = "Aptos Narrow, Aptos, Calibri, Arial Narrow, sans-serif"
+_NAVY = PALETTE["navy"]
+_GREEN = PALETTE["green"]
+_BLUE = PALETTE["blue"]
+_TEAL = PALETTE["teal"]
+_AMBER = PALETTE["amber"]
+_INK = PALETTE["ink"]
 
-# Distinct colours for up to 4 PPAs (primary + 3 comparisons).
+# Primary PPA leads in green (customer upside); comparisons step through
+# the institutional secondary set. Utility baseline is rendered separately
+# in navy (see ``_build_overlay``).
 _PPA_PALETTE = (_GREEN, _BLUE, _TEAL, _AMBER)
 
 
@@ -173,19 +181,15 @@ def _build_overlay(snaps: tuple[PPASnapshot, ...]) -> go.Figure:
             xref="paper", yref="paper", x=0.5, y=0.5,
         )
 
+    _layout = copy.deepcopy(PLOTLY_LAYOUT)
+    _layout["yaxis"] = {**_layout["yaxis"], "rangemode": "tozero"}
     fig.update_layout(
+        **_layout,
         title=dict(text="Annual Bill — All Proposal PPAs vs Utility Only",
                    font=dict(size=15, color=_NAVY)),
         xaxis_title="Year",
         yaxis_title="Annual Cost ($K)",
-        yaxis=dict(rangemode="tozero", gridcolor="#E5E7EB"),
-        xaxis=dict(gridcolor="#E5E7EB"),
-        template="plotly_white",
         height=440,
-        margin=dict(l=60, r=30, t=70, b=55),
-        font=dict(family=_FONT, size=12, color=_INK),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02,
-                    xanchor="right", x=1, font=dict(color=_INK, size=11)),
         hovermode="x unified",
     )
     return fig
@@ -221,17 +225,13 @@ def _build_grouped_bar(snaps: tuple[PPASnapshot, ...]) -> go.Figure:
         ))
 
     fig.update_layout(
+        **copy.deepcopy(PLOTLY_LAYOUT),
         title=dict(text="Annual Bill at Snapshot Years — Proposal PPAs",
                    font=dict(size=15, color=_NAVY)),
         xaxis_title="Projection Year",
         yaxis_title="Annual Cost ($K)",
         barmode="group",
-        template="plotly_white",
         height=420,
-        margin=dict(l=60, r=30, t=70, b=55),
-        font=dict(family=_FONT, size=12, color=_INK),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02,
-                    xanchor="right", x=1, font=dict(color=_INK, size=11)),
     )
     return fig
 
