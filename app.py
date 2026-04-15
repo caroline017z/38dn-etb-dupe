@@ -5898,18 +5898,23 @@ def _render_results():
     tab_ai = _analysis_sub[1]          # AI Assistant
     tab5 = section_tabs[4]             # Downloads (top-level now)
 
-    # When the user activates a Proposal from the top-bar popover, focus
-    # the Downloads section on the next render. Streamlit's st.tabs has
-    # no programmatic selection API, so we inject a small JS snippet
-    # that clicks the Downloads tab button once it mounts. The flag in
-    # session_state is cleared after the injection.
+    # When the user activates a Proposal from the top-bar popover we do
+    # two things on the next render:
+    #   1. Click the Downloads tab so they land on the export surface.
+    #   2. Dismiss the popover, which Streamlit's st.popover doesn't do
+    #      itself after a button inside it triggers a rerun. We simulate
+    #      an Escape key press on the document (BaseWeb popovers listen
+    #      for it) and click outside the popover as a fallback.
+    # Streamlit's st.tabs has no programmatic selection API, so the tab
+    # focus goes through a small JS snippet that polls for the button.
     if st.session_state.pop("_focus_downloads_tab", False):
         st.components.v1.html(
             """
             <script>
-            (function focusDownloads() {
-                function click() {
-                    const doc = window.parent.document;
+            (function focusDownloadsAndClosePopover() {
+                const doc = window.parent.document;
+
+                function clickDownloadsTab() {
                     const tabs = doc.querySelectorAll(
                         '.stTabs [data-baseweb="tab-list"] > button'
                     );
@@ -5920,9 +5925,33 @@ def _render_results():
                     }
                     return false;
                 }
-                if (!click()) {
+
+                function closeAnyOpenPopover() {
+                    /* BaseWeb popovers listen for Escape on the document. */
+                    const esc = new KeyboardEvent("keydown", {
+                        key: "Escape", code: "Escape",
+                        keyCode: 27, which: 27, bubbles: true,
+                    });
+                    doc.dispatchEvent(esc);
+                    doc.body.dispatchEvent(esc);
+                    /* Fallback: click outside any visible popover layer. */
+                    const layers = doc.querySelectorAll(
+                        '[data-baseweb="popover"], [data-baseweb="layer"]'
+                    );
+                    if (layers.length === 0) return;
+                    const outside = doc.querySelector('.block-container');
+                    if (outside) outside.click();
+                }
+
+                /* Try once immediately, then poll briefly for late mounts. */
+                let done = clickDownloadsTab();
+                closeAnyOpenPopover();
+                if (!done) {
                     const iv = setInterval(function () {
-                        if (click()) clearInterval(iv);
+                        if (clickDownloadsTab()) {
+                            closeAnyOpenPopover();
+                            clearInterval(iv);
+                        }
                     }, 100);
                     setTimeout(function () { clearInterval(iv); }, 3000);
                 }
