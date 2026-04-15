@@ -1774,6 +1774,13 @@ section[data-testid="stSidebar"] .stNumberInput label {
 </style>
 """, unsafe_allow_html=True)
 
+# Phase 5: install the institutional theme (Inter + JetBrains Mono + tokens
+# from assets/theme.css) AFTER the legacy inline CSS so the new tokens win
+# on collisions. The legacy block is kept around for the navy top-bar rules
+# (the theme file deliberately doesn't touch `.nav-bar-wrapper`).
+from modules.ui import install_theme as _install_theme
+_install_theme()
+
 LOGO_PATH = os.path.join(os.path.dirname(__file__), "assets", "logo.png")
 if os.path.exists(LOGO_PATH):
     with open(LOGO_PATH, "rb") as f:
@@ -3259,11 +3266,11 @@ def _render_sidebar():
     # SIDEBAR — INPUTS
     # =============================================================================
     with st.sidebar:
-        st.header("System & Site Configuration")
-
-        # Inline progress badge: shows the user at a glance which core inputs
-        # are loaded. The detailed checklist still renders in the main pane
-        # when anything is missing.
+        # ── STICKY INPUT-LOAD TRACKER ───────────────────────────────────
+        # Four oval pills showing which core inputs have been loaded. The
+        # pills turn green as each input populates and the whole tracker
+        # stays affixed to the top of the sidebar while the user scrolls
+        # further configuration below.
         _sb_prod = st.session_state.get("production_8760") is not None
         _sb_load = st.session_state.get("load_8760") is not None
         _sb_tariff = (
@@ -3271,29 +3278,106 @@ def _render_sidebar():
             or st.session_state.get("ecc_cost_calculator") is not None
         )
         _sb_export = st.session_state.get("export_rates") is not None
-        _sb_checks = [("Prod", _sb_prod), ("Load", _sb_load),
-                      ("Tariff", _sb_tariff), ("Export", _sb_export)]
+        _sb_checks = [
+            ("Production", _sb_prod),
+            ("Load",       _sb_load),
+            ("Tariff",     _sb_tariff),
+            ("Export",     _sb_export),
+        ]
         _sb_done = sum(1 for _, ok in _sb_checks if ok)
         _sb_total = len(_sb_checks)
-        _sb_bar_color = "#45A750" if _sb_done == _sb_total else "#D48A1A" if _sb_done >= 2 else "#6b7280"
-        _sb_pills = "".join(
-            f'<span style="display:inline-block; padding:1px 7px; margin-right:4px; '
-            f'font-size:10px; font-weight:600; border-radius:10px; '
-            f'background:{"#45A750" if ok else "#e5e7eb"}; '
-            f'color:{"#ffffff" if ok else "#6b7280"};">{name}</span>'
-            for name, ok in _sb_checks
+        _sb_complete = _sb_done == _sb_total
+
+        # Status color logic — celebratory green on 100%, amber mid, neutral low.
+        if _sb_complete:
+            _headline_color = "#45A750"
+            _headline_text = "Inputs ready — run simulation"
+            _accent_rule = "#45A750"
+        elif _sb_done >= _sb_total // 2:
+            _headline_color = "#D48A1A"
+            _headline_text = f"{_sb_done} of {_sb_total} inputs loaded"
+            _accent_rule = "#D48A1A"
+        else:
+            _headline_color = "#64748B"
+            _headline_text = f"{_sb_done} of {_sb_total} inputs loaded"
+            _accent_rule = "#CBD5E1"
+
+        # Oval pills — green filled when loaded, outlined neutral when pending.
+        _pill_pieces = []
+        for name, ok in _sb_checks:
+            if ok:
+                _pill_pieces.append(
+                    f'<span style="display:inline-flex; align-items:center; gap:4px;'
+                    f'padding:3px 10px; margin:0 4px 4px 0;'
+                    f'font-size:11px; font-weight:600; letter-spacing:0.02em;'
+                    f'border-radius:999px; background:#45A750; color:#ffffff;'
+                    f'border:1px solid #45A750;">'
+                    f'<span style="font-size:9px; line-height:1;">✓</span> {name}'
+                    f'</span>'
+                )
+            else:
+                _pill_pieces.append(
+                    f'<span style="display:inline-flex; align-items:center; gap:4px;'
+                    f'padding:3px 10px; margin:0 4px 4px 0;'
+                    f'font-size:11px; font-weight:500; letter-spacing:0.02em;'
+                    f'border-radius:999px; background:#ffffff; color:#94A3B8;'
+                    f'border:1px solid #E2E8F0;">'
+                    f'<span style="font-size:9px; line-height:1;">○</span> {name}'
+                    f'</span>'
+                )
+        _pills_html = "".join(_pill_pieces)
+
+        # Progress bar (4px hairline) — width scales with completion.
+        _pct = int(round(_sb_done / _sb_total * 100))
+        _bar = (
+            f'<div style="height:3px; background:#F1F5F9; border-radius:2px; '
+            f'margin-top:8px; overflow:hidden;">'
+            f'<div style="width:{_pct}%; height:100%; background:{_accent_rule}; '
+            f'transition: width 240ms ease;"></div>'
+            f'</div>'
+        )
+
+        # Sticky wrapper — uses position:sticky so the tracker follows as
+        # the user scrolls through sidebar sections below. The outer card
+        # gets a subtle celebratory gradient-top + navy eyebrow on 100%.
+        _eyebrow_color = "#45A750" if _sb_complete else "#64748B"
+        _celebration = (
+            '<div style="position:absolute; top:0; left:0; right:0; height:2px; '
+            'background:linear-gradient(90deg, #45A750 0%, #1D6FA9 100%);"></div>'
+            if _sb_complete else ""
         )
         st.markdown(
-            f"""<div style="margin:-8px 0 10px 0;">
-                <div style="font-size:11px; color:{_sb_bar_color}; font-weight:600;
-                            letter-spacing:0.3px; margin-bottom:4px;">
-                    {_sb_done}/{_sb_total} inputs loaded
+            f"""
+            <div style="position: sticky; top: 0; z-index: 50;
+                        background: #FFFFFF; padding: 12px 4px 10px 4px;
+                        margin: -8px -4px 10px -4px;
+                        border-bottom: 1px solid #E5E7EB;
+                        position: relative;">
+                {_celebration}
+                <div style="font-size: 10px; font-weight: 600;
+                            letter-spacing: 0.08em; text-transform: uppercase;
+                            color: {_eyebrow_color}; margin-bottom: 6px;">
+                    Input loading
                 </div>
-                <div>{_sb_pills}</div>
-            </div>""",
+                <div style="font-size: 13px; font-weight: 600;
+                            color: {_headline_color}; margin-bottom: 8px;
+                            letter-spacing: -0.005em;">
+                    {_headline_text}
+                </div>
+                <div style="line-height:1.8;">{_pills_html}</div>
+                {_bar}
+            </div>
+            """,
             unsafe_allow_html=True,
         )
-        st.caption("Complete each section below, then click **Run Simulation** in the main panel.")
+
+        st.markdown(
+            '<hr style="border:none; border-top:1px solid #E5E7EB; '
+            'margin: 4px 0 12px 0;">',
+            unsafe_allow_html=True,
+        )
+
+        st.header("System & Site Configuration")
 
         # --- Load a System Profile ---
         _sp_names = _list_saved(SYSTEM_PROFILES_DIR, ".json")
@@ -5010,22 +5094,10 @@ if st.session_state.get("rate_shift_enabled"):
         )
 all_ready = all(ready_checks.values())
 
-if not all_ready:
-    st.subheader("Simulation Checklist")
-    _checklist_hints = {
-        "Production profile": "Sidebar Section 1-2: enter a location, configure PV system, and click **Generate Production Profile**",
-        "Load profile": "Sidebar Section 3: upload an 8760 CSV or select a saved load profile",
-        "Tariff schedule": "Sidebar Section 4: fetch and load a rate schedule. For NEM-A meters not using the generating meter's tariff, load per-meter tariffs below the rate selector.",
-        "Export rates": "Sidebar Section 5: choose an export compensation method (saved profile, CSV upload, or flat rate)",
-        "Rate-shift old tariff": "Sidebar Section 4: pick an old tariff for the Rate Shift comparison and click **Load Old Tariff** (or disable Rate Shift).",
-    }
-    for check, status in ready_checks.items():
-        if status:
-            st.write(f"✅ {check}")
-        else:
-            st.write(f"⬜ {check}")
-            st.caption(f"  ↳ {_checklist_hints.get(check, '')}")
-    st.info("Complete all inputs in the sidebar, then click **Run Simulation** below.")
+# Note (Phase 5): the Simulation Checklist UI that previously rendered here
+# has been replaced by the sticky input-load tracker at the top of the
+# sidebar. That gives the same information (which inputs are loaded) with
+# less visual noise in the main pane.
 
 _run_col, _save_col, _edit_col = st.columns(3)
 with _run_col:
@@ -5501,30 +5573,49 @@ def _render_results():
             st.session_state["_proposals_tab_new"] = True
             st.session_state["active_proposal_id"] = None
 
-    # Grid Exchange is now a sub-expander inside Monthly Bills (users were
-    # hopping between two tabs to cross-reference the same volumes).
-    tab_labels = ["Monthly Bills", "Annual Projection", "Production vs Load", "Savings & Payback"]
-    if has_battery:
-        tab_labels.append("Battery Analysis")
-    tab_labels.append("PPA Rate")
-    tab_labels.append("Proposals")        # Phase 4
-    tab_labels.append("Sensitivity")
-    tab_labels.append("AI Assistant")
-    tab_labels.append("Downloads")
-    result_tabs = st.tabs(tab_labels)
+    # Phase 6: top-level navigation consolidated from 9 flat tabs to 4
+    # institutional sections (Overview / Bills & Projection / PPA &
+    # Proposals / Analysis). Each section renders a second tab row below
+    # for sub-views. The legacy tab variables (tab1, tab2, ...) are
+    # re-pointed at the appropriate sub-tab container so every existing
+    # `with tab_X:` body below continues to work verbatim.
+    section_tabs = st.tabs([
+        "Overview",
+        "Bills & Projection",
+        "PPA & Proposals",
+        "Analysis",
+    ])
 
-    # Assign tab variables — counted from the end so inserting new tabs in
-    # the middle doesn't shuffle these pointers.
-    tab1 = result_tabs[0]
-    tab2 = result_tabs[1]
-    tab3 = result_tabs[2]
-    tab4 = result_tabs[3]
-    tab_batt = result_tabs[4] if has_battery else None
-    tab_indexed = result_tabs[-5]       # PPA Rate
-    tab_proposals = result_tabs[-4]     # Proposals (new)
-    tab_sensitivity = result_tabs[-3]   # Monte Carlo + tornado
-    tab_ai = result_tabs[-2]            # AI Assistant
-    tab5 = result_tabs[-1]              # Downloads (always last)
+    # — Overview: headline KPIs + energy flow charts —
+    with section_tabs[0]:
+        _overview_sub = st.tabs(["Production vs Load", "Savings & Payback"])
+
+    # — Bills & Projection: monthly detail + multi-year projection + battery —
+    with section_tabs[1]:
+        _bills_labels = ["Monthly Bills", "Annual Projection"]
+        if has_battery:
+            _bills_labels.append("Battery Analysis")
+        _bills_sub = st.tabs(_bills_labels)
+
+    # — PPA & Proposals: rate builder + named-Proposal workspace —
+    with section_tabs[2]:
+        _ppa_sub = st.tabs(["PPA Rate", "Proposals"])
+
+    # — Analysis: sensitivity, AI assistant, downloads —
+    with section_tabs[3]:
+        _analysis_sub = st.tabs(["Sensitivity", "AI Assistant", "Downloads"])
+
+    # Re-point legacy tab variables into the new nested structure.
+    tab3 = _overview_sub[0]            # Production vs Load
+    tab4 = _overview_sub[1]            # Savings & Payback
+    tab1 = _bills_sub[0]               # Monthly Bills (+ TOU expander)
+    tab2 = _bills_sub[1]               # Annual Projection
+    tab_batt = _bills_sub[2] if has_battery else None
+    tab_indexed = _ppa_sub[0]          # PPA Rate
+    tab_proposals = _ppa_sub[1]        # Proposals (Phase 4)
+    tab_sensitivity = _analysis_sub[0] # Monte Carlo + tornado
+    tab_ai = _analysis_sub[1]          # AI Assistant
+    tab5 = _analysis_sub[2]            # Downloads
 
     # Compute peak period index from tariff
     _tariff_for_peak = st.session_state["tariff"]
