@@ -1032,6 +1032,11 @@ def _project_single_year_monthly(
                 result.annual_bill_without_solar * _mo_load_share
                 * load_factor * rate_factor * _prorate, 2)
 
+        # Monthly solar savings = baseline bill (no-solar) − net bill (with solar).
+        # Positive when solar reduces the bill; can go negative in a month if
+        # minimum-charge floors or regime transitions flip the balance.
+        r["Savings ($)"] = round(r["Baseline Bill ($)"] - r["Net Bill ($)"], 2)
+
         rows.append(r)
 
     return rows
