@@ -2117,7 +2117,10 @@ def _render_top_bar():
     </style>
     """, unsafe_allow_html=True)
 
-    _mgmt_btn_cols = st.columns([0.15, 1, 1, 1, 1, 1, 1, 1.5])
+    # Proposals popover added to the right of Save to mirror the save flow —
+    # users can pick a named bundle for the active simulation without leaving
+    # the top bar. Column ratios rebalanced to keep the row symmetric.
+    _mgmt_btn_cols = st.columns([0.15, 1, 1, 1, 1, 1, 1, 1, 1.5])
 
     # --- Simulations popover ---
     with _mgmt_btn_cols[1]:
@@ -2303,6 +2306,66 @@ def _render_top_bar():
                 disabled=(not sim_name),
                 width="stretch",
             )
+
+    # --- Proposals popover ---
+    # Mirrors the Save flow from the opposite direction: every saved Proposal
+    # for the active simulation appears here, with a "View All" that opens
+    # the Proposals tab. GCS-persisted Proposals are already hydrated into
+    # st.session_state["proposals"] on simulation load, so this popover
+    # reads the same source of truth as the Proposals tab.
+    with _mgmt_btn_cols[7]:
+        with st.popover("Proposals", width="stretch"):
+            _top_sim_name = (
+                st.session_state.get("_active_simulation_name")
+                or st.session_state.get("_last_loaded_simulation_name")
+            )
+            _top_props = _list_proposals_session(
+                st.session_state, simulation_name=_top_sim_name,
+            )
+            if _top_props:
+                st.markdown(
+                    f"**{len(_top_props)} Proposal{'s' if len(_top_props)!=1 else ''}"
+                    + (f" · {_top_sim_name}" if _top_sim_name else "")
+                    + "**"
+                )
+                for _p in _top_props[:4]:
+                    _comp_n = len(_p.comparison_ppas)
+                    _lbl = (
+                        f"{_p.customer_name or 'Customer'}"
+                        if _p.customer_name else _p.name
+                    )
+                    _help = (
+                        f"{_p.name} · Primary: {_p.primary_ppa.name}"
+                        + (f" + {_comp_n} alt{'s' if _comp_n != 1 else ''}"
+                           if _comp_n else "")
+                        + f" · Updated {_p.updated_at[:10]}"
+                    )
+                    if st.button(
+                        _lbl,
+                        key=f"popover_prop_{_p.id}",
+                        width="stretch",
+                        help=_help,
+                    ):
+                        st.session_state["active_proposal_id"] = _p.id
+                        st.rerun()
+                if len(_top_props) > 4:
+                    st.caption(f"+ {len(_top_props) - 4} more")
+                st.divider()
+            else:
+                st.caption(
+                    "No Proposals saved for this simulation yet. Open the "
+                    "**PPA Rate** tab to build and save a PPA, then the "
+                    "**Proposals** tab to bundle it into a Proposal."
+                )
+
+            _new_btn = st.button(
+                "➕ New Proposal", width="stretch", type="primary",
+                key="popover_new_proposal",
+            )
+            if _new_btn:
+                st.session_state["_proposals_tab_new"] = True
+                st.session_state["active_proposal_id"] = None
+                st.rerun()
 
 
     # ---- LOAD PROFILES SECTION ----
@@ -6200,18 +6263,34 @@ def _render_results():
             _k4.metric("Lifetime Savings", f"${_life_sav:,.0f}")
 
         # ── Why does the NEM-3 bill often rise despite a lower PPA? ───
+        # Custom callout styled with a light-teal background so it reads as
+        # an explanatory panel tied to the 38DN palette rather than
+        # Streamlit's default info-blue.
         if nem_switch and num_years_1 and num_years_1 < len(_cd):
             _jump = float(_total_ppa.iloc[num_years_1] - _total_ppa.iloc[num_years_1 - 1])
             if _jump > 0:
-                st.info(
-                    f"**Why the bill jumps in {nem_regime_2} even as the PPA steps down by "
-                    f"${abs(_yr1_rate_r2 - _yr1_rate_r1):.4f}/kWh:** under {nem_regime_2}, "
-                    f"exported solar is compensated at the ACC (avoided-cost) rate, which is "
-                    f"typically **5–10×** lower than retail TOU. The lost export credit on the "
-                    f"utility side outweighs the PPA reduction, so the customer's total bill "
-                    f"steps up by about **${_jump:,.0f}** at the regime switch. The backsolver "
-                    f"re-lowers the {nem_regime_2} PPA to preserve the savings target, but it "
-                    f"cannot fully close the gap without taking the PPA to zero."
+                _jump_body = (
+                    f"<strong>Why the bill jumps in {nem_regime_2} even as the PPA steps "
+                    f"down by ${abs(_yr1_rate_r2 - _yr1_rate_r1):.4f}/kWh:</strong> "
+                    f"under {nem_regime_2}, exported solar is compensated at the ACC "
+                    f"(avoided-cost) rate, which is typically <strong>5–10×</strong> "
+                    f"lower than retail TOU. The lost export credit on the utility "
+                    f"side outweighs the PPA reduction, so the customer's total bill "
+                    f"steps up by about <strong>${_jump:,.0f}</strong> at the regime "
+                    f"switch. The backsolver re-lowers the {nem_regime_2} PPA to "
+                    f"preserve the savings target, but it cannot fully close the gap "
+                    f"without taking the PPA to zero."
+                )
+                st.markdown(
+                    '<div style="background:#E3EDED;border:1px solid #C7DADA;'
+                    'border-left:3px solid #518484;border-radius:6px;'
+                    'padding:12px 16px;margin:10px 0 18px 0;font-size:13px;'
+                    'line-height:1.55;color:#0E2841;">'
+                    f'<div style="font-size:10px;font-weight:600;color:#518484;'
+                    'text-transform:uppercase;letter-spacing:0.06em;'
+                    f'margin-bottom:6px;">Regime-switch explainer</div>'
+                    f'{_jump_body}</div>',
+                    unsafe_allow_html=True,
                 )
 
         # ── Save PPA scenario (moved ABOVE the chart) ─────────────────
