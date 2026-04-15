@@ -644,24 +644,49 @@ def _render_ai_assistant_tab(
             if extraction.notes:
                 st.info(extraction.notes)
 
-    # -- Tariff Q&A --------------------------------------------------------
+    # -- System / tariff / NEM / billing Q&A ------------------------------
     st.divider()
-    st.markdown("**Ask a question about the selected tariff**")
+    st.markdown("**Ask a question about the selected system, tariff, NEM regime, or billing structure**")
     if tariff is None:
-        st.info("Load a tariff in Section 4 of the sidebar to enable tariff Q&A.")
+        st.info("Load a tariff in Section 4 of the sidebar to enable Q&A.")
     else:
-        q = st.text_input("Question", key="ai_tariff_q",
-                          placeholder="e.g. What are the peak TOU hours in summer?")
+        st.caption(
+            "The assistant answers from the current URDB tariff JSON plus the "
+            "system / NEM context shown below. For questions about tariff terms "
+            "it quotes verbatim; for NEM regime / billing structure it cites the "
+            "rule mechanics from the tariff rate structure."
+        )
+        q = st.text_input(
+            "Question", key="ai_tariff_q",
+            placeholder=(
+                "e.g. What are the peak TOU hours in summer? "
+                "What demand charges apply? How does NEM-3 settle exports?"
+            ),
+        )
         if q and st.button("Ask", key="ai_tariff_ask"):
             try:
+                # Supplement the URDB JSON with the simulation context so the
+                # assistant can answer system / NEM / billing-structure questions
+                # beyond what the raw tariff JSON contains.
+                ctx = {
+                    "urdb_tariff": getattr(tariff, "raw_data", {}) or {},
+                    "system_context": {
+                        "system_size_kw": system_size_kw,
+                        "battery_capacity_kwh": battery_capacity_kwh,
+                        "nem_regime": nem_regime,
+                        "utility": getattr(tariff, "utility", ""),
+                        "rate_schedule_label": getattr(tariff, "label", ""),
+                        "rate_schedule_name": getattr(tariff, "name", ""),
+                    },
+                }
                 answer = _ai_tariff_ask(
                     q,
                     tariff_label=getattr(tariff, "label", ""),
-                    urdb_json=getattr(tariff, "raw_data", {}) or {},
+                    urdb_json=ctx,
                 )
                 st.markdown(answer)
             except Exception as exc:
-                st.error(f"Tariff Q&A failed: {exc}")
+                st.error(f"Q&A failed: {exc}")
 
 
 def _render_sensitivity_tab(
@@ -695,7 +720,7 @@ def _render_sensitivity_tab(
     st.markdown(
         "Projection-level Monte Carlo and tornado — **year-1 billing is held fixed**; "
         "escalators and degradation are perturbed around the base case. "
-        "The reported metric is **NPV of customer savings** over the horizon, "
+        "The reported metric is **NPV of Customer Savings** over the horizon, "
         "discounted at the chosen rate, net of the up-front system cost. "
         "Positive values = customer comes out ahead."
     )
@@ -753,24 +778,24 @@ def _render_sensitivity_tab(
             pct = _sens_percentiles(npvs)
             fig = go.Figure()
             fig.add_trace(go.Histogram(
-                x=npvs, nbinsx=40, marker_color=NAVY, opacity=0.88,
-                name="NPV of customer savings",
+                x=npvs / 1_000_000, nbinsx=40, marker_color=NAVY, opacity=0.88,
+                name="NPV of Customer Savings",
             ))
             for p, color in [(10, BLUE), (50, NAVY), (90, GREEN)]:
                 fig.add_vline(
-                    x=pct[p], line_dash="dash", line_color=color, line_width=2,
-                    annotation_text=f"<b>P{p}</b>  ${pct[p]/1000:,.0f}k",
+                    x=pct[p] / 1_000_000, line_dash="dash", line_color=color, line_width=2,
+                    annotation_text=f"<b>P{p}</b>  ${pct[p]/1_000_000:,.2f}MM",
                     annotation_position="top",
                     annotation_font=dict(color=color, size=12),
                 )
             fig.update_layout(
                 title=dict(
-                    text=f"NPV of customer savings — {len(npvs):,} sample"
+                    text=f"NPV of Customer Savings — {len(npvs):,} sample"
                          f"{'s' if len(npvs)!=1 else ''}"
                          + (" (final)" if final else " (running…)"),
                     font=dict(size=15, color=NAVY),
                 ),
-                xaxis_title="NPV ($)",
+                xaxis_title="NPV ($MM)",
                 yaxis_title="Count",
                 template="plotly_white",
                 bargap=0.02,
@@ -811,9 +836,9 @@ def _render_sensitivity_tab(
 
             pct = _sens_percentiles(mc_df["npv"].to_numpy())
             k1, k2, k3 = st.columns(3)
-            k1.metric("P10 NPV", f"${pct[10]/1000:,.0f}k")
-            k2.metric("P50 NPV", f"${pct[50]/1000:,.0f}k")
-            k3.metric("P90 NPV", f"${pct[90]/1000:,.0f}k")
+            k1.metric("P10 NPV (Customer Savings)", f"${pct[10]/1_000_000:,.2f}MM")
+            k2.metric("P50 NPV (Customer Savings)", f"${pct[50]/1_000_000:,.2f}MM")
+            k3.metric("P90 NPV (Customer Savings)", f"${pct[90]/1_000_000:,.2f}MM")
 
         if run_tornado:
             with st.spinner("Running tornado sweep…"):
@@ -838,7 +863,7 @@ def _render_sensitivity_tab(
                     base=base, orientation="h",
                     marker_color=BLUE, opacity=0.9, showlegend=False,
                     hovertemplate=(
-                        f"{row['lever']}<br>low: ${row['low_npv']/1000:,.1f}k<extra></extra>"
+                        f"{row['lever']}<br>low: ${row['low_npv']/1_000_000:,.2f}MM<extra></extra>"
                     ),
                 ))
                 fig.add_trace(go.Bar(
@@ -846,18 +871,18 @@ def _render_sensitivity_tab(
                     base=base, orientation="h",
                     marker_color=GREEN, opacity=0.9, showlegend=False,
                     hovertemplate=(
-                        f"{row['lever']}<br>high: ${row['high_npv']/1000:,.1f}k<extra></extra>"
+                        f"{row['lever']}<br>high: ${row['high_npv']/1_000_000:,.2f}MM<extra></extra>"
                     ),
                 ))
             fig.add_vline(
                 x=base, line_color=NAVY, line_width=2.5,
-                annotation_text=f"<b>Base NPV</b>  ${base/1000:,.0f}k",
+                annotation_text=f"<b>Base NPV</b>  ${base/1_000_000:,.2f}MM",
                 annotation_position="top",
                 annotation_font=dict(color=NAVY, size=12),
             )
             fig.update_layout(
                 title=dict(
-                    text="Tornado — impact on NPV of customer savings (±10% lever swing around base)",
+                    text="Tornado — impact on NPV of Customer Savings (±10% lever swing around base)",
                     font=dict(size=15, color=NAVY),
                 ),
                 xaxis_title="NPV ($)",
@@ -5289,49 +5314,207 @@ def _render_results():
         _yr1_pct = (_yr1_sav / _yr1_bno * 100) if _yr1_bno else 0.0
         _avg_sav = _life_sav / len(_cd) if len(_cd) else 0.0
 
-        _k1, _k2, _k3, _k4 = st.columns(4)
-        with _k1:
-            st.metric("Year 1 PPA Rate", f"${_yr1_rate:.4f}/kWh")
-        with _k2:
-            st.metric("Year 1 Savings", f"${_yr1_sav:,.0f}")
-        with _k3:
-            st.metric("Savings %", f"{_yr1_pct:.1f}%")
-        with _k4:
-            st.metric("Lifetime Savings", f"${_life_sav:,.0f}")
+        # ── Per-regime Yr-1 PPA rate + summary KPIs ───────────────────
+        # When a NEM switch is configured, each regime gets its own back-
+        # solved Yr-1 rate. Expose both so the user can see the step-down.
+        _yr1_rate_r1 = _yr1_rate
+        _yr1_rate_r2 = None
+        if nem_switch and num_years_1 and num_years_1 < len(_cd):
+            _split = int(num_years_1)
+            _yr1_rate_r2 = float(_cd["PPA Rate ($/kWh)"].iloc[_split])
+
+        if _yr1_rate_r2 is not None:
+            _k1, _k2, _k3, _k4, _k5 = st.columns(5)
+            _k1.metric(f"Yr-1 PPA · {nem_regime_1}", f"${_yr1_rate_r1:.4f}/kWh")
+            _k2.metric(f"Yr-1 PPA · {nem_regime_2}", f"${_yr1_rate_r2:.4f}/kWh",
+                       delta=f"${(_yr1_rate_r2 - _yr1_rate_r1):+.4f}/kWh",
+                       delta_color="inverse")
+            _k3.metric("Year-1 Savings", f"${_yr1_sav:,.0f}")
+            _k4.metric("Savings %", f"{_yr1_pct:.1f}%")
+            _k5.metric("Lifetime Savings", f"${_life_sav:,.0f}")
+        else:
+            _k1, _k2, _k3, _k4 = st.columns(4)
+            _k1.metric("Year-1 PPA Rate", f"${_yr1_rate_r1:.4f}/kWh")
+            _k2.metric("Year-1 Savings", f"${_yr1_sav:,.0f}")
+            _k3.metric("Savings %", f"{_yr1_pct:.1f}%")
+            _k4.metric("Lifetime Savings", f"${_life_sav:,.0f}")
+
+        # ── Why does the NEM-3 bill often rise despite a lower PPA? ───
+        if nem_switch and num_years_1 and num_years_1 < len(_cd):
+            _jump = float(_total_ppa.iloc[num_years_1] - _total_ppa.iloc[num_years_1 - 1])
+            if _jump > 0:
+                st.info(
+                    f"**Why the bill jumps in {nem_regime_2} even as the PPA steps down by "
+                    f"${abs(_yr1_rate_r2 - _yr1_rate_r1):.4f}/kWh:** under {nem_regime_2}, "
+                    f"exported solar is compensated at the ACC (avoided-cost) rate, which is "
+                    f"typically **5–10×** lower than retail TOU. The lost export credit on the "
+                    f"utility side outweighs the PPA reduction, so the customer's total bill "
+                    f"steps up by about **${_jump:,.0f}** at the regime switch. The backsolver "
+                    f"re-lowers the {nem_regime_2} PPA to preserve the savings target, but it "
+                    f"cannot fully close the gap without taking the PPA to zero."
+                )
+
+        # ── Save PPA scenario (moved ABOVE the chart) ─────────────────
+        _sp_save, _sp_tbl = st.container(), st.container()
+        with _sp_save:
+            st.markdown("**Save this PPA structure**")
+            st.caption(
+                "Name and save the current PPA configuration to overlay on the "
+                "chart and compare against other PPA structures you try."
+            )
+            sv_name_col, sv_btn_col, sv_clear_col = st.columns([0.5, 0.25, 0.25])
+            with sv_name_col:
+                _sv_name = st.text_input(
+                    "Scenario name", value="", key="ppa_save_name",
+                    placeholder="e.g. 2.9% escalator / 10% savings",
+                    label_visibility="collapsed",
+                )
+            with sv_btn_col:
+                if st.button("💾 Save PPA", key="ppa_save_btn", use_container_width=True):
+                    name = (_sv_name or "").strip() or f"Scenario {len(st.session_state.get('saved_ppa_scenarios', {})) + 1}"
+                    # Pre-compute load kWh per year (needed for effective $/kWh overlay).
+                    _proj_load_col = (
+                        "Customer Load (kWh)"
+                        if "Customer Load (kWh)" in _main_projection.columns
+                        else "Load (kWh)"
+                    )
+                    _load_kwh = _main_projection[_proj_load_col].to_numpy() if _proj_load_col in _main_projection.columns else None
+                    saved = st.session_state.setdefault("saved_ppa_scenarios", {})
+                    saved[name] = {
+                        "calendar_year": _x.tolist(),
+                        "year_indices": _cd["Year"].astype(int).tolist()
+                            if "Year" in _cd.columns else list(range(1, len(_cd) + 1)),
+                        "ppa_rate_per_year": _cd["PPA Rate ($/kWh)"].round(5).tolist(),
+                        "solar_kwh_per_year": _cd["Solar (kWh)"].round(0).tolist(),
+                        "total_ppa_bill_k": (_total_ppa / 1000).round(2).tolist(),
+                        "utility_only_bill_k": (_bill_no / 1000).round(2).tolist(),
+                        "ppa_effective_rate": (
+                            (_total_ppa.to_numpy() / _load_kwh).round(5).tolist()
+                            if _load_kwh is not None and (_load_kwh > 0).all() else None
+                        ),
+                        "utility_effective_rate": (
+                            (_bill_no.to_numpy() / _load_kwh).round(5).tolist()
+                            if _load_kwh is not None and (_load_kwh > 0).all() else None
+                        ),
+                        "year1_rate_r1": _yr1_rate_r1,
+                        "year1_rate_r2": _yr1_rate_r2,
+                        "ppa_escalator_r1": float(it_ppa_esc_1),
+                        "ppa_escalator_r2": float(it_ppa_esc_2) if nem_switch else None,
+                        "savings_pct": float(it_savings_pct),
+                        "savings_pct_r2": float(st.session_state.get("it_r2_sav") or it_savings_pct)
+                            if nem_switch else None,
+                        "nem_regime_1": nem_regime_1,
+                        "nem_regime_2": nem_regime_2 if nem_switch else None,
+                        "num_years_1": int(num_years_1) if nem_switch and num_years_1 else None,
+                        "term_years": int(len(_cd)),
+                        "lifetime_savings": float(_life_sav),
+                    }
+                    st.rerun()
+            with sv_clear_col:
+                if st.button("Clear saved", key="ppa_clear_btn", use_container_width=True):
+                    st.session_state["saved_ppa_scenarios"] = {}
+                    st.rerun()
+
+        # Saved scenarios table (above chart so the user sees their saved
+        # trajectories before looking at the overlay).
+        with _sp_tbl:
+            if st.session_state.get("saved_ppa_scenarios"):
+                sv_df = pd.DataFrame([
+                    {
+                        "Scenario": n,
+                        f"Yr-1 PPA · {d.get('nem_regime_1', 'NEM-1')}":
+                            f"${d.get('year1_rate_r1', d.get('year1_rate', 0)):.4f}",
+                        f"Yr-1 PPA · {d['nem_regime_2']}" if d.get("nem_regime_2") else "":
+                            f"${d['year1_rate_r2']:.4f}" if d.get("year1_rate_r2") is not None else "",
+                        "Esc. R1 (%/yr)": f"{d['ppa_escalator_r1']:.1f}",
+                        "Esc. R2 (%/yr)" if d.get("ppa_escalator_r2") is not None else "":
+                            f"{d['ppa_escalator_r2']:.1f}" if d.get("ppa_escalator_r2") is not None else "",
+                        "Savings target (%)": f"{d['savings_pct']:.1f}",
+                        "Lifetime savings": fmt_dollar(d["lifetime_savings"]),
+                    }
+                    for n, d in st.session_state["saved_ppa_scenarios"].items()
+                ])
+                sv_df = sv_df.loc[:, [c for c in sv_df.columns if c != ""]]
+                st.markdown(render_styled_table(sv_df, bold_cols=["Scenario"]),
+                            unsafe_allow_html=True)
+
+        st.divider()
+
+        # ── Chart view toggle ─────────────────────────────────────────
+        _chart_mode = st.radio(
+            "Chart view",
+            ["Annual Bill ($K)", "Effective Rate ($/kWh)"],
+            horizontal=True,
+            key="ppa_chart_mode",
+            help=(
+                "Annual Bill shows total dollars paid per year. Effective Rate "
+                "divides that total by the customer's kWh consumed, giving an "
+                "apples-to-apples $/kWh comparison against the utility-only path."
+            ),
+        )
 
         _x = _cd["Calendar Year"].astype(int) if "Calendar Year" in _cd.columns else _cd["Year"]
         import plotly.graph_objects as go
 
-        # 38DN palette
         _NAVY, _GREEN, _BLUE, _TEAL, _AMBER = "#0E2841", "#45A750", "#1D6FA9", "#518484", "#D48A1A"
+
+        # Effective-rate series derived from the projection's per-year load.
+        _proj_load_col = (
+            "Customer Load (kWh)" if "Customer Load (kWh)" in _main_projection.columns
+            else "Load (kWh)"
+        )
+        _load_kwh = (
+            _main_projection[_proj_load_col].to_numpy()
+            if _proj_load_col in _main_projection.columns else None
+        )
+        _bill_mode = _chart_mode.startswith("Annual Bill")
+        if _bill_mode:
+            _y_util = (_bill_no / 1000).round(1)
+            _y_ppa = (_total_ppa / 1000).round(1)
+            _y_axis_title = "Annual Cost ($K)"
+            _hover_unit = "$%{y:.1f}K"
+        else:
+            if _load_kwh is None or not (_load_kwh > 0).all():
+                st.warning(
+                    "Effective $/kWh view requires per-year load from the projection; "
+                    "falling back to Annual Bill view."
+                )
+                _bill_mode = True
+                _y_util = (_bill_no / 1000).round(1)
+                _y_ppa = (_total_ppa / 1000).round(1)
+                _y_axis_title = "Annual Cost ($K)"
+                _hover_unit = "$%{y:.1f}K"
+            else:
+                _y_util = pd.Series((_bill_no.to_numpy() / _load_kwh).round(5),
+                                    index=_bill_no.index)
+                _y_ppa = pd.Series((_total_ppa.to_numpy() / _load_kwh).round(5),
+                                   index=_total_ppa.index)
+                _y_axis_title = "Effective Rate ($/kWh)"
+                _hover_unit = "$%{y:.4f}/kWh"
 
         _fig = go.Figure()
 
-        # Utility-only trajectory
         _fig.add_trace(go.Scatter(
-            x=_x, y=(_bill_no / 1000).round(1),
+            x=_x, y=_y_util,
             name="Utility Only",
             mode="lines",
             line=dict(color=_NAVY, width=2.5, dash="dot"),
-            hovertemplate="%{x}<br><b>$%{y:.1f}K</b><extra>Utility Only</extra>",
+            hovertemplate=f"%{{x}}<br><b>{_hover_unit}</b><extra>Utility Only</extra>",
         ))
 
-        # Solar + PPA line — split into regime segments when a NEM switch is configured
-        # so the customer-bill discontinuity at the transition is visually obvious.
-        _ppa_k = (_total_ppa / 1000).round(1)
         if nem_switch and num_years_1 and num_years_1 < len(_cd):
-            _split = int(num_years_1)  # inclusive — last year of regime 1
-            _x_r1, _y_r1 = _x.iloc[:_split].tolist(), _ppa_k.iloc[:_split].tolist()
-            _x_r2, _y_r2 = _x.iloc[_split - 1:].tolist(), _ppa_k.iloc[_split - 1:].tolist()  # overlap for continuous connector
+            _split = int(num_years_1)
+            _x_r1, _y_r1 = _x.iloc[:_split].tolist(), _y_ppa.iloc[:_split].tolist()
+            _x_r2, _y_r2 = _x.iloc[_split - 1:].tolist(), _y_ppa.iloc[_split - 1:].tolist()
             _fig.add_trace(go.Scatter(
                 x=_x_r1, y=_y_r1,
                 name=f"Solar + PPA — {nem_regime_1}",
                 mode="lines+markers",
                 line=dict(color=_GREEN, width=3),
                 marker=dict(size=5, color=_GREEN),
-                fill="tonexty",
-                fillcolor="rgba(69,167,80,0.15)",
-                hovertemplate="%{x}<br><b>$%{y:.1f}K</b><extra>" + nem_regime_1 + "</extra>",
+                fill="tonexty" if _bill_mode else None,
+                fillcolor="rgba(69,167,80,0.15)" if _bill_mode else None,
+                hovertemplate=f"%{{x}}<br><b>{_hover_unit}</b><extra>{nem_regime_1}</extra>",
             ))
             _fig.add_trace(go.Scatter(
                 x=_x_r2, y=_y_r2,
@@ -5339,11 +5522,10 @@ def _render_results():
                 mode="lines+markers",
                 line=dict(color=_BLUE, width=3),
                 marker=dict(size=5, color=_BLUE),
-                fill="tonexty",
-                fillcolor="rgba(29,111,169,0.15)",
-                hovertemplate="%{x}<br><b>$%{y:.1f}K</b><extra>" + nem_regime_2 + "</extra>",
+                fill="tonexty" if _bill_mode else None,
+                fillcolor="rgba(29,111,169,0.15)" if _bill_mode else None,
+                hovertemplate=f"%{{x}}<br><b>{_hover_unit}</b><extra>{nem_regime_2}</extra>",
             ))
-            # Vertical transition marker
             _switch_x = _x.iloc[_split - 1] if _split - 1 < len(_x) else _x.iloc[-1]
             _fig.add_vline(
                 x=_switch_x, line_color=_AMBER, line_width=2, line_dash="dash",
@@ -5353,22 +5535,25 @@ def _render_results():
             )
         else:
             _fig.add_trace(go.Scatter(
-                x=_x, y=_ppa_k,
+                x=_x, y=_y_ppa,
                 name="Solar + PPA",
                 mode="lines+markers",
                 line=dict(color=_GREEN, width=3),
                 marker=dict(size=5, color=_GREEN),
-                fill="tonexty",
-                fillcolor="rgba(69,167,80,0.15)",
-                hovertemplate="%{x}<br><b>$%{y:.1f}K</b><extra>Solar + PPA</extra>",
+                fill="tonexty" if _bill_mode else None,
+                fillcolor="rgba(69,167,80,0.15)" if _bill_mode else None,
+                hovertemplate=f"%{{x}}<br><b>{_hover_unit}</b><extra>Solar + PPA</extra>",
             ))
 
-        # Overlay any saved PPA scenarios as thin ghost lines
+        # Overlay any saved PPA scenarios as thin ghost lines (same mode as the chart).
         _saved = st.session_state.get("saved_ppa_scenarios", {}) or {}
         _palette = [_TEAL, _AMBER, "#8E44AD", "#C0392B", "#117864"]
         for _si, (_sname, _sdata) in enumerate(_saved.items()):
-            _syr = _sdata.get("calendar_year") or _sdata.get("year")
-            _sy = _sdata.get("total_ppa_bill_k")
+            _syr = _sdata.get("calendar_year")
+            if _bill_mode:
+                _sy = _sdata.get("total_ppa_bill_k")
+            else:
+                _sy = _sdata.get("ppa_effective_rate")
             if not _syr or not _sy or len(_syr) != len(_sy):
                 continue
             _fig.add_trace(go.Scatter(
@@ -5377,18 +5562,21 @@ def _render_results():
                 mode="lines",
                 line=dict(color=_palette[_si % len(_palette)], width=1.8, dash="dashdot"),
                 opacity=0.75,
-                hovertemplate="%{x}<br>$%{y:.1f}K<extra>" + _sname + "</extra>",
+                hovertemplate=f"%{{x}}<br>{_hover_unit}<extra>{_sname}</extra>",
             ))
 
         _fig.update_layout(
-            title=dict(text="Annual Bill: Utility Only vs. Solar + PPA",
-                       font=dict(size=15, color=_NAVY)),
+            title=dict(
+                text=("Annual Bill: Utility Only vs Solar + PPA" if _bill_mode
+                      else "Effective $/kWh Paid: Utility Only vs Solar + PPA"),
+                font=dict(size=15, color=_NAVY),
+            ),
             xaxis_title="Year",
-            yaxis_title="Annual Cost ($K)",
+            yaxis_title=_y_axis_title,
             yaxis=dict(rangemode="tozero", gridcolor="#E5E7EB"),
             xaxis=dict(gridcolor="#E5E7EB"),
             template="plotly_white",
-            height=420,
+            height=440,
             margin=dict(l=60, r=30, t=70, b=55),
             font=dict(family="Aptos Narrow, Aptos, Calibri, Arial Narrow, sans-serif",
                       size=12, color="#1A1A1A"),
@@ -5398,82 +5586,35 @@ def _render_results():
             hovermode="x unified",
             transition=dict(duration=350, easing="cubic-in-out"),
         )
-        # Savings band annotation at midpoint of each regime (or single midpoint if no switch)
-        def _annotate_savings(lo: int, hi: int, color: str) -> None:
-            if hi <= lo:
-                return
-            mid = (lo + hi) // 2
-            if mid >= len(_cd):
-                return
-            gap = float(_bill_no.iloc[mid] - _total_ppa.iloc[mid])
-            mid_y = float((_bill_no.iloc[mid] + _total_ppa.iloc[mid]) / 2 / 1000)
-            if gap > 0:
-                _fig.add_annotation(
-                    x=_x.iloc[mid], y=mid_y,
-                    text=f"<b>${gap / 1000:.1f}K savings</b>",
-                    showarrow=False,
-                    font=dict(size=11, color=color),
-                    bgcolor="rgba(255,255,255,0.88)",
-                    borderpad=3,
-                )
 
-        if nem_switch and num_years_1 and num_years_1 < len(_cd):
-            _annotate_savings(0, int(num_years_1), "#2D7A3C")
-            _annotate_savings(int(num_years_1), len(_cd), "#13477A")
-        else:
-            _annotate_savings(0, len(_cd), "#2D7A3C")
+        # Savings band midpoint annotations — only meaningful in bill-mode.
+        if _bill_mode:
+            def _annotate_savings(lo: int, hi: int, color: str) -> None:
+                if hi <= lo:
+                    return
+                mid = (lo + hi) // 2
+                if mid >= len(_cd):
+                    return
+                gap = float(_bill_no.iloc[mid] - _total_ppa.iloc[mid])
+                mid_y = float((_bill_no.iloc[mid] + _total_ppa.iloc[mid]) / 2 / 1000)
+                if gap > 0:
+                    _fig.add_annotation(
+                        x=_x.iloc[mid], y=mid_y,
+                        text=f"<b>${gap / 1000:.1f}K savings</b>",
+                        showarrow=False,
+                        font=dict(size=11, color=color),
+                        bgcolor="rgba(255,255,255,0.88)",
+                        borderpad=3,
+                    )
 
-        st.plotly_chart(_fig, use_container_width=True, key="ppa_dashboard_chart")
+            if nem_switch and num_years_1 and num_years_1 < len(_cd):
+                _annotate_savings(0, int(num_years_1), "#2D7A3C")
+                _annotate_savings(int(num_years_1), len(_cd), "#13477A")
+            else:
+                _annotate_savings(0, len(_cd), "#2D7A3C")
 
-        # ── Save PPA scenario ──────────────────────────────────────
-        st.divider()
-        st.markdown("**Save this PPA structure**")
-        st.caption("Name and save the current PPA configuration to overlay on the chart and compare against other PPA structures you try.")
-        sv_name_col, sv_btn_col, sv_clear_col = st.columns([0.5, 0.25, 0.25])
-        with sv_name_col:
-            _sv_name = st.text_input(
-                "Scenario name", value="", key="ppa_save_name",
-                placeholder="e.g. 2.9% escalator 10% savings",
-                label_visibility="collapsed",
-            )
-        with sv_btn_col:
-            if st.button("💾 Save PPA", key="ppa_save_btn", use_container_width=True):
-                name = (_sv_name or "").strip() or f"Scenario {len(st.session_state.get('saved_ppa_scenarios', {})) + 1}"
-                saved = st.session_state.setdefault("saved_ppa_scenarios", {})
-                saved[name] = {
-                    "calendar_year": _x.tolist(),
-                    "total_ppa_bill_k": (_total_ppa / 1000).round(2).tolist(),
-                    "year1_rate": _yr1_rate,
-                    "ppa_escalator_r1": float(it_ppa_esc_1),
-                    "ppa_escalator_r2": float(it_ppa_esc_2) if nem_switch else None,
-                    "savings_pct": float(it_savings_pct),
-                    "nem_regime_1": nem_regime_1,
-                    "nem_regime_2": nem_regime_2 if nem_switch else None,
-                    "lifetime_savings": float(_life_sav),
-                }
-                st.rerun()
-        with sv_clear_col:
-            if st.button("Clear saved", key="ppa_clear_btn", use_container_width=True):
-                st.session_state["saved_ppa_scenarios"] = {}
-                st.rerun()
-
-        if st.session_state.get("saved_ppa_scenarios"):
-            sv_df = pd.DataFrame([
-                {
-                    "Scenario": n,
-                    "Yr-1 PPA ($/kWh)": f"${d['year1_rate']:.4f}",
-                    f"Esc. {d['nem_regime_1']} (%/yr)": f"{d['ppa_escalator_r1']:.1f}",
-                    f"Esc. {d['nem_regime_2']} (%/yr)" if d.get("nem_regime_2") else "": (
-                        f"{d['ppa_escalator_r2']:.1f}" if d.get("ppa_escalator_r2") is not None else ""),
-                    "Savings target (%)": f"{d['savings_pct']:.1f}",
-                    "Lifetime savings": fmt_dollar(d["lifetime_savings"]),
-                }
-                for n, d in st.session_state["saved_ppa_scenarios"].items()
-            ])
-            # Drop any blank column headers (from missing regime 2)
-            sv_df = sv_df.loc[:, [c for c in sv_df.columns if c != ""]]
-            st.markdown(render_styled_table(sv_df, bold_cols=["Scenario"]),
-                        unsafe_allow_html=True)
+        st.plotly_chart(_fig, use_container_width=True,
+                        key=f"ppa_dashboard_chart_{_chart_mode}")
 
         # ── Data Table (Annual / Monthly) ──────────────────────────
         if it_view == "Annual":
@@ -5690,87 +5831,65 @@ def _render_results():
         @st.fragment
         def _proposal_fragment():
             st.caption(
-                "Generate a branded 38DN customer proposal deck from the current simulation. "
-                "Fill in the fields below and click Generate."
+                "Generate a branded 38DN customer proposal deck from the current "
+                "simulation. Select a **saved PPA structure** (from the PPA Rate "
+                "tab) and fill in the customer details below."
             )
 
-            _prop_ppa_rate = 0.0
-            _it_savings = st.session_state.get("it_savings_pct", 10.0)
-            _it_sav_esc = st.session_state.get("it_savings_esc", 0.0)
+            _saved = st.session_state.get("saved_ppa_scenarios", {}) or {}
+            if not _saved:
+                st.warning(
+                    "No saved PPA structures yet. Open the **PPA Rate** tab, "
+                    "configure a PPA, and click **💾 Save PPA** — the proposal "
+                    "builder pulls from that list."
+                )
+                return
 
-            # --- Primary controls: Customer Savings + PPA Escalator ---
-            if nem_switch:
-                _sav_c1, _sav_c2 = st.columns(2)
-                with _sav_c1:
-                    _prop_sav_1 = st.number_input(
-                        f"{nem_regime_1} Customer Savings (%)",
-                        min_value=0.0, max_value=99.0,
-                        value=float(_it_savings), step=0.5,
-                        key="prop_savings_regime_1",
-                    )
-                with _sav_c2:
-                    _prop_sav_2 = st.number_input(
-                        f"{nem_regime_2} Customer Savings (%)",
-                        min_value=0.0, max_value=99.0,
-                        value=float(_it_savings), step=0.5,
-                        key="prop_savings_regime_2",
-                    )
-                _esc_c1, _esc_c2 = st.columns(2)
-                with _esc_c1:
-                    _prop_ppa_esc = st.number_input(
-                        f"PPA Escalator — {nem_regime_1} (%/yr)",
-                        min_value=0.0, max_value=10.0,
-                        value=float(st.session_state.get("it_ppa_esc_1", 2.9)),
-                        step=0.1, format="%.1f", key="prop_ppa_esc_1",
-                    )
-                with _esc_c2:
-                    _prop_ppa_esc_2 = st.number_input(
-                        f"PPA Escalator — {nem_regime_2} (%/yr)",
-                        min_value=0.0, max_value=10.0,
-                        value=float(st.session_state.get("it_ppa_esc_2", 2.9)),
-                        step=0.1, format="%.1f", key="prop_ppa_esc_2",
-                    )
-            else:
-                _sav_c1, _esc_c1 = st.columns(2)
-                with _sav_c1:
-                    _prop_sav_1 = st.number_input(
-                        "Customer Savings (%)",
-                        min_value=0.0, max_value=99.0,
-                        value=float(_it_savings), step=0.5,
-                        key="prop_savings_regime_1",
-                    )
-                _prop_sav_2 = _prop_sav_1
-                with _esc_c1:
-                    _prop_ppa_esc = st.number_input(
-                        "PPA Rate Escalator (%/yr)",
-                        min_value=0.0, max_value=10.0,
-                        value=float(st.session_state.get("it_ppa_esc_1", 2.9)),
-                        step=0.1, format="%.1f", key="prop_ppa_esc_1",
-                    )
-                _prop_ppa_esc_2 = _prop_ppa_esc
+            # --- PPA scenario selector ---
+            _scenario_name = st.selectbox(
+                "PPA structure",
+                list(_saved.keys()),
+                key="prop_ppa_scenario",
+                help="Pick one of the PPA scenarios you saved on the PPA Rate tab.",
+            )
+            _scenario = _saved[_scenario_name]
 
-            # Custom savings is always active via the primary inputs above
+            _prop_ppa_rate = float(_scenario.get("year1_rate_r1") or 0.0)
+            _prop_ppa_rate_r2 = (float(_scenario["year1_rate_r2"])
+                                 if _scenario.get("year1_rate_r2") is not None else None)
+            _prop_ppa_esc = float(_scenario.get("ppa_escalator_r1") or 0.0)
+            _prop_ppa_esc_2 = (float(_scenario["ppa_escalator_r2"])
+                               if _scenario.get("ppa_escalator_r2") is not None else _prop_ppa_esc)
+            _prop_sav_1 = float(_scenario.get("savings_pct") or 0.0)
+            _prop_sav_2 = float(_scenario.get("savings_pct_r2") or _prop_sav_1)
 
+            # PPA rate per year, aligned to the scenario's own term. We re-use
+            # these arrays later to inject PPA cost into the proposal projection,
+            # so the PPTX numbers match the PPA chart exactly.
+            _scenario_rates = _scenario.get("ppa_rate_per_year") or []
+            _scenario_years = _scenario.get("year_indices") or list(range(1, len(_scenario_rates) + 1))
+            _scenario_term = int(_scenario.get("term_years") or len(_scenario_rates) or system_life_years)
+
+            # --- Customer inputs ---
             col_p1, col_p2 = st.columns(2)
             with col_p1:
                 prop_customer = st.text_input("Customer / Facility Name", key="prop_customer")
                 prop_address = st.text_input("Site Address", key="prop_address")
-                prop_account = st.text_input(
-                    "Utility Account ID (optional)", key="prop_account",
-                )
+                prop_account = st.text_input("Utility Account ID (optional)", key="prop_account")
             with col_p2:
                 prop_term = st.number_input(
                     "Term (years)", min_value=1, max_value=40,
-                    value=25, step=1, key="prop_term",
+                    value=min(_scenario_term, 40), step=1, key="prop_term",
+                    help="Overrides the saved scenario's term if different.",
                 )
                 prop_new_tariff = st.text_input(
                     "Proposed Tariff (if switching)", key="prop_new_tariff",
                     help="Leave blank to keep current tariff.",
                 )
 
-            # --- Y1 Savings & PPA Summary ---
-            # Build a term-length projection so the PPA backsolve matches
-            # the PPTX output (avoids rate mismatch when prop_term != system_life_years).
+            # --- Term-length projection (sized to the proposal term). We then
+            # align the PPA rate-per-year array to this projection: the saved
+            # scenario may have a different term, so we slice / pad accordingly.
             _prop_base_proj = build_annual_projection(
                 result=result,
                 system_cost=system_cost,
@@ -5784,49 +5903,46 @@ def _render_results():
                 existing_solar_offset_kwh=_es_offset_annual,
                 **_common_nem_kw,
             )
-            _prop_ppa_rate_r2 = None
-            _sum_it_df = None
-            try:
-                _sum_it_df = build_indexed_tariff_annual(
-                    _prop_base_proj,
-                    base_savings_pct=_prop_sav_1,
-                    savings_escalator_pct=_it_sav_esc,
-                    regime_1_savings_pct=_prop_sav_1,
-                    regime_2_savings_pct=_prop_sav_2 if nem_switch else None,
-                    ppa_escalator_pct=_prop_ppa_esc,
-                    ppa_escalator_pct_2=_prop_ppa_esc_2 if nem_switch else None,
-                    nem_regime_2=nem_regime_2 if nem_switch else None,
-                    num_years_1=num_years_1 if nem_switch else None,
+
+            # Align scenario rate-per-year to prop_term:
+            # shorter scenario → extrapolate final year's rate with its escalator.
+            # longer scenario → truncate.
+            _rates_per_year = list(_scenario_rates)
+            if len(_rates_per_year) < prop_term:
+                _last_rate = _rates_per_year[-1] if _rates_per_year else 0.0
+                _tail_esc = _prop_ppa_esc_2 / 100.0
+                for _i in range(prop_term - len(_rates_per_year)):
+                    _last_rate = _last_rate * (1.0 + _tail_esc)
+                    _rates_per_year.append(round(_last_rate, 5))
+            elif len(_rates_per_year) > prop_term:
+                _rates_per_year = _rates_per_year[:prop_term]
+
+            # Build a minimal rate-lookup DataFrame compatible with the existing
+            # PPA-cost injection code (keyed by Year + PPA Rate ($/kWh)).
+            _sum_it_df = pd.DataFrame({
+                "Year": list(range(1, len(_rates_per_year) + 1)),
+                "PPA Rate ($/kWh)": _rates_per_year,
+            })
+
+            # --- Summary metrics from the selected scenario ---
+            if _prop_ppa_rate_r2 is not None and _scenario.get("num_years_1"):
+                _mc1, _mc2, _mc3, _mc4 = st.columns(4)
+                _mc1.metric("Target Savings",
+                            f"{_prop_sav_1:.1f}% → {_prop_sav_2:.1f}%")
+                _mc2.metric(f"Yr-1 PPA · {_scenario['nem_regime_1']}",
+                            f"${_prop_ppa_rate:.4f}/kWh")
+                _mc3.metric(
+                    f"Yr-{int(_scenario['num_years_1']) + 1} PPA · {_scenario['nem_regime_2']}",
+                    f"${_prop_ppa_rate_r2:.4f}/kWh",
                 )
-                if len(_sum_it_df) >= 1 and "PPA Rate ($/kWh)" in _sum_it_df.columns:
-                    _sum_r1 = _sum_it_df["PPA Rate ($/kWh)"].iloc[0]
-                    _sum_sav1 = _sum_it_df["Customer Savings ($)"].iloc[0] if "Customer Savings ($)" in _sum_it_df.columns else 0
-                    _sum_bill_no = _sum_it_df["Bill w/o Solar ($)"].iloc[0] if "Bill w/o Solar ($)" in _sum_it_df.columns else 0
-                    _sum_sav1_pct = (_sum_sav1 / _sum_bill_no * 100) if _sum_bill_no else 0
-                    if _sum_r1 > 0:
-                        _prop_ppa_rate = round(_sum_r1, 4)
-                    # Extract regime-2 PPA rate from the same backsolve
-                    if nem_switch and num_years_1 and len(_sum_it_df) > num_years_1:
-                        _r2_val = _sum_it_df["PPA Rate ($/kWh)"].iloc[num_years_1]
-                        if _r2_val > 0:
-                            _prop_ppa_rate_r2 = round(float(_r2_val), 4)
-                    if nem_switch and num_years_1:
-                        _mc1, _mc2, _mc3 = st.columns(3)
-                        with _mc1:
-                            st.metric("Y1 Savings", f"${_sum_sav1:,.0f} ({_sum_sav1_pct:.1f}%)")
-                        with _mc2:
-                            st.metric(f"{nem_regime_1} PPA Rate (Yr 1)", f"${_sum_r1:.4f}/kWh")
-                        if _prop_ppa_rate_r2 is not None:
-                            with _mc3:
-                                st.metric(f"{nem_regime_2} PPA Rate (Yr {num_years_1 + 1})", f"${_r2_val:.4f}/kWh")
-                    else:
-                        _mc1, _mc2 = st.columns(2)
-                        with _mc1:
-                            st.metric("Y1 Savings", f"${_sum_sav1:,.0f} ({_sum_sav1_pct:.1f}%)")
-                        with _mc2:
-                            st.metric("PPA Rate (Yr 1)", f"${_sum_r1:.4f}/kWh")
-            except Exception as e:
-                logger.warning("Failed to compute proposal PPA summary: %s", e)
+                _mc4.metric("Lifetime Savings",
+                            fmt_dollar(float(_scenario.get("lifetime_savings") or 0.0)))
+            else:
+                _mc1, _mc2, _mc3 = st.columns(3)
+                _mc1.metric("Target Savings", f"{_prop_sav_1:.1f}%")
+                _mc2.metric("Yr-1 PPA Rate", f"${_prop_ppa_rate:.4f}/kWh")
+                _mc3.metric("Lifetime Savings",
+                            fmt_dollar(float(_scenario.get("lifetime_savings") or 0.0)))
 
             _prop_date = date.today().strftime("%B %Y")
             _batt_cap = st.session_state.get("battery_capacity_kwh", 0) or 0
