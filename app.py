@@ -3342,42 +3342,37 @@ def _render_sidebar():
         )
 
         # Sticky wrapper — uses position:sticky so the tracker follows as
-        # the user scrolls through sidebar sections below. The outer card
-        # gets a subtle celebratory gradient-top + navy eyebrow on 100%.
+        # the user scrolls through sidebar sections below. Rendered as a
+        # single flush-left HTML line because Streamlit's markdown parser
+        # will treat indented HTML as a code block even with
+        # unsafe_allow_html=True.
         _eyebrow_color = "#45A750" if _sb_complete else "#64748B"
         _celebration = (
-            '<div style="position:absolute; top:0; left:0; right:0; height:2px; '
-            'background:linear-gradient(90deg, #45A750 0%, #1D6FA9 100%);"></div>'
+            '<div style="position:absolute;top:0;left:0;right:0;height:2px;'
+            'background:linear-gradient(90deg,#45A750 0%,#1D6FA9 100%);"></div>'
             if _sb_complete else ""
         )
-        st.markdown(
-            f"""
-            <div style="position: sticky; top: 0; z-index: 50;
-                        background: #FFFFFF; padding: 12px 4px 10px 4px;
-                        margin: -8px -4px 10px -4px;
-                        border-bottom: 1px solid #E5E7EB;
-                        position: relative;">
-                {_celebration}
-                <div style="font-size: 10px; font-weight: 600;
-                            letter-spacing: 0.08em; text-transform: uppercase;
-                            color: {_eyebrow_color}; margin-bottom: 6px;">
-                    Input loading
-                </div>
-                <div style="font-size: 13px; font-weight: 600;
-                            color: {_headline_color}; margin-bottom: 8px;
-                            letter-spacing: -0.005em;">
-                    {_headline_text}
-                </div>
-                <div style="line-height:1.8;">{_pills_html}</div>
-                {_bar}
-            </div>
-            """,
-            unsafe_allow_html=True,
+        _tracker_html = (
+            '<div style="position:sticky;top:0;z-index:50;'
+            'background:#FFFFFF;padding:12px 4px 10px 4px;'
+            'margin:-8px -4px 10px -4px;'
+            'border-bottom:1px solid #E5E7EB;position:relative;">'
+            f'{_celebration}'
+            f'<div style="font-size:10px;font-weight:600;'
+            f'letter-spacing:0.08em;text-transform:uppercase;'
+            f'color:{_eyebrow_color};margin-bottom:6px;">Input loading</div>'
+            f'<div style="font-size:13px;font-weight:600;'
+            f'color:{_headline_color};margin-bottom:8px;'
+            f'letter-spacing:-0.005em;">{_headline_text}</div>'
+            f'<div style="line-height:1.8;">{_pills_html}</div>'
+            f'{_bar}'
+            '</div>'
         )
+        st.markdown(_tracker_html, unsafe_allow_html=True)
 
         st.markdown(
-            '<hr style="border:none; border-top:1px solid #E5E7EB; '
-            'margin: 4px 0 12px 0;">',
+            '<hr style="border:none;border-top:1px solid #E5E7EB;'
+            'margin:4px 0 12px 0;">',
             unsafe_allow_html=True,
         )
 
