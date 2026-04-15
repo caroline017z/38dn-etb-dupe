@@ -207,13 +207,45 @@ hr {
     max-width: 1600px;
 }
 
-/* Sidebar — finer rhythm, lighter dividers */
+/* Sidebar — finer rhythm, lighter dividers, denser type for dense-panel feel */
 [data-testid="stSidebar"] {
     background: var(--38dn-surface-0) !important;
     border-right: 1px solid var(--38dn-border-1);
 }
 [data-testid="stSidebar"] hr {
     margin: var(--38dn-sp-2) 0 !important;
+}
+/* Sidebar-local type scale — one notch smaller than the main pane. */
+[data-testid="stSidebar"] h1,
+[data-testid="stSidebar"] h2 { font-size: 14px !important; }
+[data-testid="stSidebar"] h3 { font-size: 13px !important; }
+[data-testid="stSidebar"] p,
+[data-testid="stSidebar"] li,
+[data-testid="stSidebar"] label,
+[data-testid="stSidebar"] .stMarkdown,
+[data-testid="stSidebar"] .stCaption,
+[data-testid="stSidebar"] [data-testid="stCaptionContainer"] {
+    font-size: 12px !important;
+}
+[data-testid="stSidebar"] .stCaption,
+[data-testid="stSidebar"] [data-testid="stCaptionContainer"] {
+    font-size: 10px !important;
+}
+[data-testid="stSidebar"] input,
+[data-testid="stSidebar"] select,
+[data-testid="stSidebar"] textarea,
+[data-testid="stSidebar"] .stSelectbox div[data-baseweb="select"] > div {
+    font-size: 12px !important;
+}
+[data-testid="stSidebar"] .stButton > button {
+    font-size: 12px !important;
+    padding: 5px 12px !important;
+}
+[data-testid="stSidebar"] [data-testid="stMetric"] {
+    padding: 8px 12px !important;
+}
+[data-testid="stSidebar"] [data-testid="stMetric"] [data-testid="stMetricValue"] {
+    font-size: 18px !important;
 }
 
 /* Institutional table class (apply via wrapper div.tbl-38dn on render) */
