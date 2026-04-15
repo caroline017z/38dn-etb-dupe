@@ -89,54 +89,46 @@ def render_styled_table(
     bold_cols: list[str] | None = None,
     highlight_cols: list[str] | None = None,
 ) -> str:
-    """Render a DataFrame as an HTML table string with red-negative styling.
+    """Render a DataFrame as an HTML table using the 38DN institutional
+    table style (see ``assets/theme.css::.tbl-38dn``).
 
-    This bypasses st.dataframe's unreliable Styler support by generating
-    raw HTML that st.markdown can render directly.
+    Classes are applied on cells; the stylesheet handles colors, typography,
+    zebra stripes, hover, and negatives. Output is class-based — re-skinning
+    only requires editing ``assets/theme.css``.
 
     Args:
-        df: Pre-formatted DataFrame (all values already strings).
-        bold_last_row: If True, bold the last row (TOTAL).
-        bold_cols: Column names whose headers and values should be bold.
-        highlight_cols: Column names to highlight with a light blue background.
-
-    Returns:
-        HTML string suitable for st.markdown(..., unsafe_allow_html=True).
+        df: pre-formatted DataFrame (every cell is a display-ready string).
+        bold_last_row: marks the last row as a TOTAL (navy top border + weight).
+        bold_cols: columns whose header + cells render semibold.
+        highlight_cols: columns rendered with a subtle info-blue background
+            (reserved for "pay attention here" totals like Cumulative Savings).
     """
     bold_set = set(bold_cols) if bold_cols else set()
     highlight_set = set(highlight_cols) if highlight_cols else set()
     col_list = list(df.columns)
 
-    html = [
-        '<div style="overflow-x:auto;">',
-        '<table style="width:100%; border-collapse:collapse; font-size:13px; font-family:Aptos Narrow,Aptos,Calibri,Arial Narrow,sans-serif;">',
-        "<thead><tr>",
-    ]
+    html = ['<div class="tbl-38dn">', "<table>", "<thead><tr>"]
     for col in col_list:
-        weight = "font-weight:700;" if col in bold_set else "font-weight:600;"
-        html.append(
-            f'<th style="text-align:right; padding:6px 8px;'
-            f' background:#0E2841; color:#ffffff; white-space:nowrap; {weight}">{_esc(str(col))}</th>'
-        )
+        extra = ' class="cell-bold"' if col in bold_set else ""
+        html.append(f"<th{extra}>{_esc(str(col))}</th>")
     html.append("</tr></thead><tbody>")
 
     for i, (_, row) in enumerate(df.iterrows()):
-        is_last = i == len(df) - 1
-        row_weight = "font-weight:700;" if (bold_last_row and is_last) else ""
-        border = "border-top:1.5px solid #d1d5db;" if (bold_last_row and is_last) else ""
-        row_bg = "background-color:#fafbfc;" if (i % 2 == 0 and not (bold_last_row and is_last)) else ""
-        html.append(f"<tr style='{row_weight}{border}{row_bg}'>")
+        is_total = bold_last_row and i == len(df) - 1
+        tr_cls = ' class="total-row"' if is_total else ""
+        html.append(f"<tr{tr_cls}>")
         for j, val in enumerate(row):
             s = str(val)
-            col_bold = "font-weight:700;" if col_list[j] in bold_set else ""
-            cell_style = f"text-align:right; padding:4px 8px; white-space:nowrap; {col_bold}"
-            if j == 0:
-                cell_style = f"text-align:left; padding:4px 8px; white-space:nowrap; {col_bold}"
+            classes: list[str] = []
+            if col_list[j] in bold_set or is_total:
+                classes.append("cell-bold")
             if col_list[j] in highlight_set:
-                cell_style += " background-color:#e3f2fd;"
+                classes.append("cell-highlight")
             elif "(" in s:
-                cell_style += " color:#a8141a; background-color:#fff5f5;"
-            html.append(f"<td style='{cell_style}'>{_esc(s)}</td>")
+                # Accounting negative: `$(1,234)` format rendered red.
+                classes.append("cell-negative")
+            cls_attr = f' class="{" ".join(classes)}"' if classes else ""
+            html.append(f"<td{cls_attr}>{_esc(s)}</td>")
         html.append("</tr>")
 
     html.append("</tbody></table></div>")
@@ -807,37 +799,35 @@ def build_annual_projection(
     return pd.DataFrame(rows)
 
 
-# ─── 38DN brand palette for Plotly charts ────────────────────────────────────
-_38DN_NAVY   = "#0E2841"  # primary
-_38DN_GREEN  = "#45A750"  # accent 1
-_38DN_TEAL   = "#518484"  # accent 3
-_38DN_BLUE   = "#1D6FA9"  # accent 4
-_38DN_AMBER  = "#D48A1A"  # complementary warm
-_38DN_GRAY50 = "#666666"
-_38DN_INK    = "#1A1A1A"  # body text
-_38DN_FONT   = "Aptos Narrow, Aptos, Calibri, Arial Narrow, sans-serif"
+# ─── 38DN brand palette — delegates to modules.ui.tokens ────────────────────
+# Kept as module-level aliases so existing code in app.py that imports them
+# directly (if any) continues to work. New code should import PALETTE from
+# modules.ui.tokens instead.
+from modules.ui.tokens import PALETTE as _PAL, PLOTLY_LAYOUT as _PLY_BASE
+_38DN_NAVY   = _PAL["navy"]
+_38DN_GREEN  = _PAL["green"]
+_38DN_TEAL   = _PAL["teal"]
+_38DN_BLUE   = _PAL["blue"]
+_38DN_AMBER  = _PAL["amber"]
+_38DN_GRAY50 = _PAL["slate_50"]
+_38DN_INK    = _PAL["ink"]
+_38DN_FONT   = "Inter, Aptos Narrow, sans-serif"
 
 
 def _apply_38dn_layout(fig: go.Figure, *, title: str, x_title: str, y_title: str,
                        height: int = 400, barmode: str | None = None) -> go.Figure:
-    """Apply consistent 38DN chart styling — navy title, black body text,
-    white template, breathing room on margins."""
+    """Apply consistent 38DN chart styling via the token-backed base layout
+    in :mod:`modules.ui.tokens`. Callers override title / axis labels /
+    height / barmode; everything else is uniform across the app.
+    """
+    # Deep-merge: Plotly's update_layout treats nested dicts positionally,
+    # so we spread the base layout then overlay chart-specific overrides.
+    fig.update_layout(**_PLY_BASE)
     fig.update_layout(
         title=dict(text=title, font=dict(size=15, color=_38DN_NAVY)),
         xaxis_title=x_title,
         yaxis_title=y_title,
-        template="plotly_white",
         height=height,
-        font=dict(family=_38DN_FONT, size=12, color=_38DN_INK),
-        title_font=dict(size=15, color=_38DN_NAVY),
-        margin=dict(l=60, r=30, t=70, b=55),
-        legend=dict(
-            orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
-            font=dict(color=_38DN_INK, size=11),
-        ),
-        xaxis=dict(tickfont=dict(color=_38DN_INK), title_font=dict(color=_38DN_INK)),
-        yaxis=dict(tickfont=dict(color=_38DN_INK), title_font=dict(color=_38DN_INK),
-                   gridcolor="#E5E7EB"),
     )
     if barmode:
         fig.update_layout(barmode=barmode)
