@@ -6,7 +6,6 @@ Cloud reboots.  Falls back to local filesystem when GCS is not configured.
 """
 import os
 import re
-import io
 import json
 import glob
 import logging

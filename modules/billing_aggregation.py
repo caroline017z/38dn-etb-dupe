@@ -14,15 +14,16 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import cast
 
-from .tariff import TariffSchedule, get_energy_rate
+from .tariff import TariffSchedule
 from .billing import (
     BillingResult,
     _assemble_billing_result,
     run_billing_simulation,
     _build_hourly_energy_rates,
+    simulate_year_under_billing_option,
 )
 
 
@@ -335,6 +336,35 @@ def _build_aggregate_result(
 
     monthly_summary = pd.DataFrame(all_monthly_rows)
 
+    regime_str = f"NEM-A ({nem_regime})"
+
+    # --- Apply aggregate-level MBO/ABO floors + min_monthly_charge to per-month
+    # net_bills. The recomputation above sums gross components and ignores
+    # billing-option floors at the aggregate level — for over-sized PV under
+    # MBO that produces deeply negative monthly bills which don't match what
+    # the customer actually pays. The simulator applies the same floor +
+    # banking + NSC-trueup logic single-meter NEM-1/2 uses, lifted to the
+    # aggregate level. Y1 and the Y>1 projection now share methodology.
+    _agg_min_charge = gen_result.min_monthly_charge
+    _agg_billing_option = gen_result.billing_option
+    _agg_components = []
+    for _, _r in monthly_summary.iterrows():
+        _agg_components.append({
+            "energy": float(_r["energy_cost"]),
+            "export_credit": float(_r["export_credit"]),
+            "demand": float(_r["total_demand_charge"]),
+            "fixed": float(_r["fixed_charge"]),
+            "nbc": float(_r.get("nbc_charge", 0.0)),
+            # NSC clawback rides on month-12 (carried over from gen_result via
+            # `row = dict(gen_row)`); the simulator layers it over the floored
+            # month-12 bill, matching _build_monthly_nem12.
+            "nsc_adj": float(_r.get("nsc_adjustment", 0.0)),
+        })
+    _agg_net_bills = simulate_year_under_billing_option(
+        _agg_components, regime_str, _agg_billing_option, _agg_min_charge,
+    )
+    monthly_summary["net_bill"] = [round(v, 2) for v in _agg_net_bills]
+
     # --- Annual totals ---
     all_results = [gen_result] + list(agg_results.values())
 
@@ -343,19 +373,10 @@ def _build_aggregate_result(
     annual_import = sum(r.annual_import_kwh for r in all_results)
     annual_export = gen_result.annual_export_kwh
 
-    annual_energy_cost = float(monthly_summary["energy_cost"].sum())
-    annual_demand_cost = float(monthly_summary["total_demand_charge"].sum())
-    annual_fixed_cost = float(monthly_summary["fixed_charge"].sum())
-    annual_export_credit = float(monthly_summary["export_credit"].sum())
     annual_nbc = float(monthly_summary["nbc_charge"].sum()) if "nbc_charge" in monthly_summary.columns else 0.0
-
-    annual_bill_solar = float(monthly_summary["net_bill"].sum())
 
     # Baseline: sum of all meters' no-solar bills
     annual_bill_no_solar = sum(r.annual_bill_without_solar for r in all_results)
-
-    annual_savings = annual_bill_no_solar - annual_bill_solar
-    savings_pct = (annual_savings / annual_bill_no_solar * 100) if annual_bill_no_solar > 0 else 0.0
 
     # NSC adjustment from generating meter
     annual_nsc_adj = gen_result.annual_nsc_adjustment
@@ -387,8 +408,6 @@ def _build_aggregate_result(
             # NOT part of the no-solar baseline — do not add them here.
             monthly_baseline.append(combined)
 
-    regime_str = f"NEM-A ({nem_regime})"
-
     # Aggregate TOU energy/credit across all meters for projection use.
     # Generating meter has the solar TOU netting; aggregated meters are load-only
     # (their tou_annual_energy = full energy cost, tou_annual_credit = 0).
@@ -410,6 +429,25 @@ def _build_aggregate_result(
     for agg_res in agg_results.values():
         agg_raw_energy += agg_res.raw_annual_energy
 
+    # Per-month aggregate TOU split, derived from the aggregate monthly_summary.
+    # signed = gross imports across meters − (gen exports + cross-meter allocated
+    # credits). Splitting by sign gives the helper the same shape it gets from
+    # single-meter NEM-1/2 (positive side, negative side), so Y>1 projection
+    # can apply MBO/ABO floors at the aggregate level. Note: aggregate Y1
+    # net_bill above doesn't itself apply aggregate-level MBO; Y>1 may diverge
+    # from Y1 for portfolios where aggregate monthly net would have floored.
+    agg_tou_monthly_energy: dict[int, float] = {}
+    agg_tou_monthly_credit: dict[int, float] = {}
+    for _, ms_row in monthly_summary.iterrows():
+        m = int(ms_row["month"])
+        signed = float(ms_row["energy_cost"]) - float(ms_row["export_credit"])
+        if signed >= 0:
+            agg_tou_monthly_energy[m] = signed
+            agg_tou_monthly_credit[m] = 0.0
+        else:
+            agg_tou_monthly_energy[m] = 0.0
+            agg_tou_monthly_credit[m] = abs(signed)
+
     return _assemble_billing_result(
         hourly_detail=hourly_detail,
         monthly_summary=monthly_summary,
@@ -421,10 +459,14 @@ def _build_aggregate_result(
         nem_regime=regime_str,
         tou_annual_energy=agg_tou_energy,
         tou_annual_credit=agg_tou_credit,
+        tou_monthly_energy=agg_tou_monthly_energy,
+        tou_monthly_credit=agg_tou_monthly_credit,
         monthly_baseline_details=monthly_baseline,
         raw_annual_energy=agg_raw_energy,
         annual_nbc=annual_nbc,
         annual_nsc_adj=annual_nsc_adj,
+        billing_option=gen_result.billing_option,
+        min_monthly_charge=gen_result.min_monthly_charge,
     )
 
 

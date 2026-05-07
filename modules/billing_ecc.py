@@ -6,6 +6,8 @@ Provides the same BillingResult output as the custom engine so all downstream
 code (projections, charts, downloads) works unchanged.
 """
 
+from typing import TYPE_CHECKING
+
 import pandas as pd
 import numpy as np
 
@@ -14,9 +16,11 @@ from vendor.electricitycostcalculator.openei_tariff.openei_tariff_analyzer impor
     tariff_struct_from_openei_data,
 )
 from vendor.electricitycostcalculator.cost_calculator.cost_calculator import CostCalculator
-from vendor.electricitycostcalculator.cost_calculator.rate_structure import ChargeType
 
 from .billing import BillingResult, _assemble_billing_result
+
+if TYPE_CHECKING:
+    from .battery.config import BatteryConfig
 
 
 def _build_tou_arrays(

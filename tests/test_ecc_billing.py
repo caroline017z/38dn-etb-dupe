@@ -16,13 +16,11 @@ import os
 import numpy as np
 import pandas as pd
 import pytest
-from unittest.mock import MagicMock, patch
-from dataclasses import dataclass
+from unittest.mock import MagicMock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from modules.billing_ecc import run_ecc_billing_simulation, _extract_monthly_charges
-from modules.billing import BillingResult
 from modules.outputs import build_annual_projection
 
 TOL = 0.01

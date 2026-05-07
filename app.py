@@ -14,7 +14,7 @@ import json
 import glob
 import logging
 from dataclasses import asdict
-from datetime import date, datetime
+from datetime import date
 from typing import cast
 from dotenv import load_dotenv
 
@@ -36,12 +36,11 @@ from modules.tariff import (
     format_tariff_summary,
 )
 from modules.export_value import (
-    get_export_rates,
     load_acc_from_upload,
     create_flat_export_rates,
     parse_multiyear_export_rates,
 )
-from modules.billing import run_billing_simulation, BillingResult, compute_old_rate_baseline
+from modules.billing import BillingResult, compute_old_rate_baseline
 from modules.simulation import (
     run_simulation,
     inputs_from_session_state,
@@ -96,7 +95,6 @@ from modules import proposals as _proposals
 from modules.proposals import (
     MAX_COMPARISON_PPAS as _PROP_MAX_COMPARISONS,
     Proposal as _ProposalObj,
-    PPASnapshot as _PPASnapshot,
     create_proposal as _create_proposal_obj,
     update_proposal as _update_proposal_obj,
     snapshot_from_saved as _snapshot_from_saved,
@@ -183,7 +181,6 @@ from modules.outputs import (
     fmt_num,
     fmt_dollar,
     fmt_rate,
-    style_negative_red,
     render_styled_table,
 )
 
@@ -322,7 +319,6 @@ def _render_savings_dashboard(
     Financial Impact / Energy Flow / Scenario Comparison / Cumulative Payback,
     and a unified Scenario Comparison table + optional Rate Shift block.
     """
-    import plotly.graph_objects as go
     from modules.outputs import (
         build_savings_summary,
     )
@@ -1412,8 +1408,6 @@ def _render_sensitivity_tab(
     NAVY = "#0E2841"
     GREEN = "#45A750"
     BLUE = "#1D6FA9"
-    TEAL = "#518484"
-    GRAY50 = "#666666"
 
     st.subheader("Sensitivity Analysis")
     st.markdown(
@@ -3020,7 +3014,6 @@ def _render_top_bar():
                             st.caption(f"{len(st.session_state['available_rates'])} rate schedules available.")
 
                         # Initialize edit-state meters from JSON (only on first load of this profile)
-                        _ne_edit_key = f"_ne_editing_{_sel_name}"
                         if st.session_state.get("_ne_edit_profile") != _sel_name:
                             st.session_state["_ne_edit_profile"] = _sel_name
                             _ne_edit_meters = []
@@ -4696,6 +4689,7 @@ def _render_sidebar():
         "rate_escalator": rate_escalator,
         "load_escalator": load_escalator,
         "compound_escalation": compound_escalation,
+        "cost_input_method": cost_input_method,
         "system_cost": system_cost,
         "_es_offset_monthly": _es_offset_monthly,
         "_es_offset_annual": _es_offset_annual,
@@ -4751,6 +4745,7 @@ battery_capacity_kwh = _sidebar_ctx["battery_capacity_kwh"]
 rate_escalator = _sidebar_ctx["rate_escalator"]
 load_escalator = _sidebar_ctx["load_escalator"]
 compound_escalation = _sidebar_ctx["compound_escalation"]
+cost_input_method = _sidebar_ctx["cost_input_method"]
 system_cost = _sidebar_ctx["system_cost"]
 _es_offset_monthly = _sidebar_ctx["_es_offset_monthly"]
 _es_offset_annual = _sidebar_ctx["_es_offset_annual"]
@@ -6578,7 +6573,6 @@ def _render_results():
         _yr1_sav = float(_cust_sav.iloc[0]) if len(_cd) else 0.0
         _yr1_bno = float(_bill_no.iloc[0]) if len(_cd) else 1.0
         _yr1_pct = (_yr1_sav / _yr1_bno * 100) if _yr1_bno else 0.0
-        _avg_sav = _life_sav / len(_cd) if len(_cd) else 0.0
 
         # ── Per-regime Yr-1 PPA rate + summary KPIs ───────────────────
         # When a NEM switch is configured, each regime gets its own back-
@@ -7115,7 +7109,7 @@ def _render_results():
             for col in ["Bill w/o Solar ($)", "Bill w/ Solar ($)"]:
                 if col in it_display.columns:
                     it_display[col] = (it_display[col] * -1).apply(fmt_dollar)
-            for _sav_col in ["Utility Savings ($)", "Customer Savings ($)"]:
+            for _sav_col in ["Utility Savings ($)", "Customer Savings ($)", "NSC Adj ($)"]:
                 if _sav_col in it_display.columns:
                     it_display[_sav_col] = it_display[_sav_col].apply(fmt_dollar)
             if "Solar (kWh)" in it_display.columns:
@@ -7151,7 +7145,7 @@ def _render_results():
             for col in ["Bill w/o Solar ($)", "Net Bill ($)"]:
                 if col in it_display.columns:
                     it_display[col] = (it_display[col] * -1).apply(fmt_dollar)
-            for _sav_col in ["Utility Savings ($)", "Customer Savings ($)"]:
+            for _sav_col in ["Utility Savings ($)", "Customer Savings ($)", "NSC Adj ($)"]:
                 if _sav_col in it_display.columns:
                     it_display[_sav_col] = it_display[_sav_col].apply(fmt_dollar)
             if "Solar (kWh)" in it_display.columns:

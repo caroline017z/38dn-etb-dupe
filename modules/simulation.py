@@ -17,7 +17,7 @@ they can slot in without re-plumbing callers.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass
 from typing import Protocol
 
 import pandas as pd

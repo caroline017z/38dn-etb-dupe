@@ -15,7 +15,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from modules.tariff import TariffSchedule
-from modules.billing import run_billing_simulation, BillingResult, _calc_baseline_bill
+from modules.billing import run_billing_simulation, _calc_baseline_bill
 
 TOL = 0.01  # tolerance for dollar comparisons
 

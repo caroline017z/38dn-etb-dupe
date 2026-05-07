@@ -8,7 +8,6 @@ pdfplumber for text extraction and Claude API for structured parsing.
 import json
 import os
 import logging
-from typing import Any
 
 import pdfplumber
 import streamlit as st

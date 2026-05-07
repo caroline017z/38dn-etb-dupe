@@ -18,7 +18,6 @@ from modules.billing_aggregation import (
     MeterConfig,
     NemAProfile,
     AllocationResult,
-    NEMA_FEES,
     compute_nema_fees,
     compute_monthly_allocation,
     value_allocation_at_retail_rates,
@@ -26,7 +25,6 @@ from modules.billing_aggregation import (
     run_aggregation_simulation,
 )
 from modules.tariff import TariffSchedule
-from modules.billing import BillingResult
 
 
 # ---------------------------------------------------------------------------

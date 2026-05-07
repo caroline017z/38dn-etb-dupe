@@ -7,7 +7,6 @@ from __future__ import annotations
 import dataclasses
 import os
 import sys
-from datetime import datetime
 
 import pytest
 

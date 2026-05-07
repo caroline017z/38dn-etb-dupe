@@ -13,7 +13,7 @@ import pandas as pd
 import numpy as np
 from dataclasses import dataclass
 from typing import cast
-from .tariff import TariffSchedule, get_energy_rate, get_energy_period
+from .tariff import TariffSchedule
 from .demand import calculate_monthly_demand_charges
 
 
@@ -67,6 +67,12 @@ class BillingResult:
     old_rate_monthly_baselines: list[float] | None = None   # 12 monthly costs on old tariff
     rate_shift_annual_savings: float | None = None          # old_rate_baseline - new_rate_baseline
 
+    # Billing-option context (used by Y>1 projection to re-apply MBO/ABO floors).
+    # MBO banks negative monthly bills as credits; ABO defers energy to month 12;
+    # both clamp each month at min_monthly_charge.
+    billing_option: str = "MBO"
+    min_monthly_charge: float = 0.0
+
 
 def _assemble_billing_result(
     hourly_detail: pd.DataFrame,
@@ -85,6 +91,8 @@ def _assemble_billing_result(
     raw_annual_energy: float | None = None,
     annual_nbc: float = 0.0,
     annual_nsc_adj: float = 0.0,
+    billing_option: str = "MBO",
+    min_monthly_charge: float = 0.0,
 ) -> "BillingResult":
     """Assemble a BillingResult from monthly_summary and supporting arrays.
 
@@ -127,7 +135,80 @@ def _assemble_billing_result(
         tou_monthly_credit=tou_monthly_credit,
         raw_annual_energy=raw_annual_energy,
         monthly_baseline_details=monthly_baseline_details,
+        billing_option=billing_option,
+        min_monthly_charge=min_monthly_charge,
     )
+
+
+def simulate_year_under_billing_option(
+    monthly_components: list[dict],
+    nem_regime: str,
+    billing_option: str = "MBO",
+    min_monthly_charge: float = 0.0,
+) -> list[float]:
+    """Apply the same MBO/ABO + min-charge floor + NEM-1/2 NSC trueup logic that
+    ``run_billing_simulation`` uses for Y1, but to scaled monthly components for
+    any year. Returns 12 net_bill values.
+
+    monthly_components is a list of 12 dicts with keys: ``energy`` (positive side
+    of TOU netting for NEM-1/2, or gross import cost for NEM-3), ``export_credit``
+    (negative side / NEM-3 export comp, as a positive number), ``demand``,
+    ``fixed``, ``nbc``, and ``nsc_adj`` (only month 12 carries a non-zero value).
+
+    The TOU-netted-vs-NEM-3 distinction matters because:
+      - NEM-1/2 (and NEM-A) lets monthly net energy go negative → MBO banks it
+        as a credit, ABO defers it to month 12. Year-end NSC trueup adds a
+        separate clawback to month 12 before the final min-charge re-clamp.
+      - NEM-3 has no monthly netting; export credit just offsets the bill
+        and there's no inter-month banking.
+
+    Lives here (not in outputs.py) so both projection (outputs.py) and the
+    NEM-A aggregate Y1 reconciliation (billing_aggregation.py) can use the
+    same floor logic.
+    """
+    is_tou_netted = nem_regime in ("NEM-1", "NEM-2") or nem_regime.startswith("NEM-A")
+    net_bills = [0.0] * 12
+    credit_bank = 0.0
+    deferred_energy = 0.0
+
+    for i in range(12):
+        c = monthly_components[i]
+        m_energy = c.get("energy", 0.0)
+        m_credit = c.get("export_credit", 0.0)
+        m_demand = c.get("demand", 0.0)
+        m_fixed = c.get("fixed", 0.0)
+        m_nbc = c.get("nbc", 0.0)
+        m_nsc_adj = c.get("nsc_adj", 0.0) if i == 11 else 0.0
+
+        if is_tou_netted and billing_option == "ABO":
+            if i < 11:
+                deferred_energy += (m_energy - m_credit)
+                m_net = m_demand + m_fixed + m_nbc
+            else:
+                m_net = (m_energy - m_credit) + deferred_energy + m_demand + m_fixed + m_nbc
+        elif is_tou_netted:
+            # MBO: bank monthly negatives, draw down on positive months
+            m_net = (m_energy - m_credit) + m_demand + m_fixed + m_nbc
+            if m_net < 0:
+                credit_bank += abs(m_net)
+                m_net = 0.0
+            elif m_net > 0 and credit_bank > 0:
+                reduction = min(credit_bank, m_net)
+                m_net -= reduction
+                credit_bank -= reduction
+        else:
+            # NEM-3 / NVBT: no banking; credit just offsets the monthly bill
+            m_net = m_energy + m_demand + m_fixed + m_nbc - m_credit
+
+        m_net = max(m_net, min_monthly_charge)
+
+        # NSC clawback (NEM-1/2 only): added to month 12 raw bill, re-clamped at floor
+        if m_nsc_adj > 0:
+            m_net = max(m_net + m_nsc_adj, min_monthly_charge)
+
+        net_bills[i] = m_net
+
+    return net_bills
 
 
 def _build_schedule_arrays(
@@ -419,6 +500,8 @@ def run_billing_simulation(
         monthly_baseline_details=monthly_baseline_list,
         annual_nbc=annual_nbc,
         annual_nsc_adj=annual_nsc_adj,
+        billing_option=billing_option,
+        min_monthly_charge=tariff.min_monthly_charge,
     )
 
 
@@ -490,8 +573,6 @@ def _build_monthly_nem12(
         (monthly_rows, tou_annual_energy, tou_annual_credit,
          tou_monthly_energy, tou_monthly_credit)
     """
-    n_hours = len(dt_index)
-
     # Collect unique TOU period indices and their rates
     period_rates = {}
     if tariff.energy_rate_structure:
@@ -707,7 +788,6 @@ def _calc_baseline_bill(load_8760: pd.Series, tariff: TariffSchedule) -> tuple[f
     """
     dt_index = load_8760.index
     load = load_8760.values
-    n_hours = len(load)
 
     # Vectorised hourly energy cost
     _, rates = _vectorized_period_and_rate(tariff, dt_index)

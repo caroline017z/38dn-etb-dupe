@@ -8,7 +8,6 @@ and deterministic.  Solver is set explicitly to CLARABEL.
 import sys
 import os
 import numpy as np
-import pytest
 import cvxpy as cp
 from typing import Any
 
@@ -16,7 +15,7 @@ from typing import Any
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from modules.battery.config import BatteryConfig
-from modules.battery.dispatch import dispatch_battery, DispatchResult
+from modules.battery.dispatch import dispatch_battery
 
 SOLVER = cp.CLARABEL
 TOL = 1e-3  # tolerance for floating-point assertions

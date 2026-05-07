@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from io import StringIO, BytesIO
-from .billing import BillingResult
+from .billing import BillingResult, simulate_year_under_billing_option
 
 
 def _compute_export_cagr(multiyear: dict[int, "pd.Series"], n_trailing: int = 10) -> float:
@@ -150,7 +150,7 @@ def _negate_outflow_columns(df: pd.DataFrame) -> pd.DataFrame:
     """
     out = df.copy()
     for col in ["Bill w/o Solar ($)", "Energy ($)", "Demand ($)",
-                 "Fixed ($)", "NBC ($)", "Bill w/ Solar ($)"]:
+                 "Fixed ($)", "NBC ($)", "NSC Adj ($)", "Bill w/ Solar ($)"]:
         if col in out.columns:
             out[col] = out[col] * -1
     return out
@@ -424,6 +424,12 @@ def _compute_year_row(
     result_hourly_detail,
     result_annual_bill_with_solar: float,
     existing_solar_offset_kwh: float,
+    year1_nsc_adj: float = 0.0,
+    monthly_summary_y1: pd.DataFrame | None = None,
+    tou_monthly_energy_y1: dict | None = None,
+    tou_monthly_credit_y1: dict | None = None,
+    billing_option: str = "MBO",
+    min_monthly_charge: float = 0.0,
 ) -> dict:
     """Compute a single year's projection row for build_annual_projection."""
     if compound_escalation:
@@ -453,7 +459,6 @@ def _compute_year_row(
     lost_export_from_load = min(extra_load, max(0, year1_export_kwh - lost_export_from_degrad))
 
     yr_export_kwh = max(0, year1_export_kwh - lost_export_from_degrad - lost_export_from_load)
-    absorbed = year1_export_kwh - yr_export_kwh
     yr_import_kwh = year1_import_kwh + lost_self_from_degrad + max(0, extra_load - lost_export_from_load)
 
     export_volume_ratio = yr_export_kwh / year1_export_kwh if year1_export_kwh > 0 else 0.0
@@ -511,7 +516,63 @@ def _compute_year_row(
         if active_regime in ("NEM-1", "NEM-2", "NEM-A (NEM-1)", "NEM-A (NEM-2)"):
             yr_nsc = nsc_rate_2 * yr_export_kwh * rate_factor
 
-    yr_bill_solar_raw = yr_energy + yr_demand + yr_fixed + yr_nbc + yr_nsc - yr_export_credit
+    # NEM-1/2 end-of-year NSC clawback: when annual exports > imports, the surplus
+    # gets re-priced from retail TOU rate down to the wholesale NSC rate. The Y1
+    # delta sits in result.annual_nsc_adjustment; for later years we scale by
+    # rate × export volume since both terms (TOU credit, NSC payment) move together.
+    yr_nsc_clawback = 0.0
+    if year1_nsc_adj > 0 and active_regime in ("NEM-1", "NEM-2", "NEM-A (NEM-1)", "NEM-A (NEM-2)"):
+        yr_nsc_clawback = year1_nsc_adj * rate_factor * volume_ratio
+
+    # For Y>1 in NEM-1/2 (single-meter or NEM-A aggregate), re-run MBO/ABO
+    # month-by-month so credit banking + min_monthly_charge floors land where
+    # they should. Without this, over-sized PV under MBO sees gross TOU credit
+    # subtract from gross charges at full magnitude, which understates the bill
+    # for any year where monthly bills would have floored at $0. For NEM-A,
+    # the helper applies MBO at the aggregate level using the aggregate TOU
+    # split derived in _build_aggregate_result; aggregate Y1 net_bill itself
+    # doesn't apply aggregate-level MBO, so Y1 and Y>1 may diverge for
+    # portfolios where aggregate monthly net would have floored.
+    _can_simulate_year = (
+        yr > 1
+        and active_regime in ("NEM-1", "NEM-2", "NEM-A (NEM-1)", "NEM-A (NEM-2)")
+        and tou_monthly_energy_y1 is not None
+        and tou_monthly_credit_y1 is not None
+        and monthly_summary_y1 is not None
+    )
+    if _can_simulate_year:
+        monthly_components = []
+        total_load_y1 = float(monthly_summary_y1["load_kwh"].sum()) or 1.0
+        _has_nbc_in_regime = active_regime in ("NEM-2", "NEM-A (NEM-2)")
+        for mi in range(12):
+            ms_row = monthly_summary_y1.iloc[mi]
+            m_energy = tou_monthly_energy_y1.get(mi + 1, 0.0) * load_factor * rate_factor
+            m_credit = tou_monthly_credit_y1.get(mi + 1, 0.0) * rate_factor * volume_ratio
+            m_demand = float(ms_row["total_demand_charge"]) * load_factor * rate_factor
+            m_fixed = float(ms_row["fixed_charge"]) * rate_factor
+            m_nbc = float(ms_row.get("nbc_charge", 0.0)) * rate_factor if _has_nbc_in_regime else 0.0
+            # NSC clawback + regime-2 NSC charge both land on month 12 of the bill
+            m_nsc = (yr_nsc_clawback + yr_nsc) if mi == 11 else 0.0
+            monthly_components.append({
+                "energy": m_energy,
+                "export_credit": m_credit,
+                "demand": m_demand,
+                "fixed": m_fixed,
+                "nbc": m_nbc,
+                "nsc_adj": m_nsc,
+            })
+        # Distribute the annual degradation-energy adjustment proportional to monthly load
+        if degradation_energy_adj > 0:
+            for mi in range(12):
+                mo_load_share = float(monthly_summary_y1.iloc[mi]["load_kwh"]) / total_load_y1
+                monthly_components[mi]["energy"] += degradation_energy_adj * mo_load_share
+        net_bills = simulate_year_under_billing_option(
+            monthly_components, active_regime, billing_option, min_monthly_charge,
+        )
+        yr_bill_solar_raw = sum(net_bills)
+    else:
+        yr_bill_solar_raw = yr_energy + yr_demand + yr_fixed + yr_nbc + yr_nsc + yr_nsc_clawback - yr_export_credit
+
     if yr == 1:
         yr_bill_solar = result_annual_bill_with_solar
     else:
@@ -534,7 +595,6 @@ def _compute_year_row(
     if cod_year is not None:
         row["Calendar Year"] = cod_year + yr - 1
     yr_self_consumed = yr_solar_kwh - max(yr_export_kwh, 0)
-    yr_net_grid = yr_import_kwh - max(yr_export_kwh, 0)
     if existing_solar_offset_kwh > 0:
         row["Degraded System Load Offset (kWh)"] = round(existing_solar_offset_kwh * load_factor)
     row.update({
@@ -558,8 +618,9 @@ def _compute_year_row(
     _any_nem2 = any(r in ("NEM-2", "NEM-A (NEM-2)") for r in (nem_regime_1, nem_regime_2) if r)
     if _any_nem2 or year1_nbc > 0:
         row["NBC ($)"] = round(yr_nbc)
-    if yr_nsc > 0:
-        row["NSC Adj ($)"] = round(yr_nsc)
+    yr_nsc_total = yr_nsc + yr_nsc_clawback
+    if yr_nsc_total > 0:
+        row["NSC Adj ($)"] = round(yr_nsc_total)
     row.update({
         "Export Credit ($)": round(yr_export_credit),
         "Bill w/ Solar ($)": round(yr_bill_solar),
@@ -793,6 +854,12 @@ def build_annual_projection(
             result_hourly_detail=result.hourly_detail,
             result_annual_bill_with_solar=result.annual_bill_with_solar,
             existing_solar_offset_kwh=existing_solar_offset_kwh,
+            year1_nsc_adj=result.annual_nsc_adjustment,
+            monthly_summary_y1=result.monthly_summary,
+            tou_monthly_energy_y1=result.tou_monthly_energy,
+            tou_monthly_credit_y1=result.tou_monthly_credit,
+            billing_option=result.billing_option,
+            min_monthly_charge=result.min_monthly_charge,
         )
 
         cumulative_savings += row["Annual Savings ($)"]
@@ -1010,14 +1077,30 @@ def _project_single_year_monthly(
         else:
             r["Export Credit ($)"] = -round(mrow["export_credit"] * rate_factor * volume_ratio * _prorate, 2)
 
+        # NEM-1/2 end-of-year NSC clawback lives on month 12 of the Y1 monthly_summary;
+        # for later years scale by rate × export volume (same basis as export credit).
+        _m_nsc_adj = 0.0
+        _is_nem1_or_2 = active_regime in ("NEM-1", "NEM-2", "NEM-A (NEM-1)", "NEM-A (NEM-2)")
+        if _is_nem1_or_2 and "nsc_adjustment" in ms.columns:
+            _y1_m_nsc = float(mrow["nsc_adjustment"])
+            if yr == 1:
+                _m_nsc_adj = round(_y1_m_nsc * _prorate, 2)
+            else:
+                _m_nsc_adj = round(_y1_m_nsc * rate_factor * volume_ratio, 2)
+        r["NSC Adj ($)"] = _m_nsc_adj
+
         if yr == 1 and _prorate == 1.0:
             # Year 1: use actual monthly net_bill from billing result
             # (includes min_monthly_charge floors, MBO/ABO credit banking,
             # and NSC true-ups that component reconstruction misses)
             r["Net Bill ($)"] = round(float(mrow["net_bill"]), 2)
         else:
+            # Provisional component sum; corrected post-loop via the billing-option
+            # simulation when the active regime is NEM-1/2 (gives MBO/ABO floors
+            # the right place to clamp). NEM-3 keeps this value because there's
+            # no monthly netting / banking — credit just offsets the bill.
             r["Net Bill ($)"] = round(
-                r["Energy ($)"] + r["Demand ($)"] + r["Fixed ($)"] + _m_nbc + r["Export Credit ($)"], 2
+                r["Energy ($)"] + r["Demand ($)"] + r["Fixed ($)"] + _m_nbc + _m_nsc_adj + r["Export Credit ($)"], 2
             )
 
         # Baseline bill (no-solar) per month — for Indexed Tariff PPA rate calc
@@ -1043,6 +1126,35 @@ def _project_single_year_monthly(
         r["Savings ($)"] = round(r["Baseline Bill ($)"] - r["Net Bill ($)"], 2)
 
         rows.append(r)
+
+    # Y>1 + NEM-1/2: replace per-month Net Bill with billing-option simulation
+    # so MBO credit-banking and min_monthly_charge floors are honored. Without
+    # this, gross TOU credit subtracts from gross charges at full magnitude
+    # for over-sized PV — which silently understates Y>1 bills.
+    _is_tou_netted_year = active_regime in ("NEM-1", "NEM-2") or active_regime.startswith("NEM-A")
+    if yr > 1 and len(rows) == 12 and _is_tou_netted_year:
+        monthly_components = [
+            {
+                "energy": r["Energy ($)"],
+                # Export Credit ($) is stored as a negative number in the row
+                # (it's an offset/credit); the simulator wants positive magnitude.
+                "export_credit": -r["Export Credit ($)"],
+                "demand": r["Demand ($)"],
+                "fixed": r["Fixed ($)"],
+                "nbc": r.get("NBC ($)", 0.0),
+                "nsc_adj": r.get("NSC Adj ($)", 0.0),
+            }
+            for r in rows
+        ]
+        net_bills = simulate_year_under_billing_option(
+            monthly_components,
+            active_regime,
+            result.billing_option,
+            result.min_monthly_charge,
+        )
+        for r, nb in zip(rows, net_bills):
+            r["Net Bill ($)"] = round(nb, 2)
+            r["Savings ($)"] = round(r["Baseline Bill ($)"] - r["Net Bill ($)"], 2)
 
     return rows
 
@@ -1292,6 +1404,7 @@ def build_indexed_tariff_annual(
 
     # Collect per-year data
     year_data = []
+    has_nsc = "NSC Adj ($)" in annual_proj_df.columns
     for _, row in annual_proj_df.iterrows():
         yr = int(row["Year"])
         savings_target = _indexed_tariff_savings_target(
@@ -1305,15 +1418,16 @@ def build_indexed_tariff_annual(
         solar_kwh = row["Solar (kWh)"]
         utility_savings = bill_no_solar - bill_solar
         cal_yr = int(row["Calendar Year"]) if "Calendar Year" in row.index else None
+        nsc_adj = float(row["NSC Adj ($)"]) if has_nsc and pd.notna(row.get("NSC Adj ($)")) else 0.0
         year_data.append((yr, bill_no_solar, bill_solar, solar_kwh,
-                          utility_savings, savings_frac, savings_target, cal_yr))
+                          utility_savings, savings_frac, savings_target, cal_yr, nsc_adj))
 
     # Backsolve Year 1 PPA rate per regime when escalator is set
     yr1_ppa_rate_r1 = 0.0
     yr1_ppa_rate_r2 = 0.0
     if use_escalator:
         # Regime 1 years
-        r1_years = [(yr, us, sf, skwh) for yr, _, _, skwh, us, sf, _, _ in year_data
+        r1_years = [(yr, us, sf, skwh) for yr, _, _, skwh, us, sf, _, _, _ in year_data
                      if not (nem_regime_2 and num_years_1 and yr > num_years_1)]
         if r1_years:
             num = sum(us * (1.0 - sf) for _, us, sf, _ in r1_years)
@@ -1322,7 +1436,7 @@ def build_indexed_tariff_annual(
 
         # Regime 2 years
         if nem_regime_2 and num_years_1:
-            r2_years = [(yr, us, sf, skwh) for yr, _, _, skwh, us, sf, _, _ in year_data
+            r2_years = [(yr, us, sf, skwh) for yr, _, _, skwh, us, sf, _, _, _ in year_data
                          if yr > num_years_1]
             if r2_years:
                 r2_start = num_years_1 + 1
@@ -1331,7 +1445,7 @@ def build_indexed_tariff_annual(
                 yr1_ppa_rate_r2 = num / den if den > 0 else 0.0
 
     rows = []
-    for yr, bill_no_solar, bill_solar, solar_kwh, utility_savings, savings_frac, savings_target, cal_yr in year_data:
+    for yr, bill_no_solar, bill_solar, solar_kwh, utility_savings, savings_frac, savings_target, cal_yr, nsc_adj in year_data:
         if use_escalator:
             # Determine which regime and escalated rate
             if nem_regime_2 and num_years_1 and yr > num_years_1:
@@ -1364,6 +1478,8 @@ def build_indexed_tariff_annual(
             "Savings Target (%)": round(savings_target, 1),
             "PPA Rate ($/kWh)": round(ppa_rate, 5),
         })
+        if has_nsc:
+            r["NSC Adj ($)"] = round(nsc_adj, 2)
         rows.append(r)
 
     return pd.DataFrame(rows)
@@ -1392,6 +1508,7 @@ def build_indexed_tariff_monthly(
 
     # Collect per-row data for escalator backsolve
     row_data = []
+    has_nsc = "NSC Adj ($)" in multiyear_monthly_df.columns
     for _, row in multiyear_monthly_df.iterrows():
         yr = int(row["Year"])
         savings_target = _indexed_tariff_savings_target(
@@ -1408,15 +1525,16 @@ def build_indexed_tariff_monthly(
         utility_savings = baseline_bill - net_bill
         cal_yr = int(row["Calendar Year"]) if "Calendar Year" in row.index else None
         month = row["Month"]
+        nsc_adj = float(row["NSC Adj ($)"]) if has_nsc and pd.notna(row.get("NSC Adj ($)")) else 0.0
         row_data.append((yr, month, baseline_bill, net_bill, solar_kwh,
-                         utility_savings, savings_frac, savings_target, cal_yr))
+                         utility_savings, savings_frac, savings_target, cal_yr, nsc_adj))
 
     # Backsolve Year 1 PPA rates per regime when escalator is set
     yr1_ppa_rate_r1 = 0.0
     yr1_ppa_rate_r2 = 0.0
     if use_escalator:
         # Regime 1 months
-        r1_rows = [(yr, us, sf, skwh) for yr, _, _, _, skwh, us, sf, _, _ in row_data
+        r1_rows = [(yr, us, sf, skwh) for yr, _, _, _, skwh, us, sf, _, _, _ in row_data
                     if not (nem_regime_2 and num_years_1 and yr > num_years_1)]
         if r1_rows:
             num = sum(us * (1.0 - sf) for _, us, sf, _ in r1_rows)
@@ -1425,7 +1543,7 @@ def build_indexed_tariff_monthly(
 
         # Regime 2 months
         if nem_regime_2 and num_years_1:
-            r2_rows = [(yr, us, sf, skwh) for yr, _, _, _, skwh, us, sf, _, _ in row_data
+            r2_rows = [(yr, us, sf, skwh) for yr, _, _, _, skwh, us, sf, _, _, _ in row_data
                         if yr > num_years_1]
             if r2_rows:
                 r2_start = num_years_1 + 1
@@ -1434,7 +1552,7 @@ def build_indexed_tariff_monthly(
                 yr1_ppa_rate_r2 = num / den if den > 0 else 0.0
 
     rows = []
-    for yr, month, baseline_bill, net_bill, solar_kwh, utility_savings, savings_frac, savings_target, cal_yr in row_data:
+    for yr, month, baseline_bill, net_bill, solar_kwh, utility_savings, savings_frac, savings_target, cal_yr, nsc_adj in row_data:
         if use_escalator:
             if nem_regime_2 and num_years_1 and yr > num_years_1:
                 esc = esc_2
@@ -1466,6 +1584,8 @@ def build_indexed_tariff_monthly(
             "Savings Target (%)": round(savings_target, 1),
             "PPA Rate ($/kWh)": round(ppa_rate, 5),
         })
+        if has_nsc:
+            r["NSC Adj ($)"] = round(nsc_adj, 2)
         rows.append(r)
 
     return pd.DataFrame(rows)
@@ -1809,7 +1929,7 @@ def _build_monthly_sheets(
         cod_date=cod_date,
         degradation_pct=degradation_pct,
     )
-    export_monthly_cols = ["Year", "Calendar Year", "Month", "Solar (kWh)", "Export (kWh)", "Export Credit ($)"]
+    export_monthly_cols = ["Year", "Calendar Year", "Month", "Solar (kWh)", "Export (kWh)", "Export Credit ($)", "NSC Adj ($)"]
     retail_monthly_cols = ["Year", "Calendar Year", "Month", "Import (kWh)", "Wtd Avg Rate ($/kWh)", "Energy ($)"]
     export_monthly_df = monthly_df[[c for c in export_monthly_cols if c in monthly_df.columns]].copy()
     if "Solar (kWh)" in export_monthly_df.columns:
@@ -1867,10 +1987,6 @@ def _build_monthly_sheets(
                 bess_e = mo_total * bess_frac
                 pv_exp_col.append(round(pv_e, 1))
                 bess_exp_col.append(round(bess_e, 1))
-                # VoE: use year-1 per-month credit/kWh ratio (rate-scaled via Export Credit)
-                mo_credit = abs(export_monthly_df["Export Credit ($)"].iloc[i])
-                pv_c = mo_credit * pv_frac if (pv_frac + bess_frac) > 0 else 0.0
-                bess_c = mo_credit * bess_frac if (pv_frac + bess_frac) > 0 else 0.0
                 # But VoE should reflect the actual rate each component earns,
                 # not just the average. Use year-1 credit ratios.
                 if _pv_exp_mo[m] > 0 and _bess_exp_mo[m] > 0:
@@ -1920,7 +2036,7 @@ def _build_projection_sheet(export_monthly_df: pd.DataFrame) -> pd.DataFrame:
                 row["Calendar Year"] = int(yr_slice["Calendar Year"].iloc[0])
             # Sum kWh and $ columns
             for col in ["Generation (kWh)", "Export (kWh)", "Export PV (kWh)",
-                         "Export BESS (kWh)", "Export Credit ($)"]:
+                         "Export BESS (kWh)", "Export Credit ($)", "NSC Adj ($)"]:
                 if col in yr_slice.columns:
                     row[col] = round(float(yr_slice[col].sum()), 1)
             # Weighted average Value of Energy = |credit| / export_kwh

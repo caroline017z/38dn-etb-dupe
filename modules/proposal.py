@@ -36,7 +36,7 @@ from pptx.dml.color import RGBColor
 from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
 from pptx.enum.shapes import MSO_SHAPE
 from pptx.enum.chart import XL_CHART_TYPE, XL_LEGEND_POSITION
-from pptx.chart.data import CategoryChartData, ChartData
+from pptx.chart.data import CategoryChartData
 
 from .billing import BillingResult
 
@@ -1496,9 +1496,9 @@ def _slide_rate_hedge(prs, pg, total, ex, utility, ppa, ppa_esc, term,
          text="SCENARIO ASSUMPTIONS", sz=Pt(11), bold=True, color=DK1)
 
     points = [
-        f"Conservative: 4%/yr utility escalation",
-        f"Moderate: 7%/yr utility escalation",
-        f"High: 10%/yr utility escalation",
+        "Conservative: 4%/yr utility escalation",
+        "Moderate: 7%/yr utility escalation",
+        "High: 10%/yr utility escalation",
     ]
     if ppa:
         points.append(f"PPA: ${ppa:.3f}/kWh, {ppa_esc:.1f}%/yr escalator")
@@ -1680,7 +1680,7 @@ def _slide_nem_detail(prs, pg, total, ex, regime_name, start_year, end_year,
     duration = f"Years {start_year}\u2013{end_year}"
 
     _action_title(sl, f"{info['title']}  ({duration})", exhibit=ex)
-    _subtitle(sl, f"How the billing program works during this period")
+    _subtitle(sl, "How the billing program works during this period")
     _takeaway(sl, info["summary"])
 
     # ── Left column: How It Works ──
@@ -1836,18 +1836,11 @@ def _slide_savings_matrix(prs, pg, total, ex, proj_df,
 
     # If regime switch exists, add a second annotation row for regime-2 rates
     if r2_data:
-        r2_row = [f"R2 Yr1", "", ""]
+        r2_row = ["R2 Yr1", "", ""]
         for t in targets:
             r2_row.append(f"${yr1_ppa_rates_r2[t]:.4f}")
             r2_row.append("")
         rows.append(r2_row)
-
-    # KPI tiles positioned to the right of the table
-    cum_label = lambda t: f"Lifetime @ {t}%"
-    tiles = [
-        {"value": _fd(lifetime_sums[t]), "label": cum_label(t), "accent": c, "val_color": c}
-        for t, c in zip(targets, target_colors)
-    ]
 
     _action_title(sl, "Savings scenarios across 5%, 10%, and 15% customer targets", exhibit=ex)
     if _has_regime_switch:
@@ -1881,7 +1874,7 @@ def _slide_savings_matrix(prs, pg, total, ex, proj_df,
         "Higher savings targets reduce the PPA rate; "
         "matrix shows trade-offs across the full project life.")
     if esc_frac_1 > 0:
-        _takeaway_text += f" PPA escalates per regime; Yr 1 rate in TOTAL row."
+        _takeaway_text += " PPA escalates per regime; Yr 1 rate in TOTAL row."
         if r2_data:
             _takeaway_text += f" R2 Yr1 = {nem_regime_2} start rate."
     _rect(sl, _sidebar_x, _callout_y, _sidebar_w, Inches(0.80), fill=LT_GRAY)
