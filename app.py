@@ -5554,6 +5554,8 @@ def _run_simulation():
                 cost_calculator=st.session_state["ecc_cost_calculator"],
                 export_rates_8760=_ecc_export,
                 tariff_data=st.session_state.get("ecc_tariff_data"),
+                nsc_rate=nsc_rate,
+                min_monthly_charge=getattr(st.session_state.get("tariff"), "min_monthly_charge", 0.0),
             )
             st.session_state["billing_result_pv_only"] = result_pv_only
             st.session_state["billing_result"] = result_pv_only
@@ -5573,6 +5575,8 @@ def _run_simulation():
                         battery_config=st.session_state["battery_config"],
                         capacity_kwh=batt_cap,
                         monthly_dispatch=st.session_state.get("battery_fast_dispatch", True),
+                        nsc_rate=nsc_rate,
+                        min_monthly_charge=getattr(st.session_state.get("tariff"), "min_monthly_charge", 0.0),
                     )
                     st.session_state["billing_result"] = result_batt
                     st.session_state["billing_result_batt"] = result_batt
@@ -5593,9 +5597,11 @@ def _run_simulation():
                     np.zeros(8760), index=_dt_idx_placeholder, name="export_rate_per_kwh",
                 )
 
-            # NEM params for the billing call
+            # NEM params for the billing call. NSC rate flows for NEM-1/2 AND
+            # NEM-3 / NVBT — under NBT, year-end NSC re-prices net surplus from
+            # avg ACC down to wholesale NSC (per CPUC D.22-12-056).
             _nem_nbc = nbc_rate if nem_regime_1 == "NEM-2" else 0.0
-            _nem_nsc = nsc_rate if nem_regime_1 in ("NEM-1", "NEM-2") else 0.0
+            _nem_nsc = nsc_rate
             _nem_billing = billing_option if nem_regime_1 in ("NEM-1", "NEM-2") else "ABO"
 
             if st.session_state.get("load_mode") == "NEM-A Aggregation":
@@ -5638,7 +5644,7 @@ def _run_simulation():
                     meters=_meter_configs,
                     nem_regime=nem_regime_1,
                     nbc_rate=_nem_nbc,
-                    nsc_rate=_nem_nsc if nem_regime_1 in ("NEM-1", "NEM-2") else 0.04,
+                    nsc_rate=_nem_nsc,
                     billing_option=_nem_billing,
                 )
 
@@ -6205,11 +6211,20 @@ def _render_results():
             "Export Peak and Off-Peak are sub-components of the bolded Export (kWh) total."
         )
 
-        # Show NSC adjustment info if applicable
+        # Show NSC adjustment info if applicable. Mechanism differs by regime:
+        # NEM-1/2 reprices surplus from retail TOU rate down to NSC; NEM-3/NBT
+        # reprices from rolling-12-mo avg ACC rate down to NSC (per AB 920 +
+        # CPUC D.22-12-056).
         if hasattr(result, 'annual_nsc_adjustment') and result.annual_nsc_adjustment > 0:
+            _nsc_basis = (
+                "retail TOU rate"
+                if getattr(result, "nem_regime", "").startswith(("NEM-1", "NEM-2", "NEM-A (NEM-1)", "NEM-A (NEM-2)"))
+                else "avg ACC export rate"
+            )
             st.info(
                 f"Net Surplus Compensation adjustment applied in month 12: "
-                f"${result.annual_nsc_adjustment:,.2f} (surplus valued at NSC rate instead of retail)"
+                f"${result.annual_nsc_adjustment:,.2f} (surplus repriced from "
+                f"{_nsc_basis} to wholesale NSC rate)"
             )
 
         # ── Grid Exchange breakdown (inline, was its own tab) ─────────

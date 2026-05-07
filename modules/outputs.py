@@ -3,6 +3,7 @@ Output generation module — charts, CSV builders, and summary formatters.
 """
 
 import calendar
+import math
 from html import escape as _esc
 
 import numpy as np
@@ -10,6 +11,31 @@ import pandas as pd
 import plotly.graph_objects as go
 from io import StringIO, BytesIO
 from .billing import BillingResult, simulate_year_under_billing_option
+
+
+_NEM12_REGIMES = ("NEM-1", "NEM-2", "NEM-A (NEM-1)", "NEM-A (NEM-2)")
+_NEM3_REGIMES = ("NEM-3", "NEM-3 / NVBT", "NEM-A (NEM-3)", "NEM-A (NEM-3 / NVBT)")
+
+
+# 38DN Excel number formats — four-section accounting layout per
+# conventions.md: positive normal, negative parentheses, zero en-dash,
+# text passthrough. Imported by other export modules so the entire
+# pipeline renders zeros consistently.
+EXCEL_FMT_KWH = '_(#,##0_);(#,##0);_("–"_);_(@_)'
+EXCEL_FMT_DOLLAR = '_($#,##0_);($#,##0);_($"–"_);_(@_)'
+EXCEL_FMT_DOLLAR_ACCT = '_($#,##0_);[Red]($#,##0);_($"–"_);_(@_)'
+EXCEL_FMT_DOLLAR_K = '_($#,##0"K"_);($#,##0"K");_($"–"_);_(@_)'
+EXCEL_FMT_RATE = '_($0.00000_);($0.00000);_($"–"_);_(@_)'
+EXCEL_FMT_PCT = '_(0.0%_);(0.0%);_("–"_);_(@_)'
+
+
+def _supports_nsc(regime: str | None) -> bool:
+    """All CA NEM regimes carry an annual NSC true-up — NEM-1/2 re-prices
+    surplus from retail TOU to NSC, NEM-3/NBT re-prices from avg ACC to NSC.
+    """
+    if not regime:
+        return False
+    return regime in _NEM12_REGIMES or regime in _NEM3_REGIMES
 
 
 def _compute_export_cagr(multiyear: dict[int, "pd.Series"], n_trailing: int = 10) -> float:
@@ -56,9 +82,15 @@ def fmt_num(x) -> str:
 
 
 def fmt_dollar(x) -> str:
-    """Format a number as $XXX,XXX with parentheses for negatives."""
+    """Format a number as $XXX,XXX with parentheses for negatives.
+
+    NaN renders as an em-dash to flag "not applicable" cells (e.g., NSC Adj
+    in NEM-3 years where no annual true-up exists). $0 still renders as $0.
+    """
     if not isinstance(x, (int, float)):
         return str(x)
+    if math.isnan(x):
+        return "—"
     if x < 0:
         return f"$({abs(x):,.0f})"
     return f"${x:,.0f}"
@@ -516,13 +548,21 @@ def _compute_year_row(
         if active_regime in ("NEM-1", "NEM-2", "NEM-A (NEM-1)", "NEM-A (NEM-2)"):
             yr_nsc = nsc_rate_2 * yr_export_kwh * rate_factor
 
-    # NEM-1/2 end-of-year NSC clawback: when annual exports > imports, the surplus
-    # gets re-priced from retail TOU rate down to the wholesale NSC rate. The Y1
-    # delta sits in result.annual_nsc_adjustment; for later years we scale by
-    # rate × export volume since both terms (TOU credit, NSC payment) move together.
+    # End-of-year NSC clawback: applies under NEM-1/2 (retail TOU → NSC) and
+    # under NEM-3/NBT (avg ACC → NSC). The Y1 delta sits in
+    # result.annual_nsc_adjustment; year-N scaling differs by regime:
+    #   NEM-1/2: rate × volume — retail TOU credit and NSC payment move with
+    #            the utility rate escalator and export volume.
+    #   NEM-3:   volume only — ACC export rates follow the loaded ACC schedule
+    #            (already reflected in yr_export_credit), not the retail
+    #            escalator. NSC ($/kWh) is wholesale and roughly stable in
+    #            real terms, so volume_ratio is the dominant scaler.
     yr_nsc_clawback = 0.0
-    if year1_nsc_adj > 0 and active_regime in ("NEM-1", "NEM-2", "NEM-A (NEM-1)", "NEM-A (NEM-2)"):
-        yr_nsc_clawback = year1_nsc_adj * rate_factor * volume_ratio
+    if year1_nsc_adj > 0 and _supports_nsc(active_regime):
+        if active_regime in _NEM12_REGIMES:
+            yr_nsc_clawback = year1_nsc_adj * rate_factor * volume_ratio
+        else:
+            yr_nsc_clawback = year1_nsc_adj * volume_ratio
 
     # For Y>1 in NEM-1/2 (single-meter or NEM-A aggregate), re-run MBO/ABO
     # month-by-month so credit banking + min_monthly_charge floors land where
@@ -618,9 +658,16 @@ def _compute_year_row(
     _any_nem2 = any(r in ("NEM-2", "NEM-A (NEM-2)") for r in (nem_regime_1, nem_regime_2) if r)
     if _any_nem2 or year1_nbc > 0:
         row["NBC ($)"] = round(yr_nbc)
-    yr_nsc_total = yr_nsc + yr_nsc_clawback
-    if yr_nsc_total > 0:
-        row["NSC Adj ($)"] = round(yr_nsc_total)
+    # Populate NSC Adj column when ANY year in the projection carries NSC
+    # (NEM-1/2 retail-to-NSC repricing OR NEM-3/NBT ACC-to-NSC repricing).
+    # Years where the active regime doesn't support NSC get NaN (renders as
+    # em-dash via fmt_dollar); applicable years get the value (or 0.0 when
+    # no surplus). Conditional column population would create NaN holes via
+    # pd.DataFrame and display "$nan".
+    _any_nsc_regime = any(_supports_nsc(r) for r in (nem_regime_1, nem_regime_2))
+    if _any_nsc_regime:
+        yr_nsc_total = yr_nsc + yr_nsc_clawback
+        row["NSC Adj ($)"] = round(yr_nsc_total) if _supports_nsc(active_regime) else float("nan")
     row.update({
         "Export Credit ($)": round(yr_export_credit),
         "Bill w/ Solar ($)": round(yr_bill_solar),
@@ -1011,6 +1058,7 @@ def _project_single_year_monthly(
     active_regime, _any_nem2,
     month_tou_energy, raw_month_energy, month_wtd_rate,
     month_export_credit_override,
+    _any_nsc_regime: bool = False,
 ):
     """Project one year's 12-month rows for _build_multiyear_monthly_df.
 
@@ -1077,17 +1125,27 @@ def _project_single_year_monthly(
         else:
             r["Export Credit ($)"] = -round(mrow["export_credit"] * rate_factor * volume_ratio * _prorate, 2)
 
-        # NEM-1/2 end-of-year NSC clawback lives on month 12 of the Y1 monthly_summary;
-        # for later years scale by rate × export volume (same basis as export credit).
+        # End-of-year NSC clawback lives on month 12 of the Y1 monthly_summary
+        # for both NEM-1/2 (retail→NSC) and NEM-3/NBT (avg ACC→NSC).
+        # Year-N scaling: NEM-1/2 uses rate × volume; NEM-3 uses volume only
+        # (ACC schedule already reflected in Export Credit, not retail rate).
+        # Display: rows where the active regime doesn't support NSC show
+        # em-dash (NaN) when any year carries NSC; otherwise the column is
+        # omitted. Local _m_nsc_adj stays 0.0 so Net Bill arithmetic doesn't
+        # get NaN-poisoned.
         _m_nsc_adj = 0.0
-        _is_nem1_or_2 = active_regime in ("NEM-1", "NEM-2", "NEM-A (NEM-1)", "NEM-A (NEM-2)")
-        if _is_nem1_or_2 and "nsc_adjustment" in ms.columns:
+        _supports = _supports_nsc(active_regime)
+        if _supports and "nsc_adjustment" in ms.columns:
             _y1_m_nsc = float(mrow["nsc_adjustment"])
             if yr == 1:
                 _m_nsc_adj = round(_y1_m_nsc * _prorate, 2)
-            else:
+            elif active_regime in _NEM12_REGIMES:
                 _m_nsc_adj = round(_y1_m_nsc * rate_factor * volume_ratio, 2)
-        r["NSC Adj ($)"] = _m_nsc_adj
+            else:
+                _m_nsc_adj = round(_y1_m_nsc * volume_ratio, 2)
+            r["NSC Adj ($)"] = _m_nsc_adj
+        elif _any_nsc_regime:
+            r["NSC Adj ($)"] = float("nan")
 
         if yr == 1 and _prorate == 1.0:
             # Year 1: use actual monthly net_bill from billing result
@@ -1250,6 +1308,7 @@ def _build_multiyear_monthly_df(
             month_wtd_rate[month] = 0.0
 
     _any_nem2 = any(r in ("NEM-2", "NEM-A (NEM-2)") for r in (nem_regime_1, nem_regime_2) if r)
+    _any_nsc_regime = any(_supports_nsc(r) for r in (nem_regime_1, nem_regime_2))
 
     rows = []
     for yr in range(1, years + 1):
@@ -1292,6 +1351,7 @@ def _build_multiyear_monthly_df(
             active_regime, _any_nem2,
             month_tou_energy, raw_month_energy, month_wtd_rate,
             month_export_credit_override,
+            _any_nsc_regime=_any_nsc_regime,
         )
         rows.extend(yr_rows)
 
@@ -2097,17 +2157,19 @@ def _write_excel_workbook(
         for row_idx in range(1, len(summary_df) + 2):  # header + data rows
             ws_summary.cell(row=row_idx, column=2).alignment = _left
 
+        # 38DN number formats — see EXCEL_FMT_* at module top. Four-section
+        # accounting layout so $0 / 0 kWh / $0.00000 render as en-dash.
+        _fmt_kwh = EXCEL_FMT_KWH
+        _fmt_dollar = EXCEL_FMT_DOLLAR
+        _fmt_dollar_acct = EXCEL_FMT_DOLLAR_ACCT
+        _fmt_rate = EXCEL_FMT_RATE
+        _fmt_pct = EXCEL_FMT_PCT
+
         # Format percentage rows on the Summary sheet
         _pct_params = {"Self-Consumption (%)", "Export (%)"}
         for row_idx, (param, _) in enumerate(summary_rows, start=2):
             if param in _pct_params:
-                ws_summary.cell(row=row_idx, column=2).number_format = '0.0%'
-
-        # Apply number formats to data sheets
-        _fmt_kwh = '#,##0'
-        _fmt_dollar = '$#,##0'
-        _fmt_dollar_acct = '$#,##0_);[Red]($#,##0)'
-        _fmt_rate = '$0.00000'
+                ws_summary.cell(row=row_idx, column=2).number_format = _fmt_pct
 
         for sheet_name, df, dollar_fmt in [
             ("Export Rates (Hourly)", export_hourly_df, _fmt_dollar),

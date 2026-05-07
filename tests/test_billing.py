@@ -116,8 +116,10 @@ class TestNEM3Basic:
         solar = _const_series(10.0)   # surplus 7 kWh/hr
         export_rates = _const_series(0.08)
 
+        # nsc_rate=0 isolates gross export credit; NEM-3 NSC mechanics are
+        # exercised separately in TestNEM3NscTrueUp below.
         result = run_billing_simulation(
-            load, solar, tariff, export_rates, nem_regime="NEM-3",
+            load, solar, tariff, export_rates, nem_regime="NEM-3", nsc_rate=0.0,
         )
         expected_export = 7.0 * 8760
         assert abs(result.annual_export_kwh - expected_export) < TOL
@@ -489,3 +491,85 @@ class TestNSCTrueUp:
         dec = result.monthly_summary[result.monthly_summary["month"] == 12].iloc[0]
         # NSC adjustment should appear in month 12
         assert dec["nsc_adjustment"] > 0
+
+
+# ---------------------------------------------------------------------------
+# 10b. NEM-3 / NBT NSC true-up (per CPUC D.22-12-056 + AB 920)
+# ---------------------------------------------------------------------------
+class TestNEM3NscTrueUp:
+    """NEM-3 / NBT: avg ACC export rate re-priced to wholesale NSC rate
+    on net surplus electricity at year-end true-up."""
+
+    def test_no_nsc_when_net_consumer(self):
+        """Imports > exports → no surplus → no adjustment."""
+        tariff = _make_flat_tariff(rate=0.20)
+        load = _const_series(10.0)
+        solar = _const_series(5.0)
+        export_rates = _const_series(0.06)
+
+        result = run_billing_simulation(
+            load, solar, tariff, export_rates,
+            nem_regime="NEM-3", nsc_rate=0.03,
+        )
+        assert abs(result.annual_nsc_adjustment) < TOL
+
+    def test_no_nsc_when_nsc_above_avg_acc(self):
+        """When NSC rate ≥ avg ACC rate, the customer would be made WHOLE
+        (or better) by the NSC payout — no clawback applies."""
+        tariff = _make_flat_tariff(rate=0.20)
+        load = _const_series(3.0)
+        solar = _const_series(10.0)
+        export_rates = _const_series(0.03)  # avg ACC = 0.03
+
+        result = run_billing_simulation(
+            load, solar, tariff, export_rates,
+            nem_regime="NEM-3", nsc_rate=0.03,  # NSC = avg ACC
+        )
+        assert abs(result.annual_nsc_adjustment) < TOL
+
+    def test_nsc_applied_when_net_exporter(self):
+        """Surplus × (avg ACC − NSC) lands as a clawback on month 12."""
+        tariff = _make_flat_tariff(rate=0.20)
+        load = _const_series(3.0)
+        solar = _const_series(10.0)   # surplus 7 kWh/hr
+        export_rates = _const_series(0.08)
+
+        result = run_billing_simulation(
+            load, solar, tariff, export_rates,
+            nem_regime="NEM-3", nsc_rate=0.03,
+        )
+        surplus_kwh = 7.0 * 8760
+        expected_adj = surplus_kwh * (0.08 - 0.03)
+        assert abs(result.annual_nsc_adjustment - expected_adj) < 1.0
+
+    def test_nsc_lands_on_month_12(self):
+        tariff = _make_flat_tariff(rate=0.20)
+        load = _const_series(3.0)
+        solar = _const_series(10.0)
+        export_rates = _const_series(0.08)
+
+        result = run_billing_simulation(
+            load, solar, tariff, export_rates,
+            nem_regime="NEM-3", nsc_rate=0.03,
+        )
+        dec = result.monthly_summary[result.monthly_summary["month"] == 12].iloc[0]
+        assert dec["nsc_adjustment"] > 0
+        # No NSC in months 1–11
+        for m in range(1, 12):
+            row = result.monthly_summary[result.monthly_summary["month"] == m].iloc[0]
+            assert row["nsc_adjustment"] == 0.0
+
+    def test_nsc_capped_at_total_export_credit(self):
+        """Adjustment can't exceed the total annual export credit (the bill
+        credit balance ceiling)."""
+        tariff = _make_flat_tariff(rate=0.20)
+        load = _const_series(3.0)
+        solar = _const_series(10.0)
+        export_rates = _const_series(0.08)
+
+        result = run_billing_simulation(
+            load, solar, tariff, export_rates,
+            nem_regime="NEM-3", nsc_rate=0.0,  # would maximize adj if uncapped
+        )
+        gross_export_credit = 7.0 * 0.08 * 8760
+        assert result.annual_nsc_adjustment <= gross_export_credit + TOL

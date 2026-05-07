@@ -17,7 +17,7 @@ from vendor.electricitycostcalculator.openei_tariff.openei_tariff_analyzer impor
 )
 from vendor.electricitycostcalculator.cost_calculator.cost_calculator import CostCalculator
 
-from .billing import BillingResult, _assemble_billing_result
+from .billing import BillingResult, _apply_nbt_nsc_true_up, _assemble_billing_result
 
 if TYPE_CHECKING:
     from .battery.config import BatteryConfig
@@ -155,6 +155,8 @@ def run_ecc_billing_simulation(
     battery_config: "BatteryConfig | None" = None,
     capacity_kwh: float = 0,
     monthly_dispatch: bool = False,
+    nsc_rate: float = 0.0,
+    min_monthly_charge: float = 0.0,
 ) -> BillingResult:
     """
     Run billing simulation using the ECC CostCalculator engine.
@@ -344,6 +346,13 @@ def run_ecc_billing_simulation(
             "net_bill": round(m_net_bill, 2),
         })
 
+    # NEM-3 / NBT year-end NSC true-up. Mirrors the custom-engine NEM-3 path
+    # so ECC results follow the same tariff mechanics (D.22-12-056).
+    if nsc_rate > 0:
+        _apply_nbt_nsc_true_up(
+            monthly_rows, import_kwh, export_kwh, nsc_rate, min_monthly_charge,
+        )
+
     monthly_summary = pd.DataFrame(monthly_rows)
 
     # --- Baseline (no-solar) annual totals ---
@@ -424,6 +433,8 @@ def run_ecc_billing_simulation(
 
     annual_energy_cost = float(monthly_summary["energy_cost"].sum())
     annual_export_credit = float(monthly_summary["export_credit"].sum())
+    _nsc_col = monthly_summary.get("nsc_adjustment")
+    annual_nsc_adj = float(_nsc_col.sum()) if _nsc_col is not None else 0.0
 
     return _assemble_billing_result(
         hourly_detail=hourly_detail,
@@ -438,6 +449,7 @@ def run_ecc_billing_simulation(
         tou_annual_credit=annual_export_credit,
         tou_monthly_energy=_tou_monthly_energy,
         tou_monthly_credit=_tou_monthly_credit,
+        annual_nsc_adj=annual_nsc_adj,
         monthly_baseline_details=monthly_baseline_details,
         raw_annual_energy=annual_energy_cost,
     )

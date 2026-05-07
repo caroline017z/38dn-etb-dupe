@@ -468,11 +468,21 @@ def run_billing_simulation(
             nem_regime, nbc_rate, nsc_rate, billing_option,
         )
     else:
-        # NEM-3/NVBT: existing hourly settlement logic
+        # NEM-3/NVBT: hourly settlement at ACC export rates with year-end NSC
+        # true-up per PG&E Schedule NBT / D.22-12-056. NEM-3 NSC re-prices any
+        # net surplus electricity (kWh) from the rolling-12-mo avg ACC rate
+        # down to the wholesale NSC rate; smaller magnitude than NEM-1/2 NSC
+        # but non-zero whenever annual exports exceed annual imports and
+        # nsc_rate < avg ACC rate.
         monthly_rows = _build_monthly_nem3(
             load, solar, import_kwh, export_kwh, export_credit,
             energy_period, energy_cost, dt_index, tariff, demand_df, peak_period_idx,
         )
+        if nsc_rate > 0:
+            _apply_nbt_nsc_true_up(
+                monthly_rows, import_kwh, export_kwh, nsc_rate,
+                tariff.min_monthly_charge,
+            )
 
     monthly_summary = pd.DataFrame(monthly_rows)
 
@@ -711,6 +721,7 @@ def _build_monthly_nem12(
     _apply_nsc_true_up(
         monthly_rows, import_kwh, export_kwh, energy_rate, energy_period,
         period_rates, nsc_rate, tariff.min_monthly_charge,
+        tou_annual_credit=tou_annual_credit,
     )
 
     return monthly_rows, tou_annual_energy, tou_annual_credit, tou_monthly_energy, tou_monthly_credit
@@ -725,6 +736,7 @@ def _apply_nsc_true_up(
     period_rates: dict,
     nsc_rate: float,
     min_monthly_charge: float = 0.0,
+    tou_annual_credit: float = 0.0,
 ) -> None:
     """Apply Net Surplus Compensation true-up to month 12 if annual net surplus.
 
@@ -758,10 +770,13 @@ def _apply_nsc_true_up(
     if nsc_adjustment <= 0:
         return
 
-    # Cap adjustment at total annual export credit to prevent over-adjustment
-    # when the surplus TOU credit exceeds what was actually credited across all months.
-    total_annual_export_credit = sum(row["export_credit"] for row in monthly_rows)
-    nsc_adjustment = min(nsc_adjustment, total_annual_export_credit)
+    # Cap adjustment at the credit actually banked through monthly TOU netting
+    # (sum over months of negative monthly_energy_charge values). When TOU
+    # period imbalance lets annual per-period netting credit MORE than the sum
+    # of monthly per-period nettings, the customer never actually banked the
+    # excess — so the clawback can't exceed what was banked.
+    if tou_annual_credit > 0:
+        nsc_adjustment = min(nsc_adjustment, tou_annual_credit)
 
     if nsc_adjustment <= 0:
         return
@@ -774,6 +789,62 @@ def _apply_nsc_true_up(
     # Reduce export credit and increase net bill
     row_12["export_credit"] = round(max(row_12["export_credit"] - nsc_adjustment, 0), 2)
     # Remove the previous min_monthly_charge clamp, add NSC, then re-clamp
+    raw_bill = row_12["net_bill"] + nsc_adjustment
+    row_12["net_bill"] = round(max(raw_bill, min_monthly_charge), 2)
+
+
+def _apply_nbt_nsc_true_up(
+    monthly_rows: list[dict],
+    import_kwh: np.ndarray,
+    export_kwh: np.ndarray,
+    nsc_rate: float,
+    min_monthly_charge: float = 0.0,
+) -> None:
+    """Apply NEM-3 / NBT Net Surplus Compensation true-up to month 12.
+
+    Per PG&E Schedule NBT and CPUC D.22-12-056: at year-end, any Net Surplus
+    Electricity (kWh) is debited from the customer's account at the utility's
+    rolling 12-month average ACC export compensation rate and re-credited at
+    the NSC rate (DLAP wholesale ~ $0.02–0.03/kWh per AB 920). Net effect on
+    the bill is positive (increases bill) when avg ACC > NSC rate.
+
+    Modeling proxy: avg ACC rate = total annual export credit $ / total annual
+    export kWh from the simulated hourly dispatch. The customer's own simulated
+    ACC compensation stands in for the utility-wide rolling average.
+
+    Modifies monthly_rows in place.
+    """
+    annual_net_energy = float(import_kwh.sum() - export_kwh.sum())
+    if annual_net_energy >= 0:
+        return  # No surplus: customer consumed more than exported annually
+
+    surplus_kwh = abs(annual_net_energy)
+
+    total_export_kwh = float(export_kwh.sum())
+    total_export_credit = sum(row["export_credit"] for row in monthly_rows)
+    if total_export_kwh <= 0 or total_export_credit <= 0:
+        return  # Can't price surplus without an effective ACC rate
+
+    avg_acc_rate = total_export_credit / total_export_kwh
+
+    nsc_credit = surplus_kwh * nsc_rate
+    nsc_adjustment = surplus_kwh * avg_acc_rate - nsc_credit  # positive = clawback
+
+    if nsc_adjustment <= 0:
+        return  # NSC rate >= avg ACC: no adjustment
+
+    # Cap at total annual export credit — the customer's bill credit balance
+    # can never exceed what they were credited for exports across the year.
+    nsc_adjustment = min(nsc_adjustment, total_export_credit)
+
+    if nsc_adjustment <= 0:
+        return
+
+    # Apply to month 12 (true-up month). Mirrors NEM-1/2 NSC mechanics:
+    # reduce export credit, add to bill, re-clamp at min_monthly_charge.
+    row_12 = monthly_rows[11]
+    row_12["nsc_adjustment"] = round(nsc_adjustment, 2)
+    row_12["export_credit"] = round(max(row_12["export_credit"] - nsc_adjustment, 0), 2)
     raw_bill = row_12["net_bill"] + nsc_adjustment
     row_12["net_bill"] = round(max(raw_bill, min_monthly_charge), 2)
 

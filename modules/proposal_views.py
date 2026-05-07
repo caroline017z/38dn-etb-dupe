@@ -57,14 +57,15 @@ def build_comparison_table(proposal: Proposal) -> pd.DataFrame:
 
     labels = [f"{s.name} (Primary)" if i == 0 else s.name for i, s in enumerate(snaps)]
 
+    # 38DN convention: zero/None renders as em-dash, not "$0" / "0.0%".
     def _fmt_rate(v):
         return f"${v:.4f}/kWh" if v not in (None, 0) else "—"
 
     def _fmt_pct(v):
-        return f"{v:.1f}%" if v is not None else "—"
+        return f"{v:.1f}%" if v not in (None, 0) else "—"
 
     def _fmt_usd(v):
-        return f"${v:,.0f}" if v is not None else "—"
+        return f"${v:,.0f}" if v not in (None, 0) else "—"
 
     any_regime_2 = any(s.nem_regime_2 for s in snaps)
 
@@ -257,6 +258,10 @@ def export_comparison_xlsx(proposal: Proposal) -> bytes:
     - one sheet per PPA (Primary + comparisons) with per-year rate, solar
       kWh, utility-only bill, PPA bill, cumulative savings.
     """
+    from modules.outputs import (
+        EXCEL_FMT_DOLLAR_K, EXCEL_FMT_KWH, EXCEL_FMT_RATE,
+    )
+
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as xl:
         summary = build_comparison_table(proposal)
@@ -275,11 +280,30 @@ def export_comparison_xlsx(proposal: Proposal) -> bytes:
         ], columns=["Field", "Value"])
         meta.to_excel(xl, sheet_name="Proposal", index=False)
 
+        ppa_sheets: list[tuple[str, pd.DataFrame]] = []
         for i, snap in enumerate((proposal.primary_ppa, *proposal.comparison_ppas)):
             sheet = _safe_sheet_name(
                 f"{'Primary' if i == 0 else 'Alt'}_{snap.name or f'PPA_{i}'}"
             )
-            _ppa_sheet(snap).to_excel(xl, sheet_name=sheet, index=False)
+            df = _ppa_sheet(snap)
+            df.to_excel(xl, sheet_name=sheet, index=False)
+            ppa_sheets.append((sheet, df))
+
+        # Apply 38DN number formats so $0 / 0 kWh render as en-dash, matching
+        # the main rates export (modules/outputs.py).
+        for sheet, df in ppa_sheets:
+            ws = xl.sheets[sheet]
+            for col_idx, col_name in enumerate(df.columns, start=1):
+                if "($/kWh)" in col_name:
+                    fmt = EXCEL_FMT_RATE
+                elif "($K)" in col_name:
+                    fmt = EXCEL_FMT_DOLLAR_K
+                elif "(kWh)" in col_name:
+                    fmt = EXCEL_FMT_KWH
+                else:
+                    continue
+                for row_idx in range(2, len(df) + 2):  # skip header
+                    ws.cell(row=row_idx, column=col_idx).number_format = fmt
 
     return buf.getvalue()
 
