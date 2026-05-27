@@ -86,6 +86,7 @@ def optimize_capacity_kwh(
             battery_config=battery_config,
             capacity_kwh=size,
             monthly=monthly,
+            dt_index=dt_index,
         )
 
         # --- Compute bill components from dispatch arrays ---

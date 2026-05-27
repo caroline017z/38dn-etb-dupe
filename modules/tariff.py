@@ -206,16 +206,18 @@ def fetch_tariff_detail(rate_label: str) -> TariffSchedule:
 
 
 def _sum_fixed_charges(raw: dict) -> float:
-    """Sum all fixed monthly charges from raw tariff data."""
-    total = 0.0
-    raw_fixed = raw.get("fixedmonthlycharge", 0.0) or 0.0
-    if raw.get("fixedchargeunits", "") == "$/day":
-        total += raw_fixed * DAYS_PER_MONTH_AVG
-    else:
-        total += raw_fixed
-    # Also check for fixedchargefirstmeter
-    total += raw.get("fixedchargefirstmeter", 0.0) or 0.0
-    return total
+    """Sum all fixed monthly charges from raw tariff data.
+
+    ``fixedchargeunits == "$/day"`` governs both ``fixedmonthlycharge`` and
+    ``fixedchargefirstmeter`` — the extractor routes daily customer charges into
+    ``fixedchargefirstmeter`` (see rate_extractor) — so a daily rate on either
+    field is converted to $/month. Previously only ``fixedmonthlycharge`` was
+    converted, undercounting a daily ``fixedchargefirstmeter`` ~30x.
+    """
+    mult = DAYS_PER_MONTH_AVG if raw.get("fixedchargeunits", "") == "$/day" else 1.0
+    monthly = raw.get("fixedmonthlycharge", 0.0) or 0.0
+    first_meter = raw.get("fixedchargefirstmeter", 0.0) or 0.0
+    return (monthly + first_meter) * mult
 
 
 def _parse_rate_structure(structure: list) -> list:
