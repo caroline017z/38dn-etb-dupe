@@ -804,7 +804,7 @@ def _slide_key_commercial_terms(
 
     _takeaway(
         sl,
-        "Fixed-rate energy purchase with zero customer capex, "
+        "Predictable savings versus the utility bill with zero customer capex, "
         "zero operating risk, and a published savings target across the full term."
     )
 
@@ -1192,7 +1192,7 @@ def _slide_year1(prs, pg, total, ex, result, tariff, proj_df=None,
              sz=Pt(10), italic=True, color=GRAY70, align=PP_ALIGN.CENTER)
 
     _txt(sl, ML, Inches(5.80), CW, Inches(0.30),
-         text="Savings grow each year as utility rates escalate while the solar cost remains contractually fixed.",
+         text="Savings grow each year as utility rates escalate while the PPA is priced each year to keep the customer saving versus the utility bill.",
          sz=Pt(9), color=GRAY50, align=PP_ALIGN.CENTER)
 
     _source(sl, "38DN billing simulation at current published tariff rates")
@@ -1307,8 +1307,6 @@ def _slide_projections(prs, pg, total, ex, proj_df, rate_esc, ppa=None, esc=None
         _table(sl, ML, Inches(1.80), Inches(8.4), cws, hdrs, rows, bold_last=True, sz=Pt(7))
 
     note = f"Assumes {rate_esc:.0f}%/yr linear utility rate escalation."
-    if ppa and esc:
-        note += f" PPA rate of ${ppa:.3f}/kWh at {esc:.1f}%/yr is contractually fixed."
     _source(sl, f"38DN projection model  |  {note}")
     _footer(sl, pg, total)
 
@@ -1467,12 +1465,12 @@ def _slide_rate_hedge(prs, pg, total, ex, utility, ppa, ppa_esc, term,
     sl = prs.slides.add_slide(prs.slide_layouts[6])
     _accent_rule(sl)
     _action_title(sl,
-        "Fixed-rate PPA hedges against rising utility costs",
+        "Predictable PPA pricing hedges against rising utility costs",
         exhibit=ex)
     _subtitle(sl, f"{utility}  |  Rate certainty as a strategic advantage")
 
     _takeaway(sl,
-        f"{'The PPA' if ppa else 'Solar'} provides a contractually fixed energy cost for {term} years. "
+        f"{'The PPA' if ppa else 'Solar'} keeps the customer's energy cost predictable and below the utility bill for {term} years. "
         f"Day-1 savings are locked in; future utility increases widen the margin.")
 
     # Native line chart (Excel-linked, editable in PowerPoint)
@@ -1519,7 +1517,7 @@ def _slide_rate_hedge(prs, pg, total, ex, utility, ppa, ppa_esc, term,
     considerations = [
         "Wildfire liability, grid hardening, and transmission costs drive rates upward",
         "Regulatory cost recovery provides limited customer rate relief",
-        (f"PPA rate is contractually fixed for the full {term}-year term"
+        (f"PPA rate is set each year to hold the customer's target savings for the full {term}-year term"
          if ppa else
          f"Solar cost is fixed for the full {term}-year system life"),
         "Day-1 economics are positive at current rates",
@@ -1847,14 +1845,7 @@ def _slide_savings_matrix(prs, pg, total, ex, proj_df,
         rows.append(r2_row)
 
     _action_title(sl, "Savings scenarios across 5%, 10%, and 15% customer targets", exhibit=ex)
-    if _has_regime_switch:
-        esc_note = (f"  |  {nem_regime_1} esc: {ppa_escalator_pct:.1f}%/yr"
-                    f", {nem_regime_2} esc: {ppa_escalator_pct_2 or ppa_escalator_pct:.1f}%/yr")
-    elif esc_frac_1 > 0:
-        esc_note = f"  |  PPA escalator: {ppa_escalator_pct:.1f}%/yr"
-    else:
-        esc_note = ""
-    _subtitle(sl, f"PPA rate backsolve and annual customer savings by NEM regime{esc_note}")
+    _subtitle(sl, "PPA rate backsolve and annual customer savings by NEM regime")
 
     # ── LAYOUT: table on left, KPI + callout stacked on right ──
     tbl_w = Inches(8.5)
@@ -1877,10 +1868,8 @@ def _slide_savings_matrix(prs, pg, total, ex, proj_df,
     _takeaway_text = (
         "Higher savings targets reduce the PPA rate; "
         "matrix shows trade-offs across the full project life.")
-    if esc_frac_1 > 0:
-        _takeaway_text += " PPA escalates per regime; Yr 1 rate in TOTAL row."
-        if r2_data:
-            _takeaway_text += f" R2 Yr1 = {nem_regime_2} start rate."
+    if r2_data:
+        _takeaway_text += f" R2 Yr1 = {nem_regime_2} start rate."
     _rect(sl, _sidebar_x, _callout_y, _sidebar_w, Inches(0.80), fill=LT_GRAY)
     _rect(sl, _sidebar_x, _callout_y, Pt(4), Inches(0.80), fill=ACCENT1)
     _txt(sl, _sidebar_x + Inches(0.18), _callout_y + Inches(0.06),
@@ -1913,7 +1902,7 @@ def _slide_savings_matrix(prs, pg, total, ex, proj_df,
                           group_hdrs, sub_hdrs, rows, bold_last=True, sz=_tbl_sz)
 
     _source(sl, "38DN projection model  |  PPA rates backsolve from utility savings at stated customer savings targets"
-            + (f"  |  {ppa_escalator_pct:.1f}%/yr escalator" if esc_frac_1 > 0 else ""))
+            "  |  Illustrative constant-growth approximation, distinct from the contracted floating per-year rate")
     _footer(sl, pg, total)
 
 
@@ -1968,14 +1957,12 @@ def _slide_process(prs, pg, total, sys_kw, batt_kwh, batt_kw,
 
 
 def _slide_label_for_primary(
-    nem_regime_1, nem_regime_2, ppa_rate, ppa_rate_r2, esc_1, esc_2,
+    nem_regime_1, nem_regime_2, ppa_rate, ppa_rate_r2,
 ) -> str:
     """Short label for the primary PPA on the alternatives-considered slide."""
     parts = []
     if ppa_rate is not None:
         parts.append(f"${ppa_rate:.3f}/kWh")
-    if esc_1 is not None:
-        parts.append(f"{esc_1:.1f}% esc")
     if ppa_rate_r2 is not None and nem_regime_2:
         parts.append(f"→ ${ppa_rate_r2:.3f}/kWh ({nem_regime_2})")
     return "Recommended: " + ", ".join(parts) if parts else "Recommended offer"
@@ -2341,7 +2328,7 @@ def generate_proposal_pptx(
         pg += 1
         _slide_alternatives_considered(
             prs, pg, total,
-            primary_label=f"{_slide_label_for_primary(nem_regime_1, nem_regime_2, ppa_rate, ppa_rate_regime_2, ppa_escalator_pct, ppa_escalator_pct_2)}",
+            primary_label=f"{_slide_label_for_primary(nem_regime_1, nem_regime_2, ppa_rate, ppa_rate_regime_2)}",
             alternatives=comparison_ppas,
         )
 
