@@ -6409,8 +6409,16 @@ def _render_results():
                     _r2_dt = pd.date_range(start=f"{cod_year}-01-01 00:00", periods=8760, freq="h")
                     _r2_export = pd.Series(np.zeros(8760), index=_r2_dt, name="export_rate_per_kwh")
                 # Build base inputs from session, then swap in tariff #2,
-                # regime-2 export rates, and regime-2 NEM params. PV-only — the
-                # projection applies battery/escalation effects downstream.
+                # regime-2 export rates, and regime-2 NEM params. Mirror the
+                # ACTIVE scenario's battery treatment: if the viewed result is
+                # the with-battery result, re-dispatch the battery under
+                # tariff #2 and take .billing_result; otherwise PV-only. This
+                # prevents the post-transition years from discontinuously losing
+                # battery savings for a BESS project.
+                _r2_use_battery = (
+                    result is not None
+                    and result is st.session_state.get("billing_result_batt")
+                )
                 _r2_inputs = inputs_from_session_state(
                     st.session_state,
                     nem_regime=_r2_regime,
@@ -6418,14 +6426,20 @@ def _render_results():
                     nsc_rate=_r2_nsc,
                     billing_option=_r2_billing,
                     export_rates_placeholder=_r2_export,
-                    include_battery=False,
+                    include_battery=_r2_use_battery,
                 )
-                _r2_inputs = _dc_replace(
-                    _r2_inputs,
-                    tariff=st.session_state["regime_2_tariff"],
-                    export_rates_8760=_r2_export,
+                _r2_replace = {
+                    "tariff": st.session_state["regime_2_tariff"],
+                    "export_rates_8760": _r2_export,
+                }
+                if _r2_use_battery:
+                    _r2_replace["battery_config"] = st.session_state.get("battery_config")
+                    _r2_replace["battery_capacity_kwh"] = st.session_state.get("battery_capacity_kwh", 0)
+                _r2_inputs = _dc_replace(_r2_inputs, **_r2_replace)
+                _r2_sim = run_simulation(_r2_inputs)
+                _result_regime2 = (
+                    _r2_sim.billing_result if _r2_use_battery else _r2_sim.pv_only_result
                 )
-                _result_regime2 = run_simulation(_r2_inputs).pv_only_result
 
             elif billing_engine == "ECC" and st.session_state.get("regime_2_ecc_calculator") is not None:
                 _r2_ecc_export = st.session_state.get("export_rates_2")
