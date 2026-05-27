@@ -296,6 +296,10 @@ def run_ecc_billing_simulation(
 
     # --- Parse monthly ECC bills into our monthly_summary format ---
     monthly_rows = []
+    # Track export credit NOT consumed against energy each month. ECC has no
+    # carryforward, so this leftover is the genuine unconsumed surplus ($) used
+    # to bound the NEM-3/NBT year-end NSC clawback (issue #26).
+    _ecc_leftover_surplus = 0.0
     for month_num in range(1, 13):
         month_key = f"{_start_year}-{month_num:02d}"
         month_mask = dt_index.month == month_num
@@ -333,10 +337,11 @@ def run_ecc_billing_simulation(
         # has no credit carryforward, so surplus credit beyond this month's
         # energy is not banked (unchanged from prior behavior).
         _nonoffsettable = m_demand_cost + m_fixed_cost
-        _energy_due, _ = _draw_credit_against_energy(
+        _energy_due, _credit_used = _draw_credit_against_energy(
             m_energy_cost, m_export_credit, _nonoffsettable, _min_monthly_charge
         )
         m_net_bill = max(_energy_due + _nonoffsettable, _min_monthly_charge)
+        _ecc_leftover_surplus += (m_export_credit - _credit_used)
 
         monthly_rows.append({
             "month": month_num,
@@ -359,10 +364,13 @@ def run_ecc_billing_simulation(
         })
 
     # NEM-3 / NBT year-end NSC true-up. Mirrors the custom-engine NEM-3 path
-    # so ECC results follow the same tariff mechanics (D.22-12-056).
+    # so ECC results follow the same tariff mechanics (D.22-12-056). The
+    # leftover surplus (export credit never consumed against energy) bounds the
+    # clawback — without it the cap defaulted to 0 and NSC never applied (#26).
     if nsc_rate > 0:
         _apply_nbt_nsc_true_up(
             monthly_rows, import_kwh, export_kwh, nsc_rate, min_monthly_charge,
+            banked_surplus=_ecc_leftover_surplus,
         )
 
     monthly_summary = pd.DataFrame(monthly_rows)

@@ -492,3 +492,32 @@ class TestEccCreditOffsetsEnergyOnly:
             # demand + fixed = 30 is preserved; credit only erased the energy.
             assert row["net_bill"] >= row["total_demand_charge"] + row["fixed_charge"] - TOL
             assert row["net_bill"] == pytest.approx(30.0, abs=0.5)
+
+
+class TestEccNbtNscTrueUp:
+    """ECC must apply the NEM-3/NBT year-end NSC clawback for a net exporter.
+    Previously it passed no banked_surplus, so the clawback was always 0 (#26)."""
+
+    def test_nsc_applied_for_net_exporter(self):
+        load = _make_load_series(1.0)
+        solar = _make_solar_series(20.0)            # heavy export -> net exporter
+        export = _make_export_rates(0.10)           # avg ACC ~0.10
+        calc = _mock_cost_calculator(energy_per_month=100.0,
+                                     demand_per_month=20.0,
+                                     fixed_per_month=10.0)
+        result = run_ecc_billing_simulation(
+            load, solar, calc, export, nsc_rate=0.02,   # NSC < avg ACC
+        )
+        assert result.annual_export_kwh > result.annual_import_kwh   # net exporter
+        # The clawback (avg ACC -> wholesale NSC on surplus) is now applied.
+        assert result.annual_nsc_adjustment > TOL
+        dec = result.monthly_summary[result.monthly_summary["month"] == 12].iloc[0]
+        assert dec["nsc_adjustment"] > TOL
+
+    def test_no_nsc_for_net_consumer(self):
+        load = _make_load_series(10.0)
+        solar = _make_solar_series(3.0)             # net consumer
+        export = _make_export_rates(0.10)
+        calc = _mock_cost_calculator()
+        result = run_ecc_billing_simulation(load, solar, calc, export, nsc_rate=0.02)
+        assert abs(result.annual_nsc_adjustment) < TOL

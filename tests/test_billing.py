@@ -878,3 +878,39 @@ class TestNem3SeasonalProjectionTieOut:
             )
         for _, row in mon[mon["Year"] == 3].iterrows():
             assert row["Net Bill ($)"] >= row["Demand ($)"] - TOL
+
+
+class TestDegradationProjectionTieOut:
+    """With solar degradation on, the monthly projection must still tie to the
+    annual projection. The two builders previously used different degradation
+    models (annual waterfall vs lumped net_delta + no monthly energy term), so
+    they drifted as the array degraded. Issue #25."""
+
+    @pytest.mark.parametrize("regime", ["NEM-1", "NEM-2", "NEM-3"])
+    def test_tie_out_with_degradation(self, regime):
+        from modules.outputs import build_annual_projection, _build_multiyear_monthly_df
+        tariff = _make_tou_tariff(peak_rate=0.40, offpeak_rate=0.10, fixed_monthly=10.0)
+        # Net consumer with real midday export (so degradation shifts export->import).
+        load = _const_series(20.0)
+        solar = _diurnal_series(60.0, 0.0)
+        export_rates = _const_series(0.06)
+        r = run_billing_simulation(
+            load, solar, tariff, export_rates, nem_regime=regime,
+            nbc_rate=(0.02 if regime == "NEM-2" else 0.0), nsc_rate=0.0,
+            billing_option="MBO",
+        )
+        YEARS, ESC, DEGR, LOADG = 12, 3.0, 2.0, 1.0
+        ann = build_annual_projection(
+            r, system_cost=0.0, rate_escalator_pct=ESC, load_escalator_pct=LOADG,
+            years=YEARS, nem_regime_1=regime, degradation_pct=DEGR,
+        )
+        mon = _build_multiyear_monthly_df(
+            r, rate_escalator_pct=ESC, load_escalator_pct=LOADG,
+            years=YEARS, nem_regime_1=regime, degradation_pct=DEGR,
+        )
+        for y in range(1, YEARS + 1):
+            annual_bill = float(ann[ann["Year"] == y]["Bill w/ Solar ($)"].iloc[0])
+            monthly_sum = float(mon[mon["Year"] == y]["Net Bill ($)"].sum())
+            assert abs(annual_bill - monthly_sum) < 1.0, (
+                f"{regime} year {y}: annual {annual_bill:.2f} vs monthly {monthly_sum:.2f}"
+            )

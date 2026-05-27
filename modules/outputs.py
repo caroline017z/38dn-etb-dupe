@@ -413,6 +413,41 @@ def _resolve_regime_context(
             multiyear_start, multiyear_max, export_cagr)
 
 
+def _degrade_year_volumes(
+    year1_load: float, year1_solar: float, year1_export: float, year1_import: float,
+    load_factor: float, solar_factor: float,
+) -> tuple[float, float, float]:
+    """Project a year's import/export kWh under load growth + solar degradation.
+
+    Splits lost solar into lost-export vs lost-self-consumption by the Year-1
+    mix, routes extra load against remaining export first, and raises imports by
+    the self-consumption shortfall. Returns
+    ``(yr_import, yr_export, lost_self_from_degrad)``.
+
+    Shared by the annual (`_compute_year_row`) and monthly
+    (`_build_multiyear_monthly_df`) projection builders so their volume
+    trajectories — and therefore `import_ratio` / `volume_ratio` — match exactly.
+    Previously the monthly builder used a cruder lumped `net_delta`, so the two
+    views drifted apart once `degradation_pct > 0`.
+    """
+    if year1_solar > 0:
+        self_consumption_frac = (year1_solar - year1_export) / year1_solar
+        export_frac = year1_export / year1_solar
+    else:
+        self_consumption_frac = 1.0
+        export_frac = 0.0
+
+    lost_solar = year1_solar * (1.0 - solar_factor)
+    extra_load = year1_load * (load_factor - 1.0)
+    lost_export_from_degrad = lost_solar * export_frac
+    lost_self_from_degrad = lost_solar * self_consumption_frac
+    lost_export_from_load = min(extra_load, max(0.0, year1_export - lost_export_from_degrad))
+
+    yr_export = max(0.0, year1_export - lost_export_from_degrad - lost_export_from_load)
+    yr_import = year1_import + lost_self_from_degrad + max(0.0, extra_load - lost_export_from_load)
+    return yr_import, yr_export, lost_self_from_degrad
+
+
 def _compute_year_row(
     yr: int,
     *,
@@ -476,22 +511,10 @@ def _compute_year_row(
     yr_load_kwh = year1_load_kwh * load_factor
     yr_solar_kwh = year1_solar_kwh * solar_factor
 
-    year1_self_consumption = year1_solar_kwh - year1_export_kwh
-    if year1_solar_kwh > 0:
-        self_consumption_frac = year1_self_consumption / year1_solar_kwh
-        export_frac = year1_export_kwh / year1_solar_kwh
-    else:
-        self_consumption_frac = 1.0
-        export_frac = 0.0
-
-    lost_solar = year1_solar_kwh * (1.0 - solar_factor)
-    extra_load = year1_load_kwh * (load_factor - 1)
-    lost_export_from_degrad = lost_solar * export_frac
-    lost_self_from_degrad = lost_solar * self_consumption_frac
-    lost_export_from_load = min(extra_load, max(0, year1_export_kwh - lost_export_from_degrad))
-
-    yr_export_kwh = max(0, year1_export_kwh - lost_export_from_degrad - lost_export_from_load)
-    yr_import_kwh = year1_import_kwh + lost_self_from_degrad + max(0, extra_load - lost_export_from_load)
+    yr_import_kwh, yr_export_kwh, lost_self_from_degrad = _degrade_year_volumes(
+        year1_load_kwh, year1_solar_kwh, year1_export_kwh, year1_import_kwh,
+        load_factor, solar_factor,
+    )
 
     export_volume_ratio = yr_export_kwh / year1_export_kwh if year1_export_kwh > 0 else 0.0
     yr_export_peak_kwh = year1_export_peak_kwh * export_volume_ratio
@@ -1144,12 +1167,18 @@ def _project_single_year_monthly(
     month_tou_energy, raw_month_energy, month_wtd_rate,
     month_export_credit_override,
     _any_nsc_regime: bool = False,
+    degr_energy_adj: float = 0.0,
 ):
     """Project one year's 12-month rows for _build_multiyear_monthly_df.
+
+    ``degr_energy_adj`` is the year's TOU degradation energy adjustment ($),
+    distributed across months by load share so the monthly view ties to the
+    annual projection when solar degrades.
 
     Returns:
         list[dict] -- one dict per month in this year.
     """
+    _year1_total_load = float(ms["load_kwh"].sum())
     rows = []
     for _, mrow in ms.iterrows():
         m = int(mrow["month"])
@@ -1192,7 +1221,13 @@ def _project_single_year_monthly(
         #   NEM-3/NVBT: raw import energy cost (no netting; exports valued separately)
         _is_tou_netted = active_regime in ("NEM-1", "NEM-2") or active_regime.startswith("NEM-A")
         if _is_tou_netted:
-            r["Energy ($)"] = round(month_tou_energy[m] * load_factor * rate_factor * _prorate, 2)
+            _mo_load_share = (
+                float(mrow["load_kwh"]) / _year1_total_load if _year1_total_load > 0 else 0.0
+            )
+            r["Energy ($)"] = round(
+                (month_tou_energy[m] * load_factor * rate_factor
+                 + degr_energy_adj * _mo_load_share) * _prorate, 2
+            )
         else:
             r["Energy ($)"] = round(raw_month_energy[m] * import_ratio * rate_factor * _prorate, 2)
         r["Demand ($)"] = round(mrow["total_demand_charge"] * load_factor * rate_factor, 2)
@@ -1427,6 +1462,14 @@ def _build_multiyear_monthly_df(
 
     year1_import_total = sum(month_import_kwh.values())
 
+    # Blended import rate ($/kWh) for valuing kWh that shift export->import as
+    # solar degrades — mirrors build_annual_projection so the degradation energy
+    # adjustment is identical in both views.
+    _blended_import_rate = (
+        sum(raw_month_energy.values()) / year1_import_total
+        if year1_import_total > 0 else 0.0
+    )
+
     # Precompute per-month weighted average retail rate (import-weighted)
     month_wtd_rate: dict[int, float] = {}
     for month in range(1, 13):
@@ -1449,14 +1492,19 @@ def _build_multiyear_monthly_df(
             rate_factor = 1.0 + rate_mult * (yr - 1)
             load_factor = 1.0 + load_mult * (yr - 1)
         solar_factor = (1.0 - degrad_rate) ** (yr - 1)
-        net_delta = year1_load * (load_factor - 1) + year1_solar * (1.0 - solar_factor)
-        yr_export_total = max(0, year1_export - net_delta)
+        # Use the SAME degradation waterfall as the annual builder so the two
+        # views' import/export trajectories match (was a lumped net_delta that
+        # drifted once degradation_pct > 0 — see issue #25).
+        yr_import_total, yr_export_total, _lost_self_from_degrad = _degrade_year_volumes(
+            year1_load, year1_solar, year1_export, year1_import_total,
+            load_factor, solar_factor,
+        )
         volume_ratio = yr_export_total / year1_export if year1_export > 0 else 0.0
-
-        # Import volume ratio (for scaling raw energy cost under NEM-3)
-        absorbed = year1_export - yr_export_total
-        yr_import_total = year1_import_total + (net_delta - absorbed)
         import_ratio = yr_import_total / year1_import_total if year1_import_total > 0 else load_factor
+        # Degradation energy adjustment for TOU regimes ($), distributed across
+        # months by load share inside _project_single_year_monthly. Mirrors the
+        # annual builder's degradation_energy_adj so the views tie out.
+        _degr_energy_adj = _lost_self_from_degrad * _blended_import_rate * rate_factor
 
         # Determine active regime for this year
         active_regime, active_multiyear, active_my_start, active_my_max, active_cagr = (
@@ -1482,6 +1530,7 @@ def _build_multiyear_monthly_df(
             month_tou_energy, raw_month_energy, month_wtd_rate,
             month_export_credit_override,
             _any_nsc_regime=_any_nsc_regime,
+            degr_energy_adj=_degr_energy_adj,
         )
         rows.extend(yr_rows)
 
