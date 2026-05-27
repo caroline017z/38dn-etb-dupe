@@ -2151,9 +2151,20 @@ def _init_session_state():
         "existing_solar_nema_meters": [],
         "custom_rate_extracted": None,
         "custom_rate_warnings": None,
+        # Master Rate Switch toggle (UI grouping). When off, the projection
+        # is a plain single-tariff run (rate_shift_enabled False, regime-2
+        # keys None). rate_shift_enabled is derived from the "At Repower /
+        # project start" trigger; regime_2_* from the "At NEM switch" trigger.
+        "rate_switch_enabled": False,
         "rate_shift_enabled": False,
         "rate_shift_old_tariff": None,
         "nema_rate_shift_tariffs": {},
+        # Post-transition (regime 2) tariff overrides. None ⇒ reuse the
+        # regime-1 tariff (default, backwards compatible). When set AND
+        # nem_switch is on, the projection re-bills the post-switch years
+        # on this second tariff.
+        "regime_2_tariff": None,
+        "regime_2_ecc_calculator": None,
     }.items():
         if key not in st.session_state:
             st.session_state[key] = default
@@ -2309,6 +2320,43 @@ if st.session_state.get("show_all_sims"):
         st.session_state["show_all_sims"] = False
         st.rerun()
     st.stop()
+
+
+def _render_custom_tariff_loader(
+    *,
+    select_label: str,
+    button_label: str,
+    sel_key: str,
+    button_key: str,
+    pending_key: str,
+    target_key: str,
+    loaded_prefix: str,
+    empty_warning: str,
+    select_help: str | None = None,
+    no_rates_caption: str = "Fetch rates above first to select a tariff.",
+) -> None:
+    """Render the Custom-engine "rate selectbox + Load button + status" loader.
+
+    Used in several sidebar spots (original/pre-switch rate, post-NEM switch
+    rate, and the Load-Profiles mirror) that were previously copy-pasted — the
+    source of the label drift the reviewers flagged. On click it stashes the
+    chosen rate label in ``st.session_state[pending_key]``; the shared
+    pending-load handler does the actual fetch. Status reads from
+    ``st.session_state[target_key]`` (the loaded TariffSchedule, or None).
+    """
+    rates = st.session_state.get("available_rates")
+    if rates:
+        options = {f"{r['name']}": r["label"] for r in rates}
+        selected = st.selectbox(select_label, list(options.keys()), key=sel_key, help=select_help)
+        if st.button(button_label, key=button_key):
+            st.session_state[pending_key] = options[selected]
+    else:
+        st.caption(no_rates_caption)
+    current = st.session_state.get(target_key)
+    if current is not None:
+        st.success(f"{loaded_prefix}: {current.name}")
+    else:
+        st.warning(empty_warning)
 
 
 def _render_top_bar():
@@ -2669,6 +2717,72 @@ def _render_top_bar():
     # ---- LOAD PROFILES SECTION ----
     if st.session_state["active_mgmt_tab"] == "Load Profiles":
         with st.expander("Load Profiles", expanded=True):
+            # ================================================================
+            # Per-NEM-period tariff (mirrors the sidebar Section-2 selector).
+            # Surfaced here so the post-transition tariff can be set alongside
+            # the load profile. Only relevant when the NEM switch is enabled.
+            # Writes into the same regime_2_tariff / regime_2_ecc_calculator
+            # session keys via the shared pending-load handlers.
+            # ================================================================
+            if (st.session_state.get("nem_switch")
+                    and st.session_state.get("rate_switch_enabled")
+                    and st.session_state.get("rate_switch_at_nem")):
+                _lp_engine = st.session_state.get("billing_engine", "Custom")
+                st.markdown("**Post-NEM switch rate**")
+                st.caption(
+                    "After the NEM regime switch, the projection re-bills on this tariff. "
+                    "Leave on 'Same as regime 1' to reuse the regime-1 tariff. "
+                    "Mirrors the sidebar Rate Switch → At NEM switch loader."
+                )
+                _lp_r2_mode = st.radio(
+                    "Post-NEM switch tariff",
+                    ["Same as regime 1", "Load a different tariff"],
+                    key="lp_regime2_tariff_mode",
+                    horizontal=True,
+                )
+                if _lp_r2_mode == "Same as regime 1":
+                    if _lp_engine == "Custom":
+                        st.session_state["regime_2_tariff"] = None
+                    else:
+                        st.session_state["regime_2_ecc_calculator"] = None
+                else:
+                    if _lp_engine == "Custom":
+                        _render_custom_tariff_loader(
+                            select_label="Select Post-NEM switch Rate Schedule",
+                            button_label="Load Post-NEM switch Tariff",
+                            sel_key="lp_regime2_tariff_sel",
+                            button_key="lp_regime2_tariff_load_btn",
+                            pending_key="_pending_regime2_tariff_load",
+                            target_key="regime_2_tariff",
+                            loaded_prefix="Post-NEM switch tariff loaded",
+                            empty_warning="No post-NEM switch tariff loaded — will reuse the regime-1 tariff.",
+                            no_rates_caption="Fetch rates in the sidebar (Section 4) first to select a tariff.",
+                        )
+                    else:
+                        _lp_r2_saved = _list_saved(ECC_TARIFFS_DIR, ".json")
+                        if _lp_r2_saved:
+                            _lp_r2_ecc_sel = st.selectbox(
+                                "Select Saved Post-NEM switch Tariff", _lp_r2_saved,
+                                key="lp_regime2_ecc_saved_sel",
+                            )
+                            if st.button("Load Post-NEM switch Tariff", key="lp_regime2_ecc_load_btn") and _lp_r2_ecc_sel:
+                                st.session_state["_pending_regime2_ecc_saved_path"] = os.path.join(
+                                    ECC_TARIFFS_DIR, _lp_r2_ecc_sel + ".json"
+                                )
+                        else:
+                            st.caption("No saved ECC tariffs — add one via the sidebar or Custom Rates.")
+                        if st.session_state.get("regime_2_ecc_calculator") is not None:
+                            st.success("Post-NEM switch ECC tariff loaded.")
+                st.markdown("---")
+            else:
+                # Rate Switch → "At NEM switch" is NOT armed (master off, trigger
+                # off, or NEM Switch off). The post-transition re-bill consumer
+                # keys off regime_2_tariff being set, so a tariff loaded here
+                # earlier must not linger — clear it, mirroring the sidebar's
+                # clear so the two writers can't diverge and silently mis-price.
+                st.session_state["regime_2_tariff"] = None
+                st.session_state["regime_2_ecc_calculator"] = None
+
             # ================================================================
             # A. Saved Load Profiles — unified dropdown (CSV + NEM-A)
             # ================================================================
@@ -4221,53 +4335,108 @@ def _render_sidebar():
                         else:
                             st.warning("No tariff loaded for this meter.")
 
-        # --- Rate Shift Analysis ---
+        # ================================================================
+        # --- Rate Switch ---
+        # Single master toggle. When OFF, behavior is identical to a plain
+        # single-tariff projection: rate_shift_enabled=False and the
+        # regime-2 tariff keys are cleared (see end of the NEM-switch block).
+        # When ON, two INDEPENDENT triggers control where the rate changes:
+        #   (a) "At Repower / project start" → the existing rate-shift
+        #       mechanism (rate_shift_enabled + rate_shift_old_tariff /
+        #       rate_shift_old_ecc_calculator), and
+        #   (b) "At NEM switch (year N)" → the regime-2 post-transition
+        #       tariff (regime_2_tariff / regime_2_ecc_calculator). The
+        #       regime-2 LOADER renders inline directly under its trigger
+        #       checkbox below, gated on the rate_switch_at_nem checkbox.
+        # ================================================================
         st.markdown("---")
-        rate_shift_enabled = st.toggle(
-            "Rate Shift Analysis",
-            key="rate_shift_toggle",
-            value=st.session_state.get("rate_shift_enabled", False),
-            help="Compare savings from switching tariffs (e.g., TOU-C to TOU-D). "
-                 "Shows what you would pay on the old rate as a separate baseline.",
+        rate_switch_enabled = st.toggle(
+            "Rate Switch",
+            key="rate_switch_toggle",
+            value=st.session_state.get("rate_switch_enabled", False),
+            help="Model the customer changing tariffs over the project life. "
+                 "Choose where the switch happens: at repower / project start, "
+                 "at the NEM regime transition, or both.",
         )
+        st.session_state["rate_switch_enabled"] = rate_switch_enabled
+
+        # Defaults — overwritten only when Rate Switch is on.
+        rate_switch_at_start = False
+        rate_switch_at_nem = False
+
+        if rate_switch_enabled:
+            st.caption("Switch the rate at:")
+            # Trigger (a): repower / project start — the rate-shift baseline.
+            rate_switch_at_start = st.checkbox(
+                "At Repower / project start",
+                key="rate_switch_at_start",
+                help="Bill an original (pre-switch) tariff as a standalone "
+                     "baseline alongside the Section-4 tariff. Use for a "
+                     "tariff change that takes effect at repower / project start.",
+            )
+            # Trigger (b): NEM transition — the regime-2 tariff. Requires the
+            # NEM Switch (Section 5) to be configured so num_years_1 exists.
+            _nem_switch_on = bool(st.session_state.get("nem_switch"))
+            rate_switch_at_nem = st.checkbox(
+                "At NEM switch year",
+                key="rate_switch_at_nem",
+                disabled=not _nem_switch_on,
+                help="Re-bill the years after the NEM transition on a different "
+                     "tariff. The post-NEM switch loader appears directly below "
+                     "once NEM Switch is enabled.",
+            )
+            if not _nem_switch_on:
+                # A disabled checkbox retains its stored value, so force the
+                # local False when NEM Switch is off (regime-2 keys are also
+                # backstop-cleared downstream, and the LP-tab gate checks
+                # nem_switch too).
+                rate_switch_at_nem = False
+                st.caption("Disabled until NEM Switch is enabled below (Section 5).")
+
+        # --- Trigger (a): original (pre-switch) rate loader ---
+        # Drives the EXISTING rate-shift mechanism. rate_shift_enabled mirrors
+        # the trigger so the engines read it unchanged.
+        rate_shift_enabled = bool(rate_switch_enabled and rate_switch_at_start)
         st.session_state["rate_shift_enabled"] = rate_shift_enabled
+
+        if rate_shift_enabled:
+            st.markdown("**Original rate (pre-switch)**")
 
         if rate_shift_enabled and billing_engine == "Custom":
             _rs_is_nema = st.session_state.get("load_mode") == "NEM-A Aggregation"
 
             if not _rs_is_nema:
-                # Single meter: one old tariff selector
-                if st.session_state["available_rates"]:
-                    _rs_rate_options = {f"{r['name']}": r["label"] for r in st.session_state["available_rates"]}
-                    _rs_selected = st.selectbox(
-                        "Old Rate (pre-switch)",
-                        list(_rs_rate_options.keys()),
-                        key="rate_shift_old_rate_sel",
-                        help="Select the tariff the customer was on before switching.",
-                    )
-                    _rs_label = _rs_rate_options[_rs_selected]
-                    if st.button(
-                        "Load Old Tariff", key="api_call_btn_rate_shift_load",
-                    ):
-                        st.session_state["_pending_rate_shift_load"] = _rs_label
-                else:
-                    st.caption("Fetch rates above first to select an old tariff.")
-
-                _rs_current = st.session_state.get("rate_shift_old_tariff")
-                if _rs_current is not None:
-                    st.success(f"Old tariff loaded: {_rs_current.name}")
+                # Single meter: one original-tariff selector
+                st.caption(
+                    "Select the customer's **original (pre-switch) tariff** below. "
+                    "The analysis shows what the customer would pay on this rate as a "
+                    "separate baseline, alongside the new tariff selected in Section 4."
+                )
+                _render_custom_tariff_loader(
+                    select_label="Original tariff (pre-switch baseline)",
+                    button_label="Load Original Tariff",
+                    sel_key="rate_shift_old_rate_sel",
+                    button_key="api_call_btn_rate_shift_load",
+                    pending_key="_pending_rate_shift_load",
+                    target_key="rate_shift_old_tariff",
+                    loaded_prefix="Original tariff loaded",
+                    empty_warning="No original tariff loaded — rate switch baseline will be unavailable.",
+                    select_help="The tariff the customer is on today, before switching to the "
+                                "Section-4 tariff. Billed as a standalone comparison baseline.",
+                    no_rates_caption="Fetch rates above first to select an original tariff.",
+                )
             else:
-                # NEM-A: per-meter old tariff selectors only (no blanket option)
+                # NEM-A: per-meter original tariff selectors only (no blanket option)
                 _rs_meters = st.session_state.get("nema_meters", [])
                 if _rs_meters and st.session_state["available_rates"]:
-                    st.markdown("**Per-Meter Old Tariffs (NEM-A)**")
+                    st.markdown("**Per-Meter Original Tariffs (NEM-A)**")
                     _rs_nema_tariffs = st.session_state.get("nema_rate_shift_tariffs", {})
                     _rs_all_loaded = True
                     for _rs_i, _rs_m in enumerate(_rs_meters):
-                        with st.expander(f"Old tariff for: {_rs_m['name']}", expanded=(_rs_i not in _rs_nema_tariffs)):
+                        with st.expander(f"Original tariff for: {_rs_m['name']}", expanded=(_rs_i not in _rs_nema_tariffs)):
                             _rs_pmt_options = {f"{r['name']}": r["label"] for r in st.session_state["available_rates"]}
                             _rs_pmt_sel = st.selectbox(
-                                "Old Rate", list(_rs_pmt_options.keys()),
+                                "Original Rate", list(_rs_pmt_options.keys()),
                                 key=f"nema_rs_tariff_sel_{_rs_i}",
                             )
                             _rs_pmt_label = _rs_pmt_options[_rs_pmt_sel]
@@ -4279,21 +4448,86 @@ def _render_sidebar():
                             else:
                                 _rs_all_loaded = False
                     if not _rs_all_loaded:
-                        st.warning("Load an old tariff for each meter to enable rate shift analysis.")
+                        st.warning("Load an original tariff for each meter to enable the rate switch baseline.")
                 else:
                     st.caption("Fetch rates and configure NEM-A meters first.")
 
         elif rate_shift_enabled and billing_engine == "ECC":
-            st.caption("Rate shift with ECC engine: upload a second ECC tariff JSON for the old rate.")
+            st.caption("Original rate with the ECC engine: upload a second ECC tariff JSON for the pre-switch rate.")
             ecc_rs_upload = st.file_uploader(
-                "Old Rate Tariff JSON (ECC)", type=["json"], key="ecc_rs_json_upload",
+                "Original Rate Tariff JSON (ECC)", type=["json"], key="ecc_rs_json_upload",
             )
-            if st.button("Load Old ECC Tariff", key="ecc_rs_load_btn") and ecc_rs_upload:
+            if st.button("Load Original ECC Tariff", key="ecc_rs_load_btn") and ecc_rs_upload:
                 st.session_state["_pending_ecc_rs_load"] = ecc_rs_upload
 
             _rs_ecc_current = st.session_state.get("rate_shift_old_ecc_calculator")
             if _rs_ecc_current is not None:
-                st.success("Old ECC tariff loaded.")
+                st.success("Original ECC tariff loaded.")
+
+        # --- Trigger (b): post-NEM switch rate loader ---
+        # Co-located directly under the "At NEM switch year" trigger above (it
+        # used to live down in Section 5). Gated on rate_switch_at_nem, which is
+        # forced False whenever Rate Switch is off OR NEM Switch is off (see the
+        # checkbox backstop above), so the else-clear is the single place that
+        # zeroes the regime-2 keys on every not-armed path. The keys written
+        # (regime_2_tariff / regime_2_ecc_calculator) are unchanged. Reads
+        # available_rates (fetched in Section 4, above) and nem_switch from
+        # session_state.
+        if rate_switch_at_nem:
+            st.markdown("**Post-NEM switch rate**")
+            st.caption(
+                "Re-bill the post-transition years (after the NEM switch year) "
+                "on a different tariff. Leave unloaded to reuse the Section-4 tariff."
+            )
+            if billing_engine == "Custom":
+                _render_custom_tariff_loader(
+                    select_label="Select Post-NEM switch Rate Schedule",
+                    button_label="Load Post-NEM switch Tariff",
+                    sel_key="regime2_tariff_sel",
+                    button_key="regime2_tariff_load_btn",
+                    pending_key="_pending_regime2_tariff_load",
+                    target_key="regime_2_tariff",
+                    loaded_prefix="Post-NEM switch tariff loaded",
+                    empty_warning="No post-NEM switch tariff loaded — will reuse the regime-1 tariff.",
+                    select_help="The tariff the customer moves to after the NEM regime switch.",
+                    no_rates_caption="Fetch rates above first to select a post-NEM switch tariff.",
+                )
+            else:
+                _r2_saved_ecc = _list_saved(ECC_TARIFFS_DIR, ".json")
+                _r2_ecc_src = st.radio(
+                    "Post-NEM switch tariff source",
+                    (["Use Saved Tariff"] if _r2_saved_ecc else []) + ["Upload JSON"],
+                    key="regime2_ecc_source",
+                    horizontal=True,
+                )
+                if _r2_ecc_src == "Use Saved Tariff":
+                    _r2_sel_ecc = st.selectbox(
+                        "Select Saved Post-NEM switch Tariff", _r2_saved_ecc,
+                        key="regime2_ecc_saved_sel",
+                    )
+                    if st.button("Load Post-NEM switch Tariff", key="regime2_ecc_saved_load_btn") and _r2_sel_ecc:
+                        st.session_state["_pending_regime2_ecc_saved_path"] = os.path.join(
+                            ECC_TARIFFS_DIR, _r2_sel_ecc + ".json"
+                        )
+                else:
+                    _r2_ecc_upload = st.file_uploader(
+                        "Upload Post-NEM switch Tariff JSON", type=["json"],
+                        key="regime2_ecc_json_upload",
+                    )
+                    if st.button("Load Post-NEM switch Tariff", key="regime2_ecc_upload_load_btn") and _r2_ecc_upload:
+                        st.session_state["_pending_regime2_ecc_upload"] = _r2_ecc_upload
+                if st.session_state.get("regime_2_ecc_calculator") is not None:
+                    st.success("Post-NEM switch ECC tariff loaded.")
+                else:
+                    st.warning("No post-NEM switch ECC tariff loaded — will reuse the regime-1 tariff.")
+        else:
+            # Trigger off (Rate Switch off, "At NEM switch" off, or NEM Switch
+            # off — which forces the trigger False above) — clear the regime-2
+            # tariff so the post-switch years reuse the regime-1 tariff (default,
+            # single-tariff path). This is the single clear that covers every
+            # not-armed path, including NEM Switch being off.
+            st.session_state["regime_2_tariff"] = None
+            st.session_state["regime_2_ecc_calculator"] = None
 
         st.markdown("---")
 
@@ -4453,6 +4687,18 @@ def _render_sidebar():
                 flat_rate_2 = None
             else:
                 export_method_2, selected_export_profile_2, flat_rate_2 = _render_export_rate_widgets("_2")
+
+            # NOTE: the Post-NEM switch tariff loader (Rate Switch → "At NEM
+            # switch") now renders up in the Rate Switch section, directly under
+            # its trigger checkbox. Its else-clear there zeroes the regime-2 keys
+            # on every not-armed path. The backstop below is retained as
+            # defense-in-depth for the NEM-Switch-off case.
+
+        # When the NEM switch is off, a regime-2 tariff is meaningless — clear it
+        # so a stale selection can't leak into a single-regime projection.
+        if not nem_switch:
+            st.session_state["regime_2_tariff"] = None
+            st.session_state["regime_2_ecc_calculator"] = None
 
         # --- 6. Battery (BESS) ---
         st.subheader("6. BESS")
@@ -5307,6 +5553,45 @@ if st.session_state.get("_pending_ecc_rs_load"):
             st.sidebar.success("Old ECC tariff loaded for rate shift.")
         except Exception as e:
             st.error(f"Error loading old ECC tariff: {e}")
+
+# --- Regime-2 (post-transition) tariff load handlers ---
+if st.session_state.get("_pending_regime2_tariff_load"):
+    _r2_load_label = st.session_state.pop("_pending_regime2_tariff_load")
+    with st.spinner("Loading post-transition tariff..."):
+        try:
+            _r2_tariff = fetch_tariff_detail(_r2_load_label)
+            st.session_state["regime_2_tariff"] = _r2_tariff
+            st.sidebar.success(f"Post-transition tariff loaded: {_r2_tariff.name}")
+        except Exception as e:
+            st.error(f"Error loading post-transition tariff: {e}")
+
+if st.session_state.get("_pending_regime2_ecc_saved_path"):
+    _r2_ecc_path = st.session_state.pop("_pending_regime2_ecc_saved_path")
+    if _r2_ecc_path and os.path.isfile(_r2_ecc_path):
+        with st.spinner("Loading post-transition ECC tariff..."):
+            try:
+                _r2_calc, _r2_tdata = load_ecc_tariff_from_json(_r2_ecc_path)
+                st.session_state["regime_2_ecc_calculator"] = _r2_calc
+                st.session_state["regime_2_ecc_tariff_data"] = _r2_tdata
+                st.sidebar.success("Post-transition ECC tariff loaded.")
+            except Exception as e:
+                st.error(f"Error loading post-transition ECC tariff: {e}")
+
+if st.session_state.get("_pending_regime2_ecc_upload"):
+    _r2_ecc_file = st.session_state.pop("_pending_regime2_ecc_upload")
+    with st.spinner("Loading post-transition ECC tariff..."):
+        try:
+            import tempfile
+            _r2_tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".json")
+            _r2_tmp.write(_r2_ecc_file.read())
+            _r2_tmp.close()
+            _r2_calc, _r2_tdata = load_ecc_tariff_from_json(_r2_tmp.name)
+            os.remove(_r2_tmp.name)
+            st.session_state["regime_2_ecc_calculator"] = _r2_calc
+            st.session_state["regime_2_ecc_tariff_data"] = _r2_tdata
+            st.sidebar.success("Post-transition ECC tariff loaded.")
+        except Exception as e:
+            st.error(f"Error loading post-transition ECC tariff: {e}")
 
 # --- ECC tariff fetch/load handlers ---
 if ecc_fetch_btn:
@@ -6186,6 +6471,82 @@ def _render_results():
         "nsc_rate_2": st.session_state.get("nsc_rate_2", 0.0) if nem_switch else 0.0,
     }
     _rs_old_baseline_for_proj = result.old_rate_annual_baseline if result.old_rate_annual_baseline is not None else None
+
+    # --- Regime-2 re-billing orchestration ---
+    # When the NEM switch is on AND a distinct post-transition tariff is set,
+    # run a SECOND year-1-style billing sim under tariff #2 + nem_regime_2 +
+    # the regime-2 export rates. The resulting BillingResult is handed to the
+    # engine as result_regime2 so the post-switch years re-bill on it. When no
+    # distinct regime-2 tariff is selected, result_regime2 stays None (no
+    # behavior change — the engine reuses the regime-1 result).
+    _result_regime2 = None
+    if nem_switch:
+        try:
+            # Regime-2 NEM params (mirror the year-1 NEM param derivation, but
+            # for the second regime).
+            _r2_regime = nem_regime_2
+            _r2_nbc = st.session_state.get("nbc_rate_2", 0.0) if _r2_regime == "NEM-2" else 0.0
+            _r2_nsc = st.session_state.get("nsc_rate_2", st.session_state.get("nsc_rate", NSC_DEFAULT_RATE))
+            _r2_billing = st.session_state.get("billing_option_2", "ABO") if _r2_regime in ("NEM-1", "NEM-2") else "ABO"
+
+            if billing_engine == "Custom" and st.session_state.get("regime_2_tariff") is not None:
+                # Regime-2 export series: prefer the loaded Section-2 8760 series,
+                # else a zeros placeholder (NEM-1/2 value exports at retail TOU).
+                _r2_export = st.session_state.get("export_rates_2")
+                if _r2_export is None:
+                    _r2_dt = pd.date_range(start=f"{cod_year}-01-01 00:00", periods=8760, freq="h")
+                    _r2_export = pd.Series(np.zeros(8760), index=_r2_dt, name="export_rate_per_kwh")
+                # Build base inputs from session, then swap in tariff #2,
+                # regime-2 export rates, and regime-2 NEM params. Mirror the
+                # ACTIVE scenario's battery treatment: if the viewed result is
+                # the with-battery result, re-dispatch the battery under
+                # tariff #2 and take .billing_result; otherwise PV-only. This
+                # prevents the post-transition years from discontinuously losing
+                # battery savings for a BESS project.
+                _r2_use_battery = (
+                    result is not None
+                    and result is st.session_state.get("billing_result_batt")
+                )
+                _r2_inputs = inputs_from_session_state(
+                    st.session_state,
+                    nem_regime=_r2_regime,
+                    nbc_rate=_r2_nbc,
+                    nsc_rate=_r2_nsc,
+                    billing_option=_r2_billing,
+                    export_rates_placeholder=_r2_export,
+                    include_battery=_r2_use_battery,
+                )
+                _r2_replace = {
+                    "tariff": st.session_state["regime_2_tariff"],
+                    "export_rates_8760": _r2_export,
+                }
+                if _r2_use_battery:
+                    _r2_replace["battery_config"] = st.session_state.get("battery_config")
+                    _r2_replace["battery_capacity_kwh"] = st.session_state.get("battery_capacity_kwh", 0)
+                _r2_inputs = _dc_replace(_r2_inputs, **_r2_replace)
+                _r2_sim = run_simulation(_r2_inputs)
+                _result_regime2 = (
+                    _r2_sim.billing_result if _r2_use_battery else _r2_sim.pv_only_result
+                )
+
+            elif billing_engine == "ECC" and st.session_state.get("regime_2_ecc_calculator") is not None:
+                _r2_ecc_export = st.session_state.get("export_rates_2")
+                if _r2_ecc_export is None:
+                    _r2_ecc_dt = pd.date_range(start=f"{cod_year}-01-01 00:00", periods=8760, freq="h")
+                    _r2_ecc_export = pd.Series(np.zeros(8760), index=_r2_ecc_dt, name="export_rate_per_kwh")
+                _result_regime2 = run_ecc_billing_simulation(
+                    load_8760=st.session_state["load_8760"],
+                    production_8760=st.session_state["production_8760"],
+                    cost_calculator=st.session_state["regime_2_ecc_calculator"],
+                    export_rates_8760=_r2_ecc_export,
+                    tariff_data=st.session_state.get("regime_2_ecc_tariff_data"),
+                    nsc_rate=_r2_nsc,
+                    min_monthly_charge=getattr(st.session_state.get("tariff"), "min_monthly_charge", 0.0),
+                )
+        except Exception as _r2_err:
+            st.warning(f"Post-transition re-billing failed; reusing regime-1 tariff. ({_r2_err})")
+            _result_regime2 = None
+
     _main_projection = build_annual_projection(
         result=result,
         system_cost=system_cost,
@@ -6197,6 +6558,7 @@ def _render_results():
         compound_escalation=compound_escalation,
         rate_shift_old_baseline=_rs_old_baseline_for_proj,
         existing_solar_offset_kwh=_es_offset_annual,
+        result_regime2=_result_regime2,
         **_common_nem_kw,
     )
 
@@ -7202,6 +7564,7 @@ def _render_results():
                 cod_date=cod_date,
                 degradation_pct=annual_degradation_pct,
                 compound_escalation=compound_escalation,
+                result_regime2=_result_regime2,
             )
             it_df = build_indexed_tariff_monthly(it_monthly, **_it_kw)
             it_display = it_df.copy()
