@@ -562,7 +562,10 @@ def _compute_year_row(
         if nem_regime_2 and num_years_1 and yr > num_years_1 and nbc_rate_2 > 0:
             yr_nbc = nbc_rate_2 * yr_import_kwh * rate_factor
         else:
-            yr_nbc = year1_nbc * rate_factor if year1_nbc > 0 else 0.0
+            # NBC is volumetric on net import — scale by import volume AND rate
+            # (matches demand/energy and the regime-2 path above), not rate alone
+            # (#28). import_ratio carries degradation's export->import shift too.
+            yr_nbc = year1_nbc * import_ratio * rate_factor if year1_nbc > 0 else 0.0
     else:
         yr_nbc = 0.0
 
@@ -613,7 +616,7 @@ def _compute_year_row(
             m_credit = tou_monthly_credit_y1.get(mi + 1, 0.0) * rate_factor * volume_ratio
             m_demand = float(ms_row["total_demand_charge"]) * load_factor * rate_factor
             m_fixed = float(ms_row["fixed_charge"]) * rate_factor
-            m_nbc = float(ms_row.get("nbc_charge", 0.0)) * rate_factor if _has_nbc_in_regime else 0.0
+            m_nbc = float(ms_row.get("nbc_charge", 0.0)) * import_ratio * rate_factor if _has_nbc_in_regime else 0.0
             # NSC clawback + regime-2 NSC charge both land on month 12 of the bill
             m_nsc = (yr_nsc_clawback + yr_nsc) if mi == 11 else 0.0
             monthly_components.append({
@@ -1183,7 +1186,14 @@ def _project_single_year_monthly(
     for _, mrow in ms.iterrows():
         m = int(mrow["month"])
 
-        # Skip pre-COD months for Year 1
+        # Skip pre-COD months for Year 1. NOTE (#31): the monthly view shows the
+        # ACTUAL partial first calendar year (pre-COD months dropped, COD month
+        # pro-rated), while build_annual_projection's Year 1 reports a full year
+        # of steady-state operation (result.annual_bill_with_solar). For a
+        # mid-year COD the monthly Y1 sum intentionally will NOT equal the annual
+        # Y1 — they answer different questions (actual first-year bills vs
+        # full-year economics for savings/payback). This is by design; do not
+        # "reconcile" them by pro-rating the annual Y1.
         if yr == 1 and cod_date and m < _cod_month:
             continue
 
@@ -1236,7 +1246,7 @@ def _project_single_year_monthly(
         # NBC: only applies during NEM-2 regime years (including NEM-A (NEM-2))
         _m_nbc = 0.0
         if active_regime in ("NEM-2", "NEM-A (NEM-2)") and "nbc_charge" in ms.columns and mrow["nbc_charge"] > 0:
-            _m_nbc = round(mrow["nbc_charge"] * rate_factor, 2)
+            _m_nbc = round(mrow["nbc_charge"] * import_ratio * rate_factor, 2)
         if _any_nem2:
             r["NBC ($)"] = _m_nbc
 

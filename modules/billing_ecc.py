@@ -286,13 +286,18 @@ def run_ecc_billing_simulation(
         df_solar, column_data="consumption", monthly_detailed=True
     ) or {}
 
-    # Extract minimum monthly charge from tariff data
+    # Monthly bill floors at the LARGER of the tariff's minimum-bill charge and
+    # its fixed monthly charge. Previously fixedmonthlycharge won outright and a
+    # distinct (higher) minmonthlycharge was ignored, so a real minimum-bill
+    # floor never applied (#30). max() is safe: the fixed charge is already a
+    # bill component (m_fixed_cost), so flooring at it is at worst redundant.
     _min_monthly_charge = 0.0
     if tariff_data and len(tariff_data) > 0:
         _td = tariff_data[0] if isinstance(tariff_data, list) else tariff_data
-        _min_monthly_charge = float(_td.get("fixedmonthlycharge", 0) or 0)
-        if _min_monthly_charge == 0:
-            _min_monthly_charge = float(_td.get("minmonthlycharge", 0) or 0)
+        _min_monthly_charge = max(
+            float(_td.get("minmonthlycharge", 0) or 0),
+            float(_td.get("fixedmonthlycharge", 0) or 0),
+        )
 
     # --- Parse monthly ECC bills into our monthly_summary format ---
     monthly_rows = []
