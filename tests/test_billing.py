@@ -15,7 +15,11 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from modules.tariff import TariffSchedule
-from modules.billing import run_billing_simulation, _calc_baseline_bill
+from modules.billing import (
+    run_billing_simulation,
+    _calc_baseline_bill,
+    simulate_year_under_billing_option,
+)
 
 TOL = 0.01  # tolerance for dollar comparisons
 
@@ -681,3 +685,196 @@ class TestProjectionMonthlyAnnualTieOut:
             assert abs(annual_bill - monthly_sum) < 1.0, (
                 f"year {y}: annual {annual_bill:.2f} vs monthly {monthly_sum:.2f}"
             )
+
+
+# ---------------------------------------------------------------------------
+# 12. Credit offsets ENERGY only — demand / fixed / NBC never offset
+#     (PG&E NEM2 Special Conditions 2.c/2.d; NBT Special Condition 2.d)
+# ---------------------------------------------------------------------------
+def _make_demand_tariff(rate=0.20, demand_rate=15.0, fixed_monthly=0.0,
+                        min_monthly=0.0):
+    """Flat energy rate + flat (non-coincident) demand charge."""
+    ers = [[{"rate": rate, "adj": 0.0, "max": None, "unit": "kWh",
+             "effective_rate": rate}]]
+    sched = [[0] * 24 for _ in range(12)]
+    dfs = [[{"rate": demand_rate, "adj": 0.0, "max": None, "unit": "kW",
+             "effective_rate": demand_rate}]]
+    return TariffSchedule(
+        label="test_demand", name="Demand Test", utility="PG&E",
+        fixed_monthly_charge=fixed_monthly, min_monthly_charge=min_monthly,
+        energy_rate_structure=ers,
+        energy_weekday_schedule=sched, energy_weekend_schedule=sched,
+        demand_flat_structure=dfs, demand_flat_months=list(range(1, 13)),
+    )
+
+
+def _empty_components():
+    return [{"energy": 0.0, "export_credit": 0.0, "demand": 0.0, "fixed": 0.0,
+             "nbc": 0.0, "nsc_adj": 0.0} for _ in range(12)]
+
+
+class TestCreditOffsetsEnergyOnly:
+    """Banked / export credit must reduce only the volumetric energy charge."""
+
+    def test_mbo_banked_credit_does_not_offset_demand_or_nbc(self):
+        # Month 1: $500 energy credit banked. Month 2: $300 demand + $100 NBC,
+        # no energy. The bank must NOT touch demand/NBC -> month 2 owes $400.
+        comps = _empty_components()
+        comps[0]["export_credit"] = 500.0          # net energy credit
+        comps[1]["demand"] = 300.0
+        comps[1]["nbc"] = 100.0
+        nb = simulate_year_under_billing_option(comps, "NEM-2", "MBO", 0.0)
+        assert nb[0] == pytest.approx(0.0, abs=TOL)
+        assert nb[1] == pytest.approx(400.0, abs=TOL)
+
+    def test_mbo_banked_credit_offsets_later_energy(self):
+        # Sanity: the bank DOES draw down a later energy charge (just not demand).
+        comps = _empty_components()
+        comps[0]["export_credit"] = 500.0
+        comps[1]["energy"] = 200.0                  # pure energy charge
+        comps[1]["demand"] = 300.0
+        nb = simulate_year_under_billing_option(comps, "NEM-2", "MBO", 0.0)
+        # $200 energy fully offset by bank; $300 demand still due.
+        assert nb[1] == pytest.approx(300.0, abs=TOL)
+
+    def test_nem3_export_credit_does_not_offset_demand(self):
+        comps = _empty_components()
+        comps[0]["export_credit"] = 500.0
+        comps[1]["demand"] = 300.0
+        nb = simulate_year_under_billing_option(comps, "NEM-3", "MBO", 0.0)
+        assert nb[1] == pytest.approx(300.0, abs=TOL)
+
+    def test_abo_dec_energy_credit_does_not_offset_demand(self):
+        # Every month carries $300 demand; a large summer energy credit defers
+        # to December. Demand is paid all 12 months; the Dec net-energy credit
+        # cannot pull December below its demand charge.
+        comps = _empty_components()
+        for i in range(12):
+            comps[i]["demand"] = 300.0
+        comps[5]["export_credit"] = 5000.0          # big June energy credit
+        nb = simulate_year_under_billing_option(comps, "NEM-2", "ABO", 0.0)
+        assert all(b == pytest.approx(300.0, abs=TOL) for b in nb)
+
+    def test_integration_mbo_demand_paid_despite_banked_credit(self):
+        # Summer: huge solar banks energy credit. Winter: heavy load with a
+        # demand spike. Each winter month's bill must be >= its demand charge.
+        tariff = _make_demand_tariff(rate=0.20, demand_rate=15.0)
+        solar = _seasonal_series(40.0, 0.0)         # summer export
+        load = _seasonal_series(2.0, 10.0)          # winter import
+        # Add a sharp January demand spike (hour 0 of Jan 1 region handled by max).
+        load_vals = load.values.copy()
+        dt = load.index
+        load_vals[(dt.month == 1) & (dt.hour == 18)] = 100.0   # 100 kW Jan spike
+        load = pd.Series(load_vals, index=dt)
+        export_rates = _const_series(0.0)
+
+        result = run_billing_simulation(
+            load, solar, tariff, export_rates,
+            nem_regime="NEM-1", billing_option="MBO",
+        )
+        jan = result.monthly_summary[result.monthly_summary["month"] == 1].iloc[0]
+        assert jan["total_demand_charge"] > TOL
+        # The banked summer credit cannot erase the January demand charge.
+        assert jan["net_bill"] >= jan["total_demand_charge"] - TOL
+
+    def test_integration_nem2_nbc_charged_despite_banked_credit(self):
+        tariff = _make_demand_tariff(rate=0.20, demand_rate=0.0)
+        solar = _seasonal_series(40.0, 0.0)
+        load = _seasonal_series(2.0, 10.0)
+        export_rates = _const_series(0.0)
+        result = run_billing_simulation(
+            load, solar, tariff, export_rates,
+            nem_regime="NEM-2", nbc_rate=0.03, billing_option="MBO",
+        )
+        # Some winter month imports -> nonzero NBC that survives credit banking.
+        nbc_total = result.monthly_summary["nbc_charge"].sum()
+        assert nbc_total > TOL
+
+    def test_nem3_projection_demand_paid_despite_export_credit(self):
+        # NEM-3 Y>1 projection: a huge export credit must not erase demand.
+        from modules.outputs import build_annual_projection, _build_multiyear_monthly_df
+        tariff = _make_demand_tariff(rate=0.20, demand_rate=15.0)
+        load = _const_series(3.0)
+        solar = _diurnal_series(60.0, 0.0)       # heavy midday export
+        export_rates = _const_series(0.10)       # large export credit
+        r = run_billing_simulation(
+            load, solar, tariff, export_rates, nem_regime="NEM-3", nsc_rate=0.0,
+        )
+        ann = build_annual_projection(
+            r, system_cost=0.0, rate_escalator_pct=3.0, load_escalator_pct=0.0,
+            years=5, nem_regime_1="NEM-3",
+        )
+        for y in range(2, 6):
+            yr_demand = float(ann[ann["Year"] == y]["Demand ($)"].iloc[0])
+            yr_bill = float(ann[ann["Year"] == y]["Bill w/ Solar ($)"].iloc[0])
+            assert yr_demand > TOL
+            # Energy is fully offset by the credit, but demand survives intact.
+            assert yr_bill >= yr_demand - 1.0
+        mon = _build_multiyear_monthly_df(
+            r, rate_escalator_pct=3.0, load_escalator_pct=0.0,
+            years=5, nem_regime_1="NEM-3",
+        )
+        y2 = mon[mon["Year"] == 2]
+        for _, row in y2.iterrows():
+            assert row["Net Bill ($)"] >= row["Demand ($)"] - TOL
+
+    def test_tou_demand_not_offset_by_credit(self):
+        # Same rule must hold for TOU (coincident) demand, not just flat demand.
+        comps = _empty_components()
+        comps[0]["export_credit"] = 800.0
+        comps[1]["demand"] = 450.0       # TOU demand flows through the demand bucket
+        nb = simulate_year_under_billing_option(comps, "NEM-2", "MBO", 0.0)
+        assert nb[1] == pytest.approx(450.0, abs=TOL)
+
+    def test_min_charge_floor_with_banked_credit_not_inflated(self):
+        # Flat tariff, min charge > 0, no demand. A big summer export banks
+        # credit; near-zero winter usage must pay exactly the min charge — and
+        # credit that would breach the floor must NOT be consumed (no bank
+        # inflation), so summer months also floor at the min charge.
+        tariff = _make_flat_tariff(rate=0.20, fixed_monthly=0.0, min_monthly=15.0)
+        solar = _seasonal_series(50.0, 0.0)
+        load = _seasonal_series(1.0, 0.5)
+        export_rates = _const_series(0.0)
+        result = run_billing_simulation(
+            load, solar, tariff, export_rates, nem_regime="NEM-1",
+            billing_option="MBO", nsc_rate=0.0,
+        )
+        # Every month floors at exactly the min charge (never below, never a
+        # phantom negative from an inflated bank).
+        for _, row in result.monthly_summary.iterrows():
+            assert row["net_bill"] >= 15.0 - TOL
+
+
+class TestNem3SeasonalProjectionTieOut:
+    """NEM-3 Y>1: a seasonal net-annual-CONSUMER (summer surplus banks, winter
+    deficit) must keep the monthly projection tied to the annual projection, and
+    the banked export credit must never erase demand. This is the case the naive
+    per-month energy floor broke (annual floored on totals, monthly per-month)."""
+
+    def test_nem3_seasonal_net_consumer_ties_and_preserves_demand(self):
+        from modules.outputs import build_annual_projection, _build_multiyear_monthly_df
+        tariff = _make_demand_tariff(rate=0.20, demand_rate=12.0)
+        solar = _seasonal_series(12.0, 0.0)   # summer surplus banks credit
+        load = _seasonal_series(3.0, 20.0)     # heavy winter import, net annual consumer
+        export_rates = _const_series(0.08)
+        r = run_billing_simulation(
+            load, solar, tariff, export_rates, nem_regime="NEM-3", nsc_rate=0.0,
+        )
+        assert r.annual_import_kwh > r.annual_export_kwh   # net annual consumer
+        YEARS, ESC = 8, 3.0
+        ann = build_annual_projection(
+            r, system_cost=0.0, rate_escalator_pct=ESC, load_escalator_pct=0.0,
+            years=YEARS, nem_regime_1="NEM-3",
+        )
+        mon = _build_multiyear_monthly_df(
+            r, rate_escalator_pct=ESC, load_escalator_pct=0.0,
+            years=YEARS, nem_regime_1="NEM-3",
+        )
+        for y in range(1, YEARS + 1):
+            annual_bill = float(ann[ann["Year"] == y]["Bill w/ Solar ($)"].iloc[0])
+            monthly_sum = float(mon[mon["Year"] == y]["Net Bill ($)"].sum())
+            assert abs(annual_bill - monthly_sum) < 1.0, (
+                f"year {y}: annual {annual_bill:.2f} vs monthly {monthly_sum:.2f}"
+            )
+        for _, row in mon[mon["Year"] == 3].iterrows():
+            assert row["Net Bill ($)"] >= row["Demand ($)"] - TOL

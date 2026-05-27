@@ -610,8 +610,37 @@ def _compute_year_row(
             monthly_components, active_regime, billing_option, min_monthly_charge,
         )
         yr_bill_solar_raw = sum(net_bills)
+    elif yr > 1 and monthly_summary_y1 is not None and len(monthly_summary_y1) == 12:
+        # NEM-3/NBT Y>1: route through the same per-month banking the monthly
+        # projection and the Y1 engine use. The export credit offsets ENERGY
+        # only (NBT Special Condition 2.d) and surplus banks forward; demand,
+        # fixed, NBC, and the NSC true-up are due regardless. Components are
+        # built from the Y1 monthly summary with the SAME scalers the monthly
+        # builder applies (import_ratio/rate_factor for energy, volume_ratio for
+        # export credit, load_factor/rate_factor for demand), so the annual bill
+        # equals the sum of the monthly net bills.
+        _nem3_components = []
+        for mi in range(12):
+            _ms = monthly_summary_y1.iloc[mi]
+            _nem3_components.append({
+                "energy": float(_ms["energy_cost"]) * import_ratio * rate_factor,
+                "export_credit": float(_ms["export_credit"]) * volume_ratio,
+                "demand": float(_ms["total_demand_charge"]) * load_factor * rate_factor,
+                "fixed": float(_ms["fixed_charge"]) * rate_factor,
+                "nbc": 0.0,
+                # NSC true-up rides on month 12, matching the monthly view.
+                "nsc_adj": (yr_nsc + yr_nsc_clawback) if mi == 11 else 0.0,
+            })
+        yr_bill_solar_raw = sum(simulate_year_under_billing_option(
+            _nem3_components, active_regime, billing_option, min_monthly_charge,
+        ))
     else:
-        yr_bill_solar_raw = yr_energy + yr_demand + yr_fixed + yr_nbc + yr_nsc + yr_nsc_clawback - yr_export_credit
+        # Y1 or missing monthly detail: energy-only floor on annual totals.
+        # Export credit offsets ENERGY only; demand/fixed/NBC/NSC due regardless.
+        _energy_after_credit = max(yr_energy - yr_export_credit, 0.0)
+        yr_bill_solar_raw = (
+            _energy_after_credit + yr_demand + yr_fixed + yr_nbc + yr_nsc + yr_nsc_clawback
+        )
 
     if yr == 1:
         yr_bill_solar = result_annual_bill_with_solar
@@ -1220,9 +1249,13 @@ def _project_single_year_monthly(
             # Provisional component sum; corrected post-loop via the billing-option
             # simulation when the active regime is NEM-1/2 (gives MBO/ABO floors
             # the right place to clamp). NEM-3 keeps this value because there's
-            # no monthly netting / banking — credit just offsets the bill.
+            # no monthly netting / banking. The export credit (stored as a
+            # negative number) offsets ENERGY only — demand, fixed, NBC, and NSC
+            # are due regardless (NBT Special Condition 2.d) — so floor the
+            # post-credit energy bucket at 0.
+            _energy_after_credit = max(r["Energy ($)"] + r["Export Credit ($)"], 0.0)
             r["Net Bill ($)"] = round(
-                r["Energy ($)"] + r["Demand ($)"] + r["Fixed ($)"] + _m_nbc + _m_nsc_adj + r["Export Credit ($)"], 2
+                _energy_after_credit + r["Demand ($)"] + r["Fixed ($)"] + _m_nbc + _m_nsc_adj, 2
             )
 
         # Baseline bill (no-solar) per month — for Indexed Tariff PPA rate calc
@@ -1249,12 +1282,13 @@ def _project_single_year_monthly(
 
         rows.append(r)
 
-    # Y>1 + NEM-1/2: replace per-month Net Bill with billing-option simulation
-    # so MBO credit-banking and min_monthly_charge floors are honored. Without
-    # this, gross TOU credit subtracts from gross charges at full magnitude
-    # for over-sized PV — which silently understates Y>1 bills.
-    _is_tou_netted_year = active_regime in ("NEM-1", "NEM-2") or active_regime.startswith("NEM-A")
-    if yr > 1 and len(rows) == 12 and _is_tou_netted_year:
+    # Y>1: replace per-month Net Bill with the billing-option simulation so the
+    # monthly view banks credit and applies floors exactly as the engine does.
+    # NEM-1/2/NEM-A get MBO/ABO credit-banking + min-charge floors; NEM-3/NBT
+    # gets energy-only credit banking carried forward across months. Both route
+    # through the same helper, which keeps the monthly view tied to the annual
+    # projection (the annual NEM-3 path builds matching components and sums them).
+    if yr > 1 and len(rows) == 12:
         monthly_components = [
             {
                 "energy": r["Energy ($)"],

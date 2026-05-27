@@ -17,7 +17,12 @@ from vendor.electricitycostcalculator.openei_tariff.openei_tariff_analyzer impor
 )
 from vendor.electricitycostcalculator.cost_calculator.cost_calculator import CostCalculator
 
-from .billing import BillingResult, _apply_nbt_nsc_true_up, _assemble_billing_result
+from .billing import (
+    BillingResult,
+    _apply_nbt_nsc_true_up,
+    _assemble_billing_result,
+    _draw_credit_against_energy,
+)
 
 if TYPE_CHECKING:
     from .battery.config import BatteryConfig
@@ -323,8 +328,15 @@ def run_ecc_billing_simulation(
             )
             m_demand_cost = m_flat_demand + m_tou_demand
 
-        m_net_bill = m_energy_cost + m_demand_cost + m_fixed_cost - m_export_credit
-        m_net_bill = max(m_net_bill, _min_monthly_charge)
+        # Export credit offsets the ENERGY charge only; demand and fixed are
+        # billed regardless (PG&E NEM2 SC 2.c/2.d; NBT SC 2.d). The ECC engine
+        # has no credit carryforward, so surplus credit beyond this month's
+        # energy is not banked (unchanged from prior behavior).
+        _nonoffsettable = m_demand_cost + m_fixed_cost
+        _energy_due, _ = _draw_credit_against_energy(
+            m_energy_cost, m_export_credit, _nonoffsettable, _min_monthly_charge
+        )
+        m_net_bill = max(_energy_due + _nonoffsettable, _min_monthly_charge)
 
         monthly_rows.append({
             "month": month_num,
