@@ -196,6 +196,24 @@ def test_snapshot_is_independent_of_source_dict():
     assert snap.calendar_years == (2026, 2027, 2028)
 
 
+def test_negative_ppa_rates_clamped_to_zero():
+    """A PPA rate can never be negative — snapshot construction floors at $0
+    even if a stale/legacy saved scenario carried negative values."""
+    saved = {
+        "ppa_rate_per_year": [0.10, -0.05, 0.02],
+        "year1_rate_r1": -0.03,
+        "year1_rate_r2": -0.10,
+        "savings_pct": 10.0,
+        "lifetime_savings": 0.0,
+        "nem_regime_1": "NEM-3",
+        "term_years": 3,
+    }
+    snap = snapshot_from_saved("Neg", saved, term_years=3)
+    assert snap.rate_per_year == (0.10, 0.0, 0.02)
+    assert snap.year1_rate_r1 == 0.0
+    assert snap.year1_rate_r2 == 0.0
+
+
 # ---------------------------------------------------------------------------
 # Extra: session helpers round-trip
 # ---------------------------------------------------------------------------
