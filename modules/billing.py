@@ -645,6 +645,19 @@ def _build_monthly_nem12(
             if tiers:
                 period_rates[pidx] = tiers[0]["effective_rate"]
 
+    # NEM-2: the URDB retail rate already bundles the non-bypassable charge
+    # components, so the TOU-netted energy must be valued NET of nbc_rate —
+    # otherwise NBC is double-counted (once inside the netted energy, once in the
+    # explicit non-bypassable line below). Exports likewise do not earn the
+    # non-bypassable portion (PG&E NEM2 Special Condition 2.c: NBCs "may not be
+    # reduced by any credits for exports to the grid"). NEM-1 has no NBC
+    # (nbc_rate == 0), so this is a no-op there. Adjusting the locals here
+    # propagates consistently to the gross display, the TOU netting, the
+    # per-month projection inputs, and the NSC true-up (#27).
+    if nem_regime == "NEM-2" and nbc_rate > 0:
+        energy_rate = np.maximum(energy_rate - nbc_rate, 0.0)
+        period_rates = {p: max(r - nbc_rate, 0.0) for p, r in period_rates.items()}
+
     monthly_rows = []
     credit_bank = 0.0        # MBO credit carryover
     credit_consumed_mbo = 0.0  # MBO credit actually drawn down against positive bills
