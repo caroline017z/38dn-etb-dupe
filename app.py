@@ -7594,7 +7594,7 @@ def _render_results():
         # Formula explanation
         with st.expander("How is the PPA Rate calculated?"):
             st.markdown(
-                "**PPA Rate** = [(1 − Savings%) × Bill w/o Solar − Bill w/ Solar] / Solar kWh\n\n"
+                "**PPA Rate** = (Bill w/o Solar − Bill w/ Solar) × (1 − Savings%) / Solar kWh\n\n"
                 "This gives the maximum $/kWh a customer can pay for solar and still achieve "
                 "their savings target relative to the utility-only bill."
             )
