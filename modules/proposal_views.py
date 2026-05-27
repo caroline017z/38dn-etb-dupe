@@ -48,10 +48,14 @@ def build_comparison_table(proposal: Proposal) -> pd.DataFrame:
     Metrics (per the Phase 4 product review):
       - Yr-1 PPA Rate (NEM-1)
       - Yr-1 PPA Rate (NEM-2) when a regime switch exists
-      - PPA Escalator (NEM-1 / NEM-2)
       - Savings Target %
       - Lifetime Savings ($)
       - Effective $/kWh  (derived: mean of rate_per_year)
+
+    Note: there is no fixed "PPA escalator" row. The PPA rate is now solved
+    per year (a forward solve against the NEM-1/2/NVBT rates), so it floats
+    year-by-year rather than escalating at a fixed %/yr. The Effective $/kWh
+    row conveys the average floating rate instead.
     """
     snaps: tuple[PPASnapshot, ...] = (proposal.primary_ppa, *proposal.comparison_ppas)
 
@@ -79,16 +83,6 @@ def build_comparison_table(proposal: Proposal) -> pd.DataFrame:
         _row(
             "Yr-1 PPA Rate (NEM-2)",
             [_fmt_rate(s.year1_rate_r2) for s in snaps],
-        )
-    _row(
-        "PPA Escalator (NEM-1)",
-        [f"{s.escalator_r1_pct:.1f}%/yr" for s in snaps],
-    )
-    if any_regime_2:
-        _row(
-            "PPA Escalator (NEM-2)",
-            [f"{s.escalator_r2_pct:.1f}%/yr" if s.escalator_r2_pct is not None else "—"
-             for s in snaps],
         )
     _row("Savings Target", [_fmt_pct(s.savings_pct) for s in snaps])
     _row("Lifetime Savings", [_fmt_usd(s.lifetime_savings_usd) for s in snaps])

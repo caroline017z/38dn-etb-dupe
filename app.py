@@ -3725,14 +3725,17 @@ def _render_top_bar():
 
 
     # ---------------------------------------------------------------------------
-    # Storage Diagnostics (below management tabs, before main content)
+    # Storage Diagnostics — hidden from normal users (GCS is assumed connected
+    # in production). Reviewers can surface this on demand by adding the query
+    # param ?diag=storage to the app URL (e.g. https://<app>/?diag=storage).
     # ---------------------------------------------------------------------------
-    with st.expander("Storage Diagnostics"):
-        _diag = gcs_diagnostic()
-        if _diag["connected"]:
-            st.success(f"GCS connected — bucket: {_diag['bucket_name']}, {_diag['blob_count']} files")
-        else:
-            st.warning(f"GCS not available: {_diag['error']}. Using local storage only.")
+    if st.query_params.get("diag") == "storage":
+        with st.expander("Storage Diagnostics", expanded=True):
+            _diag = gcs_diagnostic()
+            if _diag["connected"]:
+                st.success(f"GCS connected — bucket: {_diag['bucket_name']}, {_diag['blob_count']} files")
+            else:
+                st.warning(f"GCS not available: {_diag['error']}. Using local storage only.")
 
     st.title("PV Solar Rate Simulator")
     st.markdown(

@@ -724,8 +724,9 @@ def _slide_exec_summary(prs, pg, total, name, result, tariff, utility,
             fin.append((f"PPA Rate — {nem_regime_2}", f"${ppa_rate_regime_2:.4f}/kWh"))
         else:
             fin.append(("PPA Rate (Year 1)", f"${ppa_rate:.3f}/kWh"))
-    if esc_pct is not None:
-        fin.append(("PPA Escalator", f"{esc_pct:.1f}%/yr"))
+    # No "PPA Escalator" row — the PPA rate is solved per year (a forward solve
+    # against the NEM-1/2/NVBT rates), so it floats year-by-year rather than
+    # escalating at a fixed %/yr.
     fin.append(("Contract Term", f"{term} years"))
     fin.append(("Upfront Cost", "$0"))
     if result.rate_shift_annual_savings is not None:
@@ -832,13 +833,14 @@ def _slide_key_commercial_terms(
 
     # Tile 1: PPA rate (regime 1, optional regime 2).
     _r1_str = f"${ppa_rate:.3f}/kWh" if ppa_rate else "—"
+    # The PPA rate floats year-by-year (forward solve vs the NEM rates), so we
+    # show the Year-1 rate per regime rather than a fixed %/yr escalator.
     _rate_sublines = [
-        f"{nem_regime_1 or 'NEM-3'}: {_r1_str} · {ppa_esc_1 or 0:.1f}%/yr escalator",
+        f"{nem_regime_1 or 'NEM-3'}: {_r1_str} (Yr 1)",
     ]
     if ppa_rate_r2 is not None and nem_regime_2:
         _rate_sublines.append(
-            f"{nem_regime_2}: ${ppa_rate_r2:.3f}/kWh "
-            f"· {(ppa_esc_2 or ppa_esc_1 or 0):.1f}%/yr escalator"
+            f"{nem_regime_2}: ${ppa_rate_r2:.3f}/kWh (Yr 1)"
         )
     _tile(tiles_x1, tiles_y1,
           eyebrow="PPA RATE",
@@ -1036,9 +1038,8 @@ def _slide_system(prs, pg, total, ex, sys_kw, dc_ac, batt_kwh, batt_kw,
     _rect(sl, ML, by, CW, Inches(0.48), fill=DK1)
     parts = []
     if ppa is not None:
-        parts.append({"t": f"PPA Rate: ${ppa:.3f}/kWh", "c": ACCENT1, "b": True})
-    if esc is not None:
-        parts.append({"t": f"Escalator: {esc:.1f}%/yr", "c": WHITE, "b": True})
+        parts.append({"t": f"PPA Rate (Yr 1): ${ppa:.3f}/kWh", "c": ACCENT1, "b": True})
+    # No fixed escalator — the PPA rate floats year-by-year (forward solve).
     parts += [{"t": f"Term: {term} years", "c": WHITE, "b": True},
               {"t": "Upfront Cost: $0", "c": WHITE, "b": True},
               {"t": f"Tariff: {new_tariff or tariff}", "c": WHITE, "b": True}]
@@ -1227,7 +1228,7 @@ def _slide_projections(prs, pg, total, ex, proj_df, rate_esc, ppa=None, esc=None
 
     _action_title(sl, f"Cumulative savings reach {_fd(cum)} over {max_yr} years", exhibit=ex)
     _subtitle(sl, f"Illustrative projection at {rate_esc:.0f}%/yr utility escalation"
-              + (f"  |  PPA at ${ppa:.3f}/kWh, {esc:.1f}%/yr escalator" if ppa and esc else ""))
+              + (f"  |  PPA at ${ppa:.3f}/kWh (Yr 1; floats year-by-year)" if ppa else ""))
     _takeaway(sl,
         f"At a conservative {rate_esc:.0f}%/yr utility escalation, cumulative savings exceed "
         f"{_fd(cum)}. Actual historical rate growth has been materially higher.")
@@ -1504,7 +1505,7 @@ def _slide_rate_hedge(prs, pg, total, ex, utility, ppa, ppa_esc, term,
         "High: 10%/yr utility escalation",
     ]
     if ppa:
-        points.append(f"PPA: ${ppa:.3f}/kWh, {ppa_esc:.1f}%/yr escalator")
+        points.append(f"PPA: ${ppa:.3f}/kWh (Yr 1; floats year-by-year, no fixed escalator)")
     points += [
         "Grid residual escalated at 4%/yr",
         f"Term: {term} years",
@@ -1942,10 +1943,10 @@ def _slide_process(prs, pg, total, sys_kw, batt_kwh, batt_kw,
         steps.append(("Battery Dispatches During Peak Hours",
             f"{batt_kw:,.0f} kW battery discharges during expensive on-peak periods, shaving demand charges."))
     if ppa is not None:
-        steps.append(("Predictable, Fixed-Rate Energy",
-            f"PPA at ${ppa:.3f}/kWh"
-            + (f", {esc:.1f}%/yr escalator" if esc else "")
-            + f" for {term} years. No rate volatility on solar kWh."))
+        steps.append(("Predictable Savings vs. the Utility Bill",
+            f"PPA starts at ${ppa:.3f}/kWh (Year 1) and is solved each year to "
+            f"hold your savings target for {term} years — the rate floats with "
+            f"the utility/NEM rates rather than following a fixed escalator."))
     else:
         steps.append(("Immediate Day-1 Savings",
             "Total electricity cost drops from Day 1; gap widens as utility rates rise."))
@@ -2062,8 +2063,7 @@ def _slide_alternatives_considered(prs, pg, total, *, primary_label: str, altern
     metric_rows = [
         ("Yr-1 PPA Rate",
          lambda a: _fmt_rate_pair(a.get("year1_rate_r1"), a.get("year1_rate_r2"))),
-        ("Escalator (Yr-1 regime)",
-         lambda a: f"{(a.get('escalator_r1_pct') or 0):.1f}%/yr"),
+        # No "Escalator" row — the PPA rate floats year-by-year (forward solve).
         ("Savings Target",
          lambda a: _fmt_pct(a.get("savings_pct"))),
         ("Term",
@@ -2116,8 +2116,7 @@ def _slide_next_steps(prs, pg, total, ppa, esc, term):
          "Engineering conducts site visit; confirms layout, interconnection, and structural feasibility."),
         ("Execute PPA",
          f"Finalize {term}-year PPA"
-         + (f" at ${ppa:.3f}/kWh" if ppa else "")
-         + (f" with {esc:.1f}% annual escalator." if esc else ".")),
+         + (f" starting at ${ppa:.3f}/kWh (Year 1)." if ppa else ".")),
         ("Permitting & Construction",
          "38DN manages all permits, utility coordination, and construction."),
         ("Commercial Operation",
