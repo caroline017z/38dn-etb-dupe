@@ -642,3 +642,42 @@ class TestNEM3NscTrueUp:
         raw_import_charge = oct_row["import_kwh"] * 0.20
         assert raw_import_charge > TOL
         assert oct_row["net_bill"] < raw_import_charge - TOL
+
+
+# ---------------------------------------------------------------------------
+# 11. Monthly ↔ annual projection tie-out (export-credit escalation)
+# ---------------------------------------------------------------------------
+class TestProjectionMonthlyAnnualTieOut:
+    """The monthly projection must reconcile to the annual projection. The
+    NEM-3 export-credit fallback previously escalated monthly export credit at
+    the retail rate_factor while the annual path scaled by volume only, so the
+    two views drifted apart (growing with the escalator) for flat-export NEM-3
+    deals."""
+
+    def test_nem3_flat_export_net_bill_ties_out(self):
+        from modules.outputs import build_annual_projection, _build_multiyear_monthly_df
+
+        tariff = _make_flat_tariff(rate=0.20, fixed_monthly=10.0)
+        load = _const_series(40.0)
+        solar = _diurnal_series(120.0, 0.0)   # heavy midday export → material credit
+        export_rates = _const_series(0.06)
+        r = run_billing_simulation(
+            load, solar, tariff, export_rates, nem_regime="NEM-3", nsc_rate=0.0,
+        )
+        YEARS, ESC = 10, 3.0
+        ann = build_annual_projection(
+            r, system_cost=0.0, rate_escalator_pct=ESC, load_escalator_pct=0.0,
+            years=YEARS, nem_regime_1="NEM-3",
+        )
+        mon = _build_multiyear_monthly_df(
+            r, rate_escalator_pct=ESC, load_escalator_pct=0.0,
+            years=YEARS, nem_regime_1="NEM-3",
+        )
+        for y in range(1, YEARS + 1):
+            annual_bill = float(ann[ann["Year"] == y]["Bill w/ Solar ($)"].iloc[0])
+            monthly_sum = float(mon[mon["Year"] == y]["Net Bill ($)"].sum())
+            # Only cents-vs-dollars rounding should remain (12 monthly roundings
+            # vs one annual). Pre-fix this drifted by tens of dollars by Y10.
+            assert abs(annual_bill - monthly_sum) < 1.0, (
+                f"year {y}: annual {annual_bill:.2f} vs monthly {monthly_sum:.2f}"
+            )
