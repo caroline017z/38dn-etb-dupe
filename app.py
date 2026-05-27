@@ -2687,7 +2687,9 @@ def _render_top_bar():
             # Writes into the same regime_2_tariff / regime_2_ecc_calculator
             # session keys via the shared pending-load handlers.
             # ================================================================
-            if st.session_state.get("nem_switch"):
+            if (st.session_state.get("nem_switch")
+                    and st.session_state.get("rate_switch_enabled")
+                    and st.session_state.get("rate_switch_at_nem")):
                 _lp_engine = st.session_state.get("billing_engine", "Custom")
                 st.markdown("**Post-NEM switch rate**")
                 st.caption(
@@ -2738,6 +2740,14 @@ def _render_top_bar():
                         if st.session_state.get("regime_2_ecc_calculator") is not None:
                             st.success("Post-NEM switch ECC tariff loaded.")
                 st.markdown("---")
+            else:
+                # Rate Switch → "At NEM switch" is NOT armed (master off, trigger
+                # off, or NEM Switch off). The post-transition re-bill consumer
+                # keys off regime_2_tariff being set, so a tariff loaded here
+                # earlier must not linger — clear it, mirroring the sidebar's
+                # clear so the two writers can't diverge and silently mis-price.
+                st.session_state["regime_2_tariff"] = None
+                st.session_state["regime_2_ecc_calculator"] = None
 
             # ================================================================
             # A. Saved Load Profiles — unified dropdown (CSV + NEM-A)
@@ -4334,15 +4344,20 @@ def _render_sidebar():
             # NEM Switch (Section 5) to be configured so num_years_1 exists.
             _nem_switch_on = bool(st.session_state.get("nem_switch"))
             rate_switch_at_nem = st.checkbox(
-                "At NEM switch (year N)",
+                "At NEM switch year",
                 key="rate_switch_at_nem",
                 disabled=not _nem_switch_on,
-                help="Re-bill the post-transition years on a different tariff at "
-                     "the NEM regime switch. Configure the rate below under "
-                     "Section 5 (NEM Switch).",
+                help="Re-bill the years after the NEM transition on a different "
+                     "tariff. The loader appears below under Section 5 "
+                     "(Export Compensation) once NEM Switch is on.",
             )
             if not _nem_switch_on:
-                st.caption("Enable NEM Switch below to switch rates at the NEM transition.")
+                # A disabled checkbox retains its stored value, so force the
+                # local False when NEM Switch is off (regime-2 keys are also
+                # backstop-cleared downstream, and the LP-tab gate checks
+                # nem_switch too).
+                rate_switch_at_nem = False
+                st.caption("Disabled until NEM Switch is enabled below (Section 5).")
 
         # --- Trigger (a): original (pre-switch) rate loader ---
         # Drives the EXISTING rate-shift mechanism. rate_shift_enabled mirrors
