@@ -210,3 +210,46 @@ class TestNoSwitchIgnoresRegime2:
             **kwargs, result_regime2=result_regime2,
         )
         pd.testing.assert_frame_equal(baseline, with_r2_but_no_switch)
+
+
+# ---------------------------------------------------------------------------
+# 6. Monthly view re-bills on tariff #2 too — monthly ↔ annual tie-out
+# ---------------------------------------------------------------------------
+class TestRegime2MonthlyAnnualTieOut:
+    """The monthly builder must also re-bill post-transition years on tariff #2,
+    so the monthly view stays consistent with the annual projection."""
+
+    def _build(self):
+        from modules.outputs import build_annual_projection, _build_multiyear_monthly_df
+        r1 = _run(0.20)
+        r2 = _run(0.40)   # post-transition tariff: double the energy rate
+        kw = dict(nem_regime_1="NEM-3", nem_regime_2="NEM-3", num_years_1=5)
+        ann = build_annual_projection(
+            r1, system_cost=0.0, rate_escalator_pct=3.0, load_escalator_pct=0.0,
+            years=10, result_regime2=r2, **kw,
+        )
+        mon = _build_multiyear_monthly_df(
+            r1, rate_escalator_pct=3.0, load_escalator_pct=0.0, years=10,
+            result_regime2=r2, **kw,
+        )
+        mon_no_r2 = _build_multiyear_monthly_df(
+            r1, rate_escalator_pct=3.0, load_escalator_pct=0.0, years=10, **kw,
+        )
+        return ann, mon, mon_no_r2
+
+    def test_monthly_ties_to_annual_with_regime2(self):
+        ann, mon, _ = self._build()
+        for y in range(1, 11):
+            a = float(ann[ann["Year"] == y]["Bill w/ Solar ($)"].iloc[0])
+            m = float(mon[mon["Year"] == y]["Net Bill ($)"].sum())
+            assert abs(a - m) < 2.0, f"year {y}: annual {a:.2f} vs monthly {m:.2f}"
+
+    def test_post_transition_months_rebill_on_tariff2(self):
+        _, mon, mon_no_r2 = self._build()
+        # Pre-transition (yr<=5) identical; post-transition (yr>5) higher bill on tariff #2.
+        pre = mon[mon["Year"] == 3]["Net Bill ($)"].sum()
+        pre0 = mon_no_r2[mon_no_r2["Year"] == 3]["Net Bill ($)"].sum()
+        assert abs(pre - pre0) < 1.0
+        post = mon[mon["Year"] == 8]["Net Bill ($)"].sum()
+        post0 = mon_no_r2[mon_no_r2["Year"] == 8]["Net Bill ($)"].sum()
+        assert post > post0 + 1.0, "post-transition months should re-bill on the higher tariff #2"

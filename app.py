@@ -7476,6 +7476,7 @@ def _render_results():
                 cod_date=cod_date,
                 degradation_pct=annual_degradation_pct,
                 compound_escalation=compound_escalation,
+                result_regime2=_result_regime2,
             )
             it_df = build_indexed_tariff_monthly(it_monthly, **_it_kw)
             it_display = it_df.copy()

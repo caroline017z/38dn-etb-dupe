@@ -1295,12 +1295,44 @@ def _build_multiyear_monthly_df(
     cod_date=None,
     degradation_pct: float = 0.0,
     compound_escalation: bool = True,
+    result_regime2: BillingResult | None = None,
 ) -> pd.DataFrame:
     """Build a multi-year monthly DataFrame (12 × years rows).
 
     Scales year-1 monthly values with escalators and regime-aware
     export credit / NBC logic matching build_annual_projection.
+
+    When ``result_regime2`` is supplied (a second tariff billed under the
+    post-transition NEM regime), the post-transition years re-bill on it — so
+    the monthly view stays tied out to ``build_annual_projection``, which does
+    the same. Implemented by building each regime's monthly stream as a
+    single-regime call (the well-tested path) on its own BillingResult and
+    splicing at the transition year; each sub-call escalates from year 1
+    identically, so the seam is continuous.
     """
+    if (result_regime2 is not None and nem_regime_2 and num_years_1
+            and 0 < num_years_1 < years):
+        _df_r1 = _build_multiyear_monthly_df(
+            result, result_pv_only=result_pv_only,
+            rate_escalator_pct=rate_escalator_pct, load_escalator_pct=load_escalator_pct,
+            years=years, export_rates_multiyear=export_rates_multiyear,
+            nem_regime_1=nem_regime_1, nem_regime_2=None, num_years_1=None,
+            cod_date=cod_date, degradation_pct=degradation_pct,
+            compound_escalation=compound_escalation,
+        )
+        _df_r2 = _build_multiyear_monthly_df(
+            result_regime2, result_pv_only=result_pv_only,
+            rate_escalator_pct=rate_escalator_pct, load_escalator_pct=load_escalator_pct,
+            years=years, export_rates_multiyear=export_rates_multiyear_2,
+            nem_regime_1=nem_regime_2, nem_regime_2=None, num_years_1=None,
+            cod_date=cod_date, degradation_pct=degradation_pct,
+            compound_escalation=compound_escalation,
+        )
+        return pd.concat(
+            [_df_r1[_df_r1["Year"] <= num_years_1], _df_r2[_df_r2["Year"] > num_years_1]],
+            ignore_index=True,
+        )
+
     _cod_month = cod_date.month if cod_date else 1
     _cod_day = cod_date.day if cod_date else 1
     _cod_year = cod_date.year if cod_date else 2023
