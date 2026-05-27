@@ -266,16 +266,24 @@ def _solve_single_lp(
     ) if peak_kw else 0
     throughput    = EPSILON * cp.sum(batt_charge + discharge_total)
 
-    # Battery utilization incentive: ensure the optimizer always prefers
-    # to charge the battery and export during the discharge window,
-    # even when the price differential barely covers round-trip losses.
-    # The 15% bonus overcomes the ~10% round-trip loss so that battery
-    # export is always preferred over direct PV export.
-    BATT_BONUS = 0.15
-    batt_incentive = BATT_BONUS * cp.sum(cp.multiply(export_price, batt_to_grid))
+    # The nodal balance (constraint 1) sees only discharge_total = to_load +
+    # to_grid, so the to_load/to_grid split is degenerate at the bill level.
+    # A tiny extra penalty on battery→grid breaks that tie toward serving
+    # on-site load — which is the economically correct preference whenever
+    # import ≥ export — and makes the PV-vs-battery export attribution
+    # deterministic instead of arbitrary. Kept far below any real price so it
+    # never suppresses a genuinely valuable export.
+    load_preference = EPSILON * cp.sum(batt_to_grid)
 
+    # Objective: minimize net cost = import energy − export revenue + demand
+    # charges, plus a tiny throughput penalty (break ties toward not cycling
+    # when there's no arbitrage) and the load-preference tie-breaker above.
+    # Round-trip losses are already modeled in the SOC dynamics. A prior
+    # "battery export bonus" was removed: rewarding battery→grid export biased
+    # discharge to the grid over serving load, which inflated both grid import
+    # and export (a higher true bill) and corrupted the export attribution.
     objective = cp.Minimize(
-        energy_cost - export_rev - batt_incentive + demand_cost + throughput
+        energy_cost - export_rev + demand_cost + throughput + load_preference
     )
 
     # ================================================================

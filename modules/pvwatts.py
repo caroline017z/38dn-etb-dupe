@@ -52,10 +52,10 @@ def _geocode_nominatim(address: str) -> tuple[float, float]:
     geolocator = Nominatim(user_agent="pv-rate-sim", timeout=10)
     try:
         location = geolocator.geocode(address)
-    except GeocoderTimedOut:
-        raise ValueError("Geocoding timed out. Please try again.")
+    except GeocoderTimedOut as e:
+        raise ValueError("Geocoding timed out. Please try again.") from e
     except GeocoderServiceError as e:
-        raise ValueError(f"Geocoding service unavailable: {e}")
+        raise ValueError(f"Geocoding service unavailable: {e}") from e
 
     if location is None:
         raise ValueError(f"Could not geocode address: {address}")

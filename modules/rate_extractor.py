@@ -220,19 +220,25 @@ def validate_tariff_structure(tariff_data: dict) -> list[str]:
             sched = tariff_data.get(sched_key)
             if sched is None:
                 continue
-            max_idx = max(max(row) for row in sched if row)
+            non_empty = [row for row in sched if row]
+            if not non_empty:
+                warnings.append(f"{sched_key}: all schedule rows are empty")
+                continue
+            max_idx = max(max(row) for row in non_empty)
             if max_idx >= n_periods:
                 warnings.append(
                     f"{sched_key} references period {max_idx} but {prefix}ratestructure "
                     f"only has {n_periods} periods (indices 0-{n_periods - 1})"
                 )
 
-    # Validate rate values are reasonable
+    # Validate rate values are reasonable (check every tier, not just tier 1 —
+    # a unit-confused or absurd higher tier should still be flagged)
     for entry in tariff_data.get("energyratestructure", []):
         if entry and isinstance(entry, list):
-            rate = entry[0].get("rate", 0)
-            if rate < 0 or rate > 2.0:
-                warnings.append(f"Unusual energy rate: ${rate:.4f}/kWh")
+            for tier in entry:
+                rate = tier.get("rate", 0)
+                if rate < 0 or rate > 2.0:
+                    warnings.append(f"Unusual energy rate: ${rate:.4f}/kWh")
 
     return warnings
 

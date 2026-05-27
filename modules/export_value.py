@@ -65,7 +65,7 @@ def parse_multiyear_export_rates(df: pd.DataFrame, start_year: int = 2026) -> di
 
     Rate columns whose header is a 4-digit year (e.g. "2026") are keyed
     by that calendar year.  Other rate columns are keyed sequentially
-    starting from the current calendar year.
+    starting from ``start_year`` (the COD / projection base year).
 
     Args:
         df: DataFrame with 8760 rows and one or more numeric year columns.
@@ -111,10 +111,12 @@ def parse_multiyear_export_rates(df: pd.DataFrame, start_year: int = 2026) -> di
                 continue
         except (ValueError, OverflowError):
             pass
-        # Non-year header — will assign sequentially below
+        # Non-year header — will assign sequentially below, based on the
+        # caller's start_year (the COD/projection base), NOT the current
+        # calendar year. Using now().year mis-mapped every projection year for
+        # a non-current-year COD onto a single wrong export curve.
         if fallback_start is None:
-            from datetime import datetime as _dt
-            fallback_start = _dt.now().year
+            fallback_start = start_year
 
     # Handle columns without parseable year headers
     if fallback_start is not None:
