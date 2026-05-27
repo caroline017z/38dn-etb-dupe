@@ -667,7 +667,11 @@ def _slide_exec_summary(prs, pg, total, name, result, tariff, utility,
     bill = result.annual_bill_without_solar
     bw = result.annual_bill_with_solar + (ppa_cost or 0)
     sav = bill - bw
-    pct = customer_savings_pct if customer_savings_pct is not None else (sav / bill * 100 if bill else 0)
+    # Realized savings as a % of the no-solar utility bill — matches the PPA
+    # Rate tab's on-screen "Savings %". NOT the savings *target* (% of the
+    # offset); the target is shown, clearly labeled, on the Key Commercial
+    # Terms slide. This keeps the deck and the screen tied out.
+    pct = (sav / bill * 100) if bill else 0
     offset = result.annual_solar_kwh / result.annual_load_kwh * 100 if result.annual_load_kwh else 0
 
     _action_title(sl, "Executive Summary")
@@ -713,11 +717,7 @@ def _slide_exec_summary(prs, pg, total, name, result, tariff, utility,
         fin.append(("PPA Cost (Year 1)", _fd(ppa_cost)))
         fin.append(("Total Year 1 Cost (w/ Solar + PPA)", _fd(bw)))
     fin.append(("Year 1 Net Savings", _fd(sav)))
-    if customer_savings_pct_2 is not None and nem_regime_1 and nem_regime_2:
-        fin.append((f"{nem_regime_1} Savings Target", f"{pct:.1f}%"))
-        fin.append((f"{nem_regime_2} Savings Target", f"{customer_savings_pct_2:.1f}%"))
-    else:
-        fin.append(("Savings Rate", f"{pct:.1f}%"))
+    fin.append(("Savings Rate (Year 1)", f"{pct:.1f}%"))
     if ppa_rate is not None:
         if ppa_rate_regime_2 is not None and nem_regime_1 and nem_regime_2:
             fin.append((f"PPA Rate — {nem_regime_1} (Yr 1)", f"${ppa_rate:.4f}/kWh"))
@@ -1063,7 +1063,10 @@ def _slide_year1(prs, pg, total, ex, result, tariff, proj_df=None,
     bn = result.annual_bill_without_solar
     bw = result.annual_bill_with_solar + (ppa_cost or 0)
     sav = bn - bw
-    pct = customer_savings_pct if customer_savings_pct is not None else (sav / bn * 100 if bn else 0)
+    # Realized savings as a % of the no-solar bill (matches the on-screen PPA
+    # Rate tab), not the savings target. The $ figure (sav) and this % are the
+    # same reduction the customer actually sees on their bill.
+    pct = (sav / bn * 100) if bn else 0
     _has_batt = battery_kwh > 0
     _nem_tag = f"  |  {nem_regime}" if nem_regime else ""
 
