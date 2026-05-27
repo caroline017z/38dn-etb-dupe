@@ -2154,6 +2154,12 @@ def _init_session_state():
         "rate_shift_enabled": False,
         "rate_shift_old_tariff": None,
         "nema_rate_shift_tariffs": {},
+        # Post-transition (regime 2) tariff overrides. None ⇒ reuse the
+        # regime-1 tariff (default, backwards compatible). When set AND
+        # nem_switch is on, the projection re-bills the post-switch years
+        # on this second tariff.
+        "regime_2_tariff": None,
+        "regime_2_ecc_calculator": None,
     }.items():
         if key not in st.session_state:
             st.session_state[key] = default
@@ -2669,6 +2675,64 @@ def _render_top_bar():
     # ---- LOAD PROFILES SECTION ----
     if st.session_state["active_mgmt_tab"] == "Load Profiles":
         with st.expander("Load Profiles", expanded=True):
+            # ================================================================
+            # Per-NEM-period tariff (mirrors the sidebar Section-2 selector).
+            # Surfaced here so the post-transition tariff can be set alongside
+            # the load profile. Only relevant when the NEM switch is enabled.
+            # Writes into the same regime_2_tariff / regime_2_ecc_calculator
+            # session keys via the shared pending-load handlers.
+            # ================================================================
+            if st.session_state.get("nem_switch"):
+                _lp_engine = st.session_state.get("billing_engine", "Custom")
+                st.markdown("**Post-Transition Tariff (NEM Switch)**")
+                st.caption(
+                    "After the NEM regime switch, the projection re-bills on this tariff. "
+                    "Leave on 'Same as regime 1' to reuse the regime-1 tariff."
+                )
+                _lp_r2_mode = st.radio(
+                    "Post-transition tariff",
+                    ["Same as regime 1", "Load a different tariff"],
+                    key="lp_regime2_tariff_mode",
+                    horizontal=True,
+                )
+                if _lp_r2_mode == "Same as regime 1":
+                    if _lp_engine == "Custom":
+                        st.session_state["regime_2_tariff"] = None
+                    else:
+                        st.session_state["regime_2_ecc_calculator"] = None
+                else:
+                    if _lp_engine == "Custom":
+                        if st.session_state.get("available_rates"):
+                            _lp_r2_opts = {f"{r['name']}": r["label"] for r in st.session_state["available_rates"]}
+                            _lp_r2_sel = st.selectbox(
+                                "Select Post-Transition Rate Schedule",
+                                list(_lp_r2_opts.keys()),
+                                key="lp_regime2_tariff_sel",
+                            )
+                            if st.button("Load Post-Transition Tariff", key="lp_regime2_tariff_load_btn"):
+                                st.session_state["_pending_regime2_tariff_load"] = _lp_r2_opts[_lp_r2_sel]
+                        else:
+                            st.caption("Fetch rates in the sidebar (Section 4) first to select a tariff.")
+                        _lp_r2_cur = st.session_state.get("regime_2_tariff")
+                        if _lp_r2_cur is not None:
+                            st.success(f"Post-transition tariff loaded: {_lp_r2_cur.name}")
+                    else:
+                        _lp_r2_saved = _list_saved(ECC_TARIFFS_DIR, ".json")
+                        if _lp_r2_saved:
+                            _lp_r2_ecc_sel = st.selectbox(
+                                "Select Saved Post-Transition Tariff", _lp_r2_saved,
+                                key="lp_regime2_ecc_saved_sel",
+                            )
+                            if st.button("Load Post-Transition Tariff", key="lp_regime2_ecc_load_btn") and _lp_r2_ecc_sel:
+                                st.session_state["_pending_regime2_ecc_saved_path"] = os.path.join(
+                                    ECC_TARIFFS_DIR, _lp_r2_ecc_sel + ".json"
+                                )
+                        else:
+                            st.caption("No saved ECC tariffs — add one via the sidebar or Custom Rates.")
+                        if st.session_state.get("regime_2_ecc_calculator") is not None:
+                            st.success("Post-transition ECC tariff loaded.")
+                st.markdown("---")
+
             # ================================================================
             # A. Saved Load Profiles — unified dropdown (CSV + NEM-A)
             # ================================================================
@@ -4236,26 +4300,34 @@ def _render_sidebar():
             _rs_is_nema = st.session_state.get("load_mode") == "NEM-A Aggregation"
 
             if not _rs_is_nema:
-                # Single meter: one old tariff selector
+                # Single meter: one existing-tariff selector
+                st.caption(
+                    "Select the customer's **existing (pre-switch) tariff** below. "
+                    "The analysis shows what the customer would pay on this rate as a "
+                    "separate baseline, alongside the new tariff selected in Section 4."
+                )
                 if st.session_state["available_rates"]:
                     _rs_rate_options = {f"{r['name']}": r["label"] for r in st.session_state["available_rates"]}
                     _rs_selected = st.selectbox(
-                        "Old Rate (pre-switch)",
+                        "Existing tariff (pre-switch baseline)",
                         list(_rs_rate_options.keys()),
                         key="rate_shift_old_rate_sel",
-                        help="Select the tariff the customer was on before switching.",
+                        help="The tariff the customer is on today, before switching to the "
+                             "Section-4 tariff. Billed as a standalone comparison baseline.",
                     )
                     _rs_label = _rs_rate_options[_rs_selected]
                     if st.button(
-                        "Load Old Tariff", key="api_call_btn_rate_shift_load",
+                        "Load Existing Tariff", key="api_call_btn_rate_shift_load",
                     ):
                         st.session_state["_pending_rate_shift_load"] = _rs_label
                 else:
-                    st.caption("Fetch rates above first to select an old tariff.")
+                    st.caption("Fetch rates above first to select an existing tariff.")
 
                 _rs_current = st.session_state.get("rate_shift_old_tariff")
                 if _rs_current is not None:
-                    st.success(f"Old tariff loaded: {_rs_current.name}")
+                    st.success(f"Existing tariff loaded: {_rs_current.name}")
+                else:
+                    st.warning("No existing tariff loaded — rate shift baseline will be unavailable.")
             else:
                 # NEM-A: per-meter old tariff selectors only (no blanket option)
                 _rs_meters = st.session_state.get("nema_meters", [])
@@ -4453,6 +4525,92 @@ def _render_sidebar():
                 flat_rate_2 = None
             else:
                 export_method_2, selected_export_profile_2, flat_rate_2 = _render_export_rate_widgets("_2")
+
+            # --- Section 2 tariff (post-transition re-billing) ---
+            # Defaults to reusing the regime-1 tariff. When the user loads a
+            # different existing tariff here, the post-switch years are
+            # re-billed on it (orchestration below sets result_regime2).
+            st.markdown("---")
+            st.markdown("**Section 2 — Tariff (post-transition)**")
+            st.caption(
+                "Re-bill the post-switch years on a different existing tariff. "
+                "Defaults to the Section-4 tariff above."
+            )
+            if billing_engine == "Custom":
+                _r2_use_same = st.radio(
+                    "Post-transition tariff",
+                    ["Same as regime 1", "Load a different tariff"],
+                    key="regime2_tariff_mode",
+                    horizontal=True,
+                    help="Same as regime 1 reuses the Section-4 tariff with no change in billing. "
+                         "Load a different tariff to re-bill the post-switch years on a second rate.",
+                )
+                if _r2_use_same == "Same as regime 1":
+                    st.session_state["regime_2_tariff"] = None
+                else:
+                    if st.session_state["available_rates"]:
+                        _r2_rate_options = {f"{r['name']}": r["label"] for r in st.session_state["available_rates"]}
+                        _r2_selected = st.selectbox(
+                            "Select Post-Transition Rate Schedule",
+                            list(_r2_rate_options.keys()),
+                            key="regime2_tariff_sel",
+                            help="The tariff the customer moves to after the NEM regime switch.",
+                        )
+                        _r2_label = _r2_rate_options[_r2_selected]
+                        if st.button("Load Post-Transition Tariff", key="regime2_tariff_load_btn"):
+                            st.session_state["_pending_regime2_tariff_load"] = _r2_label
+                    else:
+                        st.caption("Fetch rates above first to select a post-transition tariff.")
+                    _r2_current = st.session_state.get("regime_2_tariff")
+                    if _r2_current is not None:
+                        st.success(f"Post-transition tariff loaded: {_r2_current.name}")
+                    else:
+                        st.warning("No post-transition tariff loaded — will reuse the regime-1 tariff.")
+            else:
+                _r2_use_same_ecc = st.radio(
+                    "Post-transition tariff",
+                    ["Same as regime 1", "Load a different tariff"],
+                    key="regime2_ecc_mode",
+                    horizontal=True,
+                    help="Same as regime 1 reuses the loaded ECC tariff. "
+                         "Load a different tariff to re-bill the post-switch years on a second ECC tariff.",
+                )
+                if _r2_use_same_ecc == "Same as regime 1":
+                    st.session_state["regime_2_ecc_calculator"] = None
+                else:
+                    _r2_saved_ecc = _list_saved(ECC_TARIFFS_DIR, ".json")
+                    _r2_ecc_src = st.radio(
+                        "Post-transition tariff source",
+                        (["Use Saved Tariff"] if _r2_saved_ecc else []) + ["Upload JSON"],
+                        key="regime2_ecc_source",
+                        horizontal=True,
+                    )
+                    if _r2_ecc_src == "Use Saved Tariff":
+                        _r2_sel_ecc = st.selectbox(
+                            "Select Saved Post-Transition Tariff", _r2_saved_ecc,
+                            key="regime2_ecc_saved_sel",
+                        )
+                        if st.button("Load Post-Transition Tariff", key="regime2_ecc_saved_load_btn") and _r2_sel_ecc:
+                            st.session_state["_pending_regime2_ecc_saved_path"] = os.path.join(
+                                ECC_TARIFFS_DIR, _r2_sel_ecc + ".json"
+                            )
+                    else:
+                        _r2_ecc_upload = st.file_uploader(
+                            "Upload Post-Transition Tariff JSON", type=["json"],
+                            key="regime2_ecc_json_upload",
+                        )
+                        if st.button("Load Post-Transition Tariff", key="regime2_ecc_upload_load_btn") and _r2_ecc_upload:
+                            st.session_state["_pending_regime2_ecc_upload"] = _r2_ecc_upload
+                    if st.session_state.get("regime_2_ecc_calculator") is not None:
+                        st.success("Post-transition ECC tariff loaded.")
+                    else:
+                        st.warning("No post-transition ECC tariff loaded — will reuse the regime-1 tariff.")
+
+        # When the NEM switch is off, a regime-2 tariff is meaningless — clear it
+        # so a stale selection can't leak into a single-regime projection.
+        if not nem_switch:
+            st.session_state["regime_2_tariff"] = None
+            st.session_state["regime_2_ecc_calculator"] = None
 
         # --- 6. Battery (BESS) ---
         st.subheader("6. BESS")
@@ -5307,6 +5465,45 @@ if st.session_state.get("_pending_ecc_rs_load"):
             st.sidebar.success("Old ECC tariff loaded for rate shift.")
         except Exception as e:
             st.error(f"Error loading old ECC tariff: {e}")
+
+# --- Regime-2 (post-transition) tariff load handlers ---
+if st.session_state.get("_pending_regime2_tariff_load"):
+    _r2_load_label = st.session_state.pop("_pending_regime2_tariff_load")
+    with st.spinner("Loading post-transition tariff..."):
+        try:
+            _r2_tariff = fetch_tariff_detail(_r2_load_label)
+            st.session_state["regime_2_tariff"] = _r2_tariff
+            st.sidebar.success(f"Post-transition tariff loaded: {_r2_tariff.name}")
+        except Exception as e:
+            st.error(f"Error loading post-transition tariff: {e}")
+
+if st.session_state.get("_pending_regime2_ecc_saved_path"):
+    _r2_ecc_path = st.session_state.pop("_pending_regime2_ecc_saved_path")
+    if _r2_ecc_path and os.path.isfile(_r2_ecc_path):
+        with st.spinner("Loading post-transition ECC tariff..."):
+            try:
+                _r2_calc, _r2_tdata = load_ecc_tariff_from_json(_r2_ecc_path)
+                st.session_state["regime_2_ecc_calculator"] = _r2_calc
+                st.session_state["regime_2_ecc_tariff_data"] = _r2_tdata
+                st.sidebar.success("Post-transition ECC tariff loaded.")
+            except Exception as e:
+                st.error(f"Error loading post-transition ECC tariff: {e}")
+
+if st.session_state.get("_pending_regime2_ecc_upload"):
+    _r2_ecc_file = st.session_state.pop("_pending_regime2_ecc_upload")
+    with st.spinner("Loading post-transition ECC tariff..."):
+        try:
+            import tempfile
+            _r2_tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".json")
+            _r2_tmp.write(_r2_ecc_file.read())
+            _r2_tmp.close()
+            _r2_calc, _r2_tdata = load_ecc_tariff_from_json(_r2_tmp.name)
+            os.remove(_r2_tmp.name)
+            st.session_state["regime_2_ecc_calculator"] = _r2_calc
+            st.session_state["regime_2_ecc_tariff_data"] = _r2_tdata
+            st.sidebar.success("Post-transition ECC tariff loaded.")
+        except Exception as e:
+            st.error(f"Error loading post-transition ECC tariff: {e}")
 
 # --- ECC tariff fetch/load handlers ---
 if ecc_fetch_btn:
@@ -6186,6 +6383,68 @@ def _render_results():
         "nsc_rate_2": st.session_state.get("nsc_rate_2", 0.0) if nem_switch else 0.0,
     }
     _rs_old_baseline_for_proj = result.old_rate_annual_baseline if result.old_rate_annual_baseline is not None else None
+
+    # --- Regime-2 re-billing orchestration ---
+    # When the NEM switch is on AND a distinct post-transition tariff is set,
+    # run a SECOND year-1-style billing sim under tariff #2 + nem_regime_2 +
+    # the regime-2 export rates. The resulting BillingResult is handed to the
+    # engine as result_regime2 so the post-switch years re-bill on it. When no
+    # distinct regime-2 tariff is selected, result_regime2 stays None (no
+    # behavior change — the engine reuses the regime-1 result).
+    _result_regime2 = None
+    if nem_switch:
+        try:
+            # Regime-2 NEM params (mirror the year-1 NEM param derivation, but
+            # for the second regime).
+            _r2_regime = nem_regime_2
+            _r2_nbc = st.session_state.get("nbc_rate_2", 0.0) if _r2_regime == "NEM-2" else 0.0
+            _r2_nsc = st.session_state.get("nsc_rate_2", st.session_state.get("nsc_rate", NSC_DEFAULT_RATE))
+            _r2_billing = st.session_state.get("billing_option_2", "ABO") if _r2_regime in ("NEM-1", "NEM-2") else "ABO"
+
+            if billing_engine == "Custom" and st.session_state.get("regime_2_tariff") is not None:
+                # Regime-2 export series: prefer the loaded Section-2 8760 series,
+                # else a zeros placeholder (NEM-1/2 value exports at retail TOU).
+                _r2_export = st.session_state.get("export_rates_2")
+                if _r2_export is None:
+                    _r2_dt = pd.date_range(start=f"{cod_year}-01-01 00:00", periods=8760, freq="h")
+                    _r2_export = pd.Series(np.zeros(8760), index=_r2_dt, name="export_rate_per_kwh")
+                # Build base inputs from session, then swap in tariff #2,
+                # regime-2 export rates, and regime-2 NEM params. PV-only — the
+                # projection applies battery/escalation effects downstream.
+                _r2_inputs = inputs_from_session_state(
+                    st.session_state,
+                    nem_regime=_r2_regime,
+                    nbc_rate=_r2_nbc,
+                    nsc_rate=_r2_nsc,
+                    billing_option=_r2_billing,
+                    export_rates_placeholder=_r2_export,
+                    include_battery=False,
+                )
+                _r2_inputs = _dc_replace(
+                    _r2_inputs,
+                    tariff=st.session_state["regime_2_tariff"],
+                    export_rates_8760=_r2_export,
+                )
+                _result_regime2 = run_simulation(_r2_inputs).pv_only_result
+
+            elif billing_engine == "ECC" and st.session_state.get("regime_2_ecc_calculator") is not None:
+                _r2_ecc_export = st.session_state.get("export_rates_2")
+                if _r2_ecc_export is None:
+                    _r2_ecc_dt = pd.date_range(start=f"{cod_year}-01-01 00:00", periods=8760, freq="h")
+                    _r2_ecc_export = pd.Series(np.zeros(8760), index=_r2_ecc_dt, name="export_rate_per_kwh")
+                _result_regime2 = run_ecc_billing_simulation(
+                    load_8760=st.session_state["load_8760"],
+                    production_8760=st.session_state["production_8760"],
+                    cost_calculator=st.session_state["regime_2_ecc_calculator"],
+                    export_rates_8760=_r2_ecc_export,
+                    tariff_data=st.session_state.get("regime_2_ecc_tariff_data"),
+                    nsc_rate=_r2_nsc,
+                    min_monthly_charge=getattr(st.session_state.get("tariff"), "min_monthly_charge", 0.0),
+                )
+        except Exception as _r2_err:
+            st.warning(f"Post-transition re-billing failed; reusing regime-1 tariff. ({_r2_err})")
+            _result_regime2 = None
+
     _main_projection = build_annual_projection(
         result=result,
         system_cost=system_cost,
@@ -6197,6 +6456,7 @@ def _render_results():
         compound_escalation=compound_escalation,
         rate_shift_old_baseline=_rs_old_baseline_for_proj,
         existing_solar_offset_kwh=_es_offset_annual,
+        result_regime2=_result_regime2,
         **_common_nem_kw,
     )
 
