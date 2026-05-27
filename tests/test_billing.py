@@ -86,6 +86,26 @@ def _const_series(val: float, year: int = 2025) -> pd.Series:
     return _make_series(np.full(8760, val), year)
 
 
+def _diurnal_series(day_val: float, night_val: float,
+                    day_hours=range(9, 17), year: int = 2025) -> pd.Series:
+    """8760 series: day_val during day_hours, night_val otherwise. Used to build
+    a net-exporter-that-also-imports profile (midday export banks credit; night
+    import draws it down) — the realistic case where NSC fires and the
+    consumed-credit cap is exercised."""
+    dt = _make_dt_index(year)
+    vals = np.where(np.isin(dt.hour, list(day_hours)), float(day_val), float(night_val))
+    return pd.Series(vals, index=dt)
+
+
+def _seasonal_series(summer_val: float, winter_val: float,
+                     summer_months=(4, 5, 6, 7, 8, 9), year: int = 2025) -> pd.Series:
+    """8760 series: summer_val in summer_months, winter_val otherwise. Used to
+    test cross-month credit banking (summer surplus offsetting winter import)."""
+    dt = _make_dt_index(year)
+    vals = np.where(np.isin(dt.month, list(summer_months)), float(summer_val), float(winter_val))
+    return pd.Series(vals, index=dt)
+
+
 # ---------------------------------------------------------------------------
 # 1. NEM-3 basic billing
 # ---------------------------------------------------------------------------
@@ -466,9 +486,13 @@ class TestNSCTrueUp:
         assert abs(result.annual_nsc_adjustment) < TOL
 
     def test_nsc_applied_when_net_exporter(self):
+        # NEM-1/2 net MONTHLY, so a net-export-every-month profile never has a
+        # positive bill to consume banked credit. Use a seasonal profile: summer
+        # banks credit, winter imports and draws it down — so credit is genuinely
+        # consumed and the consumed-cap doesn't zero the clawback.
         tariff = _make_flat_tariff(rate=0.20)
-        load = _const_series(3.0)
-        solar = _const_series(10.0)  # big net exporter
+        solar = _seasonal_series(40.0, 0.0)
+        load = _seasonal_series(5.0, 20.0)
         export_rates = _const_series(0.0)
 
         result = run_billing_simulation(
@@ -480,8 +504,8 @@ class TestNSCTrueUp:
 
     def test_nsc_adjustment_in_month_12(self):
         tariff = _make_flat_tariff(rate=0.20)
-        load = _const_series(3.0)
-        solar = _const_series(10.0)
+        solar = _seasonal_series(40.0, 0.0)
+        load = _seasonal_series(5.0, 20.0)
         export_rates = _const_series(0.0)
 
         result = run_billing_simulation(
@@ -491,6 +515,22 @@ class TestNSCTrueUp:
         dec = result.monthly_summary[result.monthly_summary["month"] == 12].iloc[0]
         # NSC adjustment should appear in month 12
         assert dec["nsc_adjustment"] > 0
+
+    def test_no_clawback_when_credit_never_consumed_mbo(self):
+        """F3: an all-export MBO customer banks credit but never draws it down
+        (every month already floors at 0), so nothing is consumed and the NSC
+        clawback caps at $0 — the customer isn't charged for credit they never
+        realized."""
+        tariff = _make_flat_tariff(rate=0.20)
+        load = _const_series(3.0)
+        solar = _const_series(10.0)   # always exporting, no positive-bill months
+        export_rates = _const_series(0.0)
+
+        result = run_billing_simulation(
+            load, solar, tariff, export_rates,
+            nem_regime="NEM-1", nsc_rate=0.04, billing_option="MBO",
+        )
+        assert abs(result.annual_nsc_adjustment) < TOL
 
 
 # ---------------------------------------------------------------------------
@@ -528,19 +568,25 @@ class TestNEM3NscTrueUp:
         assert abs(result.annual_nsc_adjustment) < TOL
 
     def test_nsc_applied_when_net_exporter(self):
-        """Surplus × (avg ACC − NSC) lands as a clawback on month 12."""
+        """Surplus × (avg ACC − NSC) lands as a clawback on month 12.
+
+        Uses a diurnal net-exporter (midday export, night import) so credit is
+        consumed well in excess of the clawback — the consumed-cap doesn't bind
+        and the full haircut applies. Expected surplus is derived from the
+        actual import/export to stay robust."""
         tariff = _make_flat_tariff(rate=0.20)
-        load = _const_series(3.0)
-        solar = _const_series(10.0)   # surplus 7 kWh/hr
+        load = _const_series(10.0)
+        solar = _diurnal_series(40.0, 0.0)   # midday surplus, night import
         export_rates = _const_series(0.08)
 
         result = run_billing_simulation(
             load, solar, tariff, export_rates,
             nem_regime="NEM-3", nsc_rate=0.03,
         )
-        surplus_kwh = 7.0 * 8760
+        surplus_kwh = result.annual_export_kwh - result.annual_import_kwh
+        assert surplus_kwh > 0
         expected_adj = surplus_kwh * (0.08 - 0.03)
-        assert abs(result.annual_nsc_adjustment - expected_adj) < 1.0
+        assert result.annual_nsc_adjustment == pytest.approx(expected_adj, rel=0.02)
 
     def test_nsc_lands_on_month_12(self):
         tariff = _make_flat_tariff(rate=0.20)
@@ -559,17 +605,41 @@ class TestNEM3NscTrueUp:
             row = result.monthly_summary[result.monthly_summary["month"] == m].iloc[0]
             assert row["nsc_adjustment"] == 0.0
 
-    def test_nsc_capped_at_total_export_credit(self):
-        """Adjustment can't exceed the total annual export credit (the bill
-        credit balance ceiling)."""
-        tariff = _make_flat_tariff(rate=0.20)
+    def test_nsc_capped_at_consumed_credit(self):
+        """F1: the clawback can't exceed the export credit actually CONSUMED
+        (applied to reduce bills via NBT banking). For an all-export customer
+        with only the fixed charge to offset, consumed = 12 × fixed_monthly, so
+        the clawback caps there rather than at the (much larger) gross surplus
+        value."""
+        tariff = _make_flat_tariff(rate=0.20, fixed_monthly=10.0, min_monthly=0.0)
         load = _const_series(3.0)
         solar = _const_series(10.0)
         export_rates = _const_series(0.08)
 
         result = run_billing_simulation(
             load, solar, tariff, export_rates,
-            nem_regime="NEM-3", nsc_rate=0.0,  # would maximize adj if uncapped
+            nem_regime="NEM-3", nsc_rate=0.01,  # >0 so the true-up runs; haircut ≫ consumed
         )
-        gross_export_credit = 7.0 * 0.08 * 8760
-        assert result.annual_nsc_adjustment <= gross_export_credit + TOL
+        # Only the $10/mo fixed charge is offset each month → consumed = $120/yr,
+        # far below the surplus × (0.08 − 0.01) haircut, so the cap binds at $120.
+        assert result.annual_nsc_adjustment == pytest.approx(12 * 10.0, rel=0.05)
+
+    def test_nem3_banks_monthly_surplus_to_offset_later_months(self):
+        """F1: surplus-month export credit carries forward and offsets a later
+        deficit month, rather than being discarded at the monthly floor."""
+        tariff = _make_flat_tariff(rate=0.20, fixed_monthly=0.0, min_monthly=0.0)
+        # Summer: big solar, tiny load → bank credit. Winter: no solar, big load.
+        solar = _seasonal_series(40.0, 0.0)
+        load = _seasonal_series(5.0, 20.0)
+        export_rates = _const_series(0.08)
+
+        result = run_billing_simulation(
+            load, solar, tariff, export_rates, nem_regime="NEM-3", nsc_rate=0.0,
+        )
+        ms = result.monthly_summary
+        # October (first post-summer month) imports heavily, but its bill is
+        # offset by banked summer credit — well below its raw import charge.
+        oct_row = ms[ms["month"] == 10].iloc[0]
+        raw_import_charge = oct_row["import_kwh"] * 0.20
+        assert raw_import_charge > TOL
+        assert oct_row["net_bill"] < raw_import_charge - TOL

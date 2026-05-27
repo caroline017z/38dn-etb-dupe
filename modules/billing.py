@@ -474,7 +474,7 @@ def run_billing_simulation(
         # down to the wholesale NSC rate; smaller magnitude than NEM-1/2 NSC
         # but non-zero whenever annual exports exceed annual imports and
         # nsc_rate < avg ACC rate.
-        monthly_rows = _build_monthly_nem3(
+        monthly_rows, nem3_credit_consumed = _build_monthly_nem3(
             load, solar, import_kwh, export_kwh, export_credit,
             energy_period, energy_cost, dt_index, tariff, demand_df, peak_period_idx,
         )
@@ -482,6 +482,7 @@ def run_billing_simulation(
             _apply_nbt_nsc_true_up(
                 monthly_rows, import_kwh, export_kwh, nsc_rate,
                 tariff.min_monthly_charge,
+                credit_consumed=nem3_credit_consumed,
             )
 
     monthly_summary = pd.DataFrame(monthly_rows)
@@ -523,6 +524,15 @@ def _build_monthly_nem3(
     energy_cost_arr = energy_cost
 
     monthly_rows = []
+    # True-NBT credit banking: a month's surplus export credit carries forward
+    # and offsets later months' bills (the customer always pays >= the minimum
+    # charge). This is a no-op for net-import months — the credit is fully
+    # consumed and the bank stays 0 — so net-importer bills are identical to the
+    # prior floor-only behavior. total_credit_consumed tracks export credit that
+    # actually reduced a bill, used to cap the year-end NSC clawback.
+    credit_bank = 0.0
+    total_credit_consumed = 0.0
+    min_charge = tariff.min_monthly_charge
     for month_num in range(1, 13):
         month_mask = dt_index.month == month_num
         m_load = load[month_mask].sum()
@@ -547,8 +557,15 @@ def _build_monthly_nem3(
         m_export_offpeak = float(month_export[offpeak_mask].sum()) if offpeak_mask.any() else 0.0
 
         m_fixed = tariff.fixed_monthly_charge
-        m_net_bill = m_energy_cost + m_demand_cost + m_fixed - m_export_credit
-        m_net_bill = max(m_net_bill, tariff.min_monthly_charge)
+        charges = m_energy_cost + m_demand_cost + m_fixed
+        available_credit = m_export_credit + credit_bank
+        m_net_bill = max(charges - available_credit, min_charge)
+        # Credit applied to reduce charges this month; any remainder banks
+        # forward. (When charges - available_credit >= min, all available credit
+        # is consumed and the bank empties — the net-importer no-op path.)
+        credit_used = max(0.0, min(available_credit, charges - min_charge))
+        credit_bank = available_credit - credit_used
+        total_credit_consumed += credit_used
 
         monthly_rows.append({
             "month": month_num,
@@ -569,7 +586,7 @@ def _build_monthly_nem3(
             "nsc_adjustment": 0.0,
             "net_bill": round(m_net_bill, 2),
         })
-    return monthly_rows
+    return monthly_rows, total_credit_consumed
 
 
 def _build_monthly_nem12(
@@ -592,6 +609,7 @@ def _build_monthly_nem12(
 
     monthly_rows = []
     credit_bank = 0.0        # MBO credit carryover
+    credit_consumed_mbo = 0.0  # MBO credit actually drawn down against positive bills
     deferred_energy = 0.0    # ABO deferred energy charges
     tou_annual_energy = 0.0  # positive side of TOU netting (across all months)
     tou_annual_credit = 0.0  # negative side of TOU netting (across all months)
@@ -676,6 +694,7 @@ def _build_monthly_nem12(
                 reduction = min(credit_bank, m_net_bill)
                 m_net_bill -= reduction
                 credit_bank -= reduction
+                credit_consumed_mbo += reduction
         elif billing_option == "ABO":
             # Annual Billing Option: only demand + fixed + NBC paid monthly,
             # energy charges deferred to month 12
@@ -718,10 +737,15 @@ def _build_monthly_nem12(
         })
 
     # --- NSC true-up ---
+    # Under MBO, cap the clawback at credit actually consumed (drawn down against
+    # positive-bill months); unconsumed bank evaporates at year-end, so clawing
+    # back beyond consumed would over-charge. ABO keeps the banked-credit cap.
+    _nsc_consumed_cap = credit_consumed_mbo if billing_option == "MBO" else None
     _apply_nsc_true_up(
         monthly_rows, import_kwh, export_kwh, energy_rate, energy_period,
         period_rates, nsc_rate, tariff.min_monthly_charge,
         tou_annual_credit=tou_annual_credit,
+        credit_consumed=_nsc_consumed_cap,
     )
 
     return monthly_rows, tou_annual_energy, tou_annual_credit, tou_monthly_energy, tou_monthly_credit
@@ -737,6 +761,7 @@ def _apply_nsc_true_up(
     nsc_rate: float,
     min_monthly_charge: float = 0.0,
     tou_annual_credit: float = 0.0,
+    credit_consumed: float | None = None,
 ) -> None:
     """Apply Net Surplus Compensation true-up to month 12 if annual net surplus.
 
@@ -775,7 +800,12 @@ def _apply_nsc_true_up(
     # period imbalance lets annual per-period netting credit MORE than the sum
     # of monthly per-period nettings, the customer never actually banked the
     # excess — so the clawback can't exceed what was banked.
-    if tou_annual_credit > 0:
+    # MBO caps at credit actually consumed (passed in, may be 0 → no clawback);
+    # ABO keeps the banked-credit cap (credit_consumed is None). See
+    # _build_monthly_nem12.
+    if credit_consumed is not None:
+        nsc_adjustment = min(nsc_adjustment, credit_consumed)
+    elif tou_annual_credit > 0:
         nsc_adjustment = min(nsc_adjustment, tou_annual_credit)
 
     if nsc_adjustment <= 0:
@@ -799,6 +829,7 @@ def _apply_nbt_nsc_true_up(
     export_kwh: np.ndarray,
     nsc_rate: float,
     min_monthly_charge: float = 0.0,
+    credit_consumed: float = 0.0,
 ) -> None:
     """Apply NEM-3 / NBT Net Surplus Compensation true-up to month 12.
 
@@ -833,9 +864,12 @@ def _apply_nbt_nsc_true_up(
     if nsc_adjustment <= 0:
         return  # NSC rate >= avg ACC: no adjustment
 
-    # Cap at total annual export credit — the customer's bill credit balance
-    # can never exceed what they were credited for exports across the year.
-    nsc_adjustment = min(nsc_adjustment, total_export_credit)
+    # Cap the clawback at the export credit actually CONSUMED (applied to reduce
+    # bills via NBT monthly banking). Credit that was never consumed is just
+    # leftover surplus; clawing back beyond consumed credit would charge the
+    # customer for value they never realized. (avg_acc_rate above still uses
+    # gross export credit — it's the per-kWh ACC price, not a cap.)
+    nsc_adjustment = min(nsc_adjustment, credit_consumed)
 
     if nsc_adjustment <= 0:
         return
