@@ -448,6 +448,45 @@ class TestProjectionCompatibility:
             years=5,
             nem_regime_1="NEM-A (NEM-1)",
         )
-
         assert len(proj_df) == 5
         assert "Annual Savings ($)" in proj_df.columns
+
+
+# ---------------------------------------------------------------------------
+# 7. NSC assessed on aggregate surplus, not the generating meter alone (F2)
+# ---------------------------------------------------------------------------
+class TestAggregateNSC:
+    """The generating meter (small load, large PV) has a large standalone
+    surplus, but NSC must be assessed on the AGGREGATE net position."""
+
+    def _run(self, gen_load_kwh, agg_load_kwh, production_kwh):
+        tariff = _make_tariff(energy_rates=[0.20], fixed_monthly=10.0)
+        gen_load = _make_load_series(gen_load_kwh)
+        agg_load = _make_load_series(agg_load_kwh)
+        dt_index = gen_load.index
+        production = pd.Series(np.full(8760, production_kwh), index=dt_index, name="ac_watts")
+        export_rates = pd.Series(np.full(8760, 0.05), index=dt_index, name="export_rate_per_kwh")
+        profile = NemAProfile(
+            utility="PG&E",
+            meters=[
+                MeterConfig(name="Gen", load_8760=gen_load, tariff=tariff, is_generating=True),
+                MeterConfig(name="Agg", load_8760=agg_load, tariff=tariff),
+            ],
+            nem_regime="NEM-2", nbc_rate=0.0, nsc_rate=0.04, billing_option="ABO",
+        )
+        return run_aggregation_simulation(
+            profile=profile, production_8760=production, export_rates_8760=export_rates,
+        )
+
+    def test_no_nsc_when_aggregate_is_net_importer(self):
+        """Gen meter net-exports standalone, but the large aggregated load makes
+        the group a net importer — so there is no surplus to true up."""
+        result = self._run(gen_load_kwh=20.0, agg_load_kwh=500.0, production_kwh=200.0)
+        assert result.annual_nsc_adjustment == pytest.approx(0.0, abs=1e-6)
+
+    def test_nsc_present_when_aggregate_retains_surplus(self):
+        """When aggregate load is small enough that the group still net-exports,
+        a (scaled) NSC clawback remains — confirming the gate isn't zeroing
+        everything."""
+        result = self._run(gen_load_kwh=20.0, agg_load_kwh=30.0, production_kwh=200.0)
+        assert result.annual_nsc_adjustment > 0.0
