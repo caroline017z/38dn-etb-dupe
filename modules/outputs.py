@@ -704,49 +704,29 @@ def _apply_rate_shift_columns(
         row["Cumulative Total Savings ($)"] = round(cumulative_total_savings)
 
 
-def build_annual_projection(
+def _extract_year1_components(
     result: BillingResult,
-    system_cost: float,
-    rate_escalator_pct: float,
-    load_escalator_pct: float,
-    years: int = 10,
-    export_rates_multiyear: dict[int, "pd.Series"] | None = None,
-    result_pv_only: BillingResult | None = None,
-    nem_regime_1: str = "NEM-3 / NVBT",
-    nem_regime_2: str | None = None,
-    num_years_1: int | None = None,
-    export_rates_multiyear_2: dict[int, "pd.Series"] | None = None,
-    cod_year: int | None = None,
-    degradation_pct: float = 0.0,
-    nbc_rate_2: float = 0.0,
-    nsc_rate_2: float = 0.0,
-    compound_escalation: bool = True,
-    rate_shift_old_baseline: float | None = None,
-    existing_solar_offset_kwh: float = 0.0,
-) -> pd.DataFrame:
-    """
-    Build a multi-year annual projection table.
+    result_pv_only: BillingResult | None,
+) -> dict:
+    """Extract all year-1 base scalars / derived values from a BillingResult.
 
-    Escalators:
-      - rate_escalator_pct: applied to TOU energy rates each year
-      - load_escalator_pct: applied to load profile each year
-        (increases energy consumption AND peak demand)
-      - degradation_pct: annual solar production decline (e.g. 0.5 for 0.5%/yr)
-      - compound_escalation: if True, use compound formula (1+r)^n;
-        if False, use linear formula 1 + r*n
+    Returns a dict whose keys exactly match the ``result``-derived keyword
+    arguments that :func:`_compute_year_row` consumes (the ``year1_*`` base
+    scalars, the raw/TOU energy splits, the blended import rate, the baseline
+    breakdown, plus the per-result passthrough objects such as the hourly
+    detail, monthly summary, and billing-option context).
 
-    Args:
-        result: Year-1 BillingResult
-        system_cost: Total installed cost ($)
-        rate_escalator_pct: Annual TOU rate escalation (e.g., 3.0 for 3%)
-        load_escalator_pct: Annual load/demand growth (e.g., 2.0 for 2%)
-        years: Number of years to project
-        result_pv_only: If provided, PV-only result for separate demand column
-        nem_regime_1: NEM regime for the first period (default NEM-3/NVBT)
-        nem_regime_2: NEM regime for the second period (None if no switch)
-        num_years_1: Number of years under regime 1 (None if no switch)
-        export_rates_multiyear_2: Multi-year export rates for regime 2
-        compound_escalation: Use compound (True) or linear (False) escalation
+    This is called once for the primary ``result`` (regime-1 tariff) and, when
+    a second-regime BillingResult is supplied, once for that result. In the
+    per-year loop the caller selects which component dict to feed into
+    ``_compute_year_row`` based on whether the projection year falls in the
+    post-transition window — swapping ONLY which BillingResult the year-1 base
+    scalars come from. All escalation / degradation / export-regime logic is
+    unchanged and lives in ``_compute_year_row``.
+
+    ``result_pv_only`` is shared across both regimes (it represents the same
+    physical PV-only system for the separate demand column); the BESS-side
+    peak demand is taken from ``result`` so each regime keeps its own demand kW.
     """
     year1_energy = float(result.monthly_summary["energy_cost"].sum())
     year1_demand = float(result.monthly_summary["total_demand_charge"].sum())
@@ -790,10 +770,6 @@ def build_annual_projection(
         year1_baseline_demand = _remaining * _demand_share
         year1_baseline_energy = _remaining * (1.0 - _demand_share)
 
-    rate_mult = rate_escalator_pct / 100.0
-    load_mult = load_escalator_pct / 100.0
-    degrad_rate = degradation_pct / 100.0
-
     # Precompute BOTH energy baselines so regime-shift years use the correct
     # energy cost:
     #   raw_energy = sum(import_kwh * energy_rate) across ALL meters — NEM-3/NVBT
@@ -822,6 +798,104 @@ def build_annual_projection(
     blended_import_rate = (
         _gen_raw_energy / _gen_import_kwh if _gen_import_kwh > 0 else 0.0
     )
+
+    return {
+        "year1_load_kwh": year1_load_kwh,
+        "year1_solar_kwh": year1_solar_kwh,
+        "year1_import_kwh": year1_import_kwh,
+        "year1_export_kwh": year1_export_kwh,
+        "year1_export_peak_kwh": year1_export_peak_kwh,
+        "year1_export_offpeak_kwh": year1_export_offpeak_kwh,
+        "year1_demand": year1_demand,
+        "year1_fixed": year1_fixed,
+        "year1_export": year1_export,
+        "year1_nbc": year1_nbc,
+        "year1_demand_kw_pv": year1_demand_kw_pv,
+        "year1_demand_kw_bess": year1_demand_kw_bess,
+        "year1_bill_no_solar": year1_bill_no_solar,
+        "year1_baseline_energy": year1_baseline_energy,
+        "year1_baseline_demand": year1_baseline_demand,
+        "year1_baseline_fixed": year1_baseline_fixed,
+        "tou_year1_energy": tou_year1_energy,
+        "year1_tou_credit": year1_tou_credit,
+        "gen_raw_energy": _gen_raw_energy,
+        "agg_raw_energy": _agg_raw_energy,
+        "blended_import_rate": blended_import_rate,
+        "result_hourly_detail": result.hourly_detail,
+        "result_annual_bill_with_solar": result.annual_bill_with_solar,
+        "year1_nsc_adj": result.annual_nsc_adjustment,
+        "monthly_summary_y1": result.monthly_summary,
+        "tou_monthly_energy_y1": result.tou_monthly_energy,
+        "tou_monthly_credit_y1": result.tou_monthly_credit,
+        "billing_option": result.billing_option,
+        "min_monthly_charge": result.min_monthly_charge,
+    }
+
+
+def build_annual_projection(
+    result: BillingResult,
+    system_cost: float,
+    rate_escalator_pct: float,
+    load_escalator_pct: float,
+    years: int = 10,
+    export_rates_multiyear: dict[int, "pd.Series"] | None = None,
+    result_pv_only: BillingResult | None = None,
+    nem_regime_1: str = "NEM-3 / NVBT",
+    nem_regime_2: str | None = None,
+    num_years_1: int | None = None,
+    export_rates_multiyear_2: dict[int, "pd.Series"] | None = None,
+    cod_year: int | None = None,
+    degradation_pct: float = 0.0,
+    nbc_rate_2: float = 0.0,
+    nsc_rate_2: float = 0.0,
+    compound_escalation: bool = True,
+    rate_shift_old_baseline: float | None = None,
+    existing_solar_offset_kwh: float = 0.0,
+    result_regime2: BillingResult | None = None,
+) -> pd.DataFrame:
+    """
+    Build a multi-year annual projection table.
+
+    Escalators:
+      - rate_escalator_pct: applied to TOU energy rates each year
+      - load_escalator_pct: applied to load profile each year
+        (increases energy consumption AND peak demand)
+      - degradation_pct: annual solar production decline (e.g. 0.5 for 0.5%/yr)
+      - compound_escalation: if True, use compound formula (1+r)^n;
+        if False, use linear formula 1 + r*n
+
+    Args:
+        result: Year-1 BillingResult
+        system_cost: Total installed cost ($)
+        rate_escalator_pct: Annual TOU rate escalation (e.g., 3.0 for 3%)
+        load_escalator_pct: Annual load/demand growth (e.g., 2.0 for 2%)
+        years: Number of years to project
+        result_pv_only: If provided, PV-only result for separate demand column
+        nem_regime_1: NEM regime for the first period (default NEM-3/NVBT)
+        nem_regime_2: NEM regime for the second period (None if no switch)
+        num_years_1: Number of years under regime 1 (None if no switch)
+        export_rates_multiyear_2: Multi-year export rates for regime 2
+        compound_escalation: Use compound (True) or linear (False) escalation
+        result_regime2: Optional second-regime BillingResult. When provided AND
+            ``nem_regime_2`` / ``num_years_1`` are set, projection years with
+            ``yr > num_years_1`` derive their year-1 base billing components
+            from this result instead of ``result`` (re-billing on tariff #2).
+            Defaults to None, in which case behavior is byte-identical to the
+            single-tariff case.
+    """
+    # Extract the year-1 base scalars / derived values for each regime once,
+    # before the year loop. ``comp1`` always drives pre-transition years; when a
+    # second-regime result is supplied, ``comp2`` drives post-transition years.
+    comp1 = _extract_year1_components(result, result_pv_only)
+    comp2 = (
+        _extract_year1_components(result_regime2, result_pv_only)
+        if result_regime2 is not None
+        else None
+    )
+
+    rate_mult = rate_escalator_pct / 100.0
+    load_mult = load_escalator_pct / 100.0
+    degrad_rate = degradation_pct / 100.0
 
     # Multi-year export rates: keyed by calendar year (e.g. {2026: Series, 2027: ...})
     if export_rates_multiyear and len(export_rates_multiyear) >= 1:
@@ -859,29 +933,19 @@ def build_annual_projection(
             )
         )
 
+        # Select which regime's year-1 base components drive this year. Only
+        # post-transition years (yr > num_years_1) use regime 2, and only when a
+        # second-regime result was supplied. Otherwise comp1 is used throughout
+        # — making the result_regime2=None path byte-identical to today.
+        comps = (
+            comp2
+            if (comp2 is not None and num_years_1 and yr > num_years_1)
+            else comp1
+        )
+
         row = _compute_year_row(
             yr,
-            year1_load_kwh=year1_load_kwh,
-            year1_solar_kwh=year1_solar_kwh,
-            year1_import_kwh=year1_import_kwh,
-            year1_export_kwh=year1_export_kwh,
-            year1_export_peak_kwh=year1_export_peak_kwh,
-            year1_export_offpeak_kwh=year1_export_offpeak_kwh,
-            year1_demand=year1_demand,
-            year1_fixed=year1_fixed,
-            year1_export=year1_export,
-            year1_nbc=year1_nbc,
-            year1_demand_kw_pv=year1_demand_kw_pv,
-            year1_demand_kw_bess=year1_demand_kw_bess,
-            year1_bill_no_solar=year1_bill_no_solar,
-            year1_baseline_energy=year1_baseline_energy,
-            year1_baseline_demand=year1_baseline_demand,
-            year1_baseline_fixed=year1_baseline_fixed,
-            tou_year1_energy=tou_year1_energy,
-            year1_tou_credit=year1_tou_credit,
-            gen_raw_energy=_gen_raw_energy,
-            agg_raw_energy=_agg_raw_energy,
-            blended_import_rate=blended_import_rate,
+            **comps,
             rate_mult=rate_mult,
             load_mult=load_mult,
             degrad_rate=degrad_rate,
@@ -898,15 +962,7 @@ def build_annual_projection(
             nbc_rate_2=nbc_rate_2,
             nsc_rate_2=nsc_rate_2,
             result_pv_only=result_pv_only,
-            result_hourly_detail=result.hourly_detail,
-            result_annual_bill_with_solar=result.annual_bill_with_solar,
             existing_solar_offset_kwh=existing_solar_offset_kwh,
-            year1_nsc_adj=result.annual_nsc_adjustment,
-            monthly_summary_y1=result.monthly_summary,
-            tou_monthly_energy_y1=result.tou_monthly_energy,
-            tou_monthly_credit_y1=result.tou_monthly_credit,
-            billing_option=result.billing_option,
-            min_monthly_charge=result.min_monthly_charge,
         )
 
         cumulative_savings += row["Annual Savings ($)"]
