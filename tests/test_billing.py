@@ -244,10 +244,33 @@ class TestNEM12TouNetting:
 class TestNEM2NBC:
     """Non-Bypassable Charges apply to net consumption under NEM-2."""
 
-    def test_nbc_increases_bill(self):
+    def test_nbc_no_double_count_for_net_consumer(self):
+        # NBC is part of the retail rate; for a net consumer (no export) modeling
+        # it just reallocates between the energy line and the NBC line — the total
+        # bill is unchanged vs nbc_rate=0. Pre-fix it double-counted (retail energy
+        # on net import PLUS a separate NBC line) and inflated the bill (#27).
         tariff = _make_flat_tariff(rate=0.20)
         load = _const_series(10.0)
-        solar = _const_series(5.0)
+        solar = _const_series(5.0)            # net consumer, no export
+        export_rates = _const_series(0.0)
+
+        r_no_nbc = run_billing_simulation(
+            load, solar, tariff, export_rates,
+            nem_regime="NEM-2", nbc_rate=0.0, billing_option="MBO",
+        )
+        r_with_nbc = run_billing_simulation(
+            load, solar, tariff, export_rates,
+            nem_regime="NEM-2", nbc_rate=0.03, billing_option="MBO",
+        )
+        assert abs(r_with_nbc.annual_bill_with_solar - r_no_nbc.annual_bill_with_solar) < TOL
+        assert r_with_nbc.annual_nbc_cost > 0   # NBC still assessed, just not doubled
+
+    def test_nbc_nonbypassable_for_exporter(self):
+        # For an exporter, NBC is non-bypassable: exports cannot offset it, so the
+        # bill WITH NBC exceeds the bill without (where it would be bypassed).
+        tariff = _make_flat_tariff(rate=0.20)
+        load = _const_series(10.0)
+        solar = _diurnal_series(40.0, 0.0)    # midday export, night import
         export_rates = _const_series(0.0)
 
         r_no_nbc = run_billing_simulation(

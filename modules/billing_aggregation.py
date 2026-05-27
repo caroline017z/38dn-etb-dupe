@@ -573,8 +573,14 @@ def run_aggregation_simulation(
             tariff=m.tariff,
             export_rates_8760=zero_export,
             nem_regime=profile.nem_regime,
-            nbc_rate=0.0,   # NBC only applies to the generating NEM meter
-            nsc_rate=0.0,   # NSC only applies to the generating NEM meter
+            # Each aggregated (benefiting) meter consumes grid power, so under
+            # NEM-A it pays NBC on its OWN net consumption — NBCs are
+            # non-bypassable per account and are NOT offset by allocated
+            # generation credits (PG&E NEM2 SC 2.c; NEM-A assesses NBC per
+            # metered account). nem_nbc is the deal's NBC rate (NEM-2 only;
+            # NEM-A is single-utility, so one rate applies). #29.
+            nbc_rate=nem_nbc,
+            nsc_rate=0.0,   # NSC (net surplus) applies only to the exporting meter
             billing_option=nem_billing,
         )
 

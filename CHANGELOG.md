@@ -4,6 +4,19 @@ All notable changes to PV Solar Rate Simulator will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Changed
+- Default billing option is now **Monthly (MBO)** instead of Annual (ABO).
+
+### Fixed
+- **Credit offsets energy only.** Generation/export credits no longer reduce demand, fixed/customer, or non-bypassable (NBC) charges — only the volumetric energy charge — across all bill-assembly paths (NEM-1/2 MBO/ABO, NEM-3, ECC engine, NEM-A aggregation) and the battery size-selection objective. Per PG&E NEM2 SC 2.c/2.d and Schedule NBT SC 2.d.
+- **NEM-2 NBC double-count.** The URDB retail rate already includes the non-bypassable components, so NEM-2 energy is now netted at the rate *excluding* `nbc_rate`, with NBC charged once via the explicit non-bypassable line. Exports are credited net of NBC (they do not earn the non-bypassable portion). Increases reported savings for NEM-2 deals with a positive NBC rate; the `tou_nem2` golden was regenerated accordingly.
+- **NEM-A benefiting meters now pay NBC** on their own net consumption (was zeroed); NBCs are non-bypassable per metered account.
+- **Projection tie-out under degradation.** The monthly and annual projection builders now share one degradation-volume model, so the views reconcile when `degradation_pct > 0`.
+- **ECC engine** now applies the NEM-3/NBT year-end NSC clawback (previously always a no-op) and floors the monthly bill at the larger of the minimum and fixed charges.
+- **Y>1 NBC** now escalates with import volume, matching demand/energy.
+
 ## [1.0.0] - 2026-02-10
 
 ### Added

@@ -1,10 +1,10 @@
 {
-  "annual_bill_with_solar": 36895.7,
+  "annual_bill_with_solar": 32896.47,
   "annual_bill_without_solar": 58891.6949,
-  "annual_energy_cost": 31147.38,
-  "annual_export_credit": 7745.93,
-  "annual_net_bill": 36895.7,
-  "annual_savings": 21995.9949,
+  "annual_energy_cost": 27148.15,
+  "annual_export_credit": 6176.84,
+  "annual_net_bill": 32896.47,
+  "annual_savings": 25995.2249,
   "monthly": {
     "energy_cost": [
       0.0,
@@ -18,21 +18,21 @@
       0.0,
       0.0,
       0.0,
-      31147.38
+      27148.15
     ],
     "export_credit": [
-      650.14,
-      603.43,
-      695.58,
-      633.76,
-      626.14,
-      654.7,
-      665.52,
-      637.59,
-      596.3,
-      653.89,
-      693.23,
-      635.65
+      518.46,
+      481.52,
+      554.26,
+      504.93,
+      496.96,
+      521.39,
+      531.67,
+      511.21,
+      473.83,
+      521.87,
+      554.8,
+      505.94
     ],
     "fixed_charge": [
       15.0,
@@ -74,7 +74,7 @@
       482.39,
       490.47,
       463.5,
-      31641.65
+      27642.42
     ],
     "total_demand_charge": [
       0.0,
