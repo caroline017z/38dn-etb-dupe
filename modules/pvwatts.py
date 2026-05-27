@@ -134,7 +134,7 @@ def fetch_production_8760(
         "timeframe": "hourly",
     }
 
-    url = "https://developer.nrel.gov/api/pvwatts/v8.json"
+    url = "https://developer.nlr.gov/api/pvwatts/v8.json"
     response = _session.get(url, params=params, timeout=30)
 
     if response.status_code != 200:

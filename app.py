@@ -5044,7 +5044,7 @@ elif save_btn and st.session_state.get("billing_result") is None:
 if generate_prod and lat is not None and lon is not None:
     api_key = _get_secret("NREL_API_KEY")
     if not api_key:
-        st.error("NREL_API_KEY not found. Add `NREL_API_KEY=your_key` to the `.env` file in the project root. Get a free key at https://developer.nrel.gov/signup/")
+        st.error("NREL_API_KEY not found. Add `NREL_API_KEY` to your Streamlit secrets (Manage app → Settings → Secrets), or to a local `.env` for local runs. Get a free key at https://developer.nlr.gov/signup/")
     else:
         with st.spinner("Calling PVWatts API..."):
             try:
