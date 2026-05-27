@@ -1436,6 +1436,27 @@ def _indexed_tariff_savings_target(
     return base_savings_pct + savings_escalator_pct * (yr - 1)
 
 
+# PPA rate output precision and the rate floor. A PPA rate can't go negative,
+# so when the offset can't reach the savings target the rate floors here and
+# the customer keeps the full (smaller) offset.
+_PPA_RATE_FLOOR = 0.0
+_PPA_RATE_DECIMALS = 5
+_USD_DECIMALS = 2
+
+
+def _backsolve_ppa_rate(
+    utility_savings: float, savings_frac: float, solar_kwh: float,
+) -> float:
+    """Per-period PPA rate so the customer keeps ``savings_frac`` of the offset.
+
+    PPA cost = offset × (1 − savings_frac); rate = cost / solar_kwh, floored at
+    $0. Returns the floor when there is no solar to price against.
+    """
+    if solar_kwh <= 0:
+        return _PPA_RATE_FLOOR
+    return max(_PPA_RATE_FLOOR, utility_savings * (1.0 - savings_frac) / solar_kwh)
+
+
 def build_indexed_tariff_annual(
     annual_proj_df: pd.DataFrame,
     base_savings_pct: float,
@@ -1444,27 +1465,21 @@ def build_indexed_tariff_annual(
     regime_2_savings_pct: float | None = None,
     nem_regime_2: str | None = None,
     num_years_1: int | None = None,
-    ppa_escalator_pct: float = 0.0,
-    ppa_escalator_pct_2: float | None = None,
 ) -> pd.DataFrame:
-    """Build an annual Indexed Tariff table solving for PPA rate per year.
+    """Build an annual Indexed Tariff table solving for the PPA rate per year.
 
-    When ppa_escalator_pct > 0, backsolves a Year 1 PPA rate per NEM regime
-    such that the escalated rate delivers the target savings over the regime
-    period.  Each year shows the escalated PPA rate and actual savings.
+    The rate is solved *per year* so every year delivers the savings target as a
+    flat % of that year's offset value (Bill w/o Solar − Bill w/ Solar). This
+    holds the target across a NEM regime switch — replacing an earlier
+    aggregate escalator solve that depressed the post-switch starting rate and
+    overshot early NEM-3 savings (first NEM-3 years ran ~19% vs a 10% target,
+    then starved late years). The realized rate floats with the bill each year;
+    there is no fixed escalator.
 
-    Without escalator (ppa_escalator_pct == 0), falls back to per-year
-    independent backsolve:
-        PPA Rate  = Utility Savings × (1 - savings_frac) / Solar kWh
+        PPA Rate = Utility Savings × (1 − savings_frac) / Solar kWh   (floored $0)
     """
-    esc_1 = (ppa_escalator_pct or 0.0) / 100.0
-    esc_2 = ((ppa_escalator_pct_2 if ppa_escalator_pct_2 is not None
-              else ppa_escalator_pct) or 0.0) / 100.0
-    use_escalator = esc_1 > 0 or esc_2 > 0
-
-    # Collect per-year data
-    year_data = []
     has_nsc = "NSC Adj ($)" in annual_proj_df.columns
+    rows = []
     for _, row in annual_proj_df.iterrows():
         yr = int(row["Year"])
         savings_target = _indexed_tariff_savings_target(
@@ -1472,74 +1487,28 @@ def build_indexed_tariff_annual(
             regime_1_savings_pct, regime_2_savings_pct,
             nem_regime_2, num_years_1,
         )
-        savings_frac = savings_target / 100.0
         bill_no_solar = row["Bill w/o Solar ($)"]
         bill_solar = row["Bill w/ Solar ($)"]
         solar_kwh = row["Solar (kWh)"]
         utility_savings = bill_no_solar - bill_solar
-        cal_yr = int(row["Calendar Year"]) if "Calendar Year" in row.index else None
-        nsc_adj = float(row["NSC Adj ($)"]) if has_nsc and pd.notna(row.get("NSC Adj ($)")) else 0.0
-        year_data.append((yr, bill_no_solar, bill_solar, solar_kwh,
-                          utility_savings, savings_frac, savings_target, cal_yr, nsc_adj))
-
-    # Backsolve Year 1 PPA rate per regime when escalator is set
-    yr1_ppa_rate_r1 = 0.0
-    yr1_ppa_rate_r2 = 0.0
-    if use_escalator:
-        # Regime 1 years
-        r1_years = [(yr, us, sf, skwh) for yr, _, _, skwh, us, sf, _, _, _ in year_data
-                     if not (nem_regime_2 and num_years_1 and yr > num_years_1)]
-        if r1_years:
-            num = sum(us * (1.0 - sf) for _, us, sf, _ in r1_years)
-            den = sum(((1 + esc_1) ** (yr - 1)) * skwh for yr, _, _, skwh in r1_years)
-            yr1_ppa_rate_r1 = num / den if den > 0 else 0.0
-
-        # Regime 2 years
-        if nem_regime_2 and num_years_1:
-            r2_years = [(yr, us, sf, skwh) for yr, _, _, skwh, us, sf, _, _, _ in year_data
-                         if yr > num_years_1]
-            if r2_years:
-                r2_start = num_years_1 + 1
-                num = sum(us * (1.0 - sf) for _, us, sf, _ in r2_years)
-                den = sum(((1 + esc_2) ** (yr - r2_start)) * skwh for yr, _, _, skwh in r2_years)
-                yr1_ppa_rate_r2 = num / den if den > 0 else 0.0
-
-    rows = []
-    for yr, bill_no_solar, bill_solar, solar_kwh, utility_savings, savings_frac, savings_target, cal_yr, nsc_adj in year_data:
-        if use_escalator:
-            # Determine which regime and escalated rate
-            if nem_regime_2 and num_years_1 and yr > num_years_1:
-                esc = esc_2
-                yr1_rate = yr1_ppa_rate_r2
-                regime_yr = yr - num_years_1
-            else:
-                esc = esc_1
-                yr1_rate = yr1_ppa_rate_r1
-                regime_yr = yr
-            ppa_rate = yr1_rate * ((1 + esc) ** (regime_yr - 1))
-            customer_savings = utility_savings - ppa_rate * solar_kwh
-        else:
-            # No escalator: per-year independent backsolve
-            if solar_kwh > 0:
-                ppa_rate = utility_savings * (1.0 - savings_frac) / solar_kwh
-            else:
-                ppa_rate = 0.0
-            customer_savings = utility_savings * savings_frac
+        ppa_rate = _backsolve_ppa_rate(utility_savings, savings_target / 100.0, solar_kwh)
+        customer_savings = utility_savings - ppa_rate * solar_kwh
 
         r = {"Year": yr}
-        if cal_yr is not None:
-            r["Calendar Year"] = cal_yr
+        if "Calendar Year" in row.index:
+            r["Calendar Year"] = int(row["Calendar Year"])
         r.update({
-            "Bill w/o Solar ($)": round(bill_no_solar, 2),
-            "Bill w/ Solar ($)": round(bill_solar, 2),
-            "Utility Savings ($)": round(utility_savings, 2),
-            "Customer Savings ($)": round(customer_savings, 2),
+            "Bill w/o Solar ($)": round(bill_no_solar, _USD_DECIMALS),
+            "Bill w/ Solar ($)": round(bill_solar, _USD_DECIMALS),
+            "Utility Savings ($)": round(utility_savings, _USD_DECIMALS),
+            "Customer Savings ($)": round(customer_savings, _USD_DECIMALS),
             "Solar (kWh)": round(solar_kwh, 0),
             "Savings Target (%)": round(savings_target, 1),
-            "PPA Rate ($/kWh)": round(ppa_rate, 5),
+            "PPA Rate ($/kWh)": round(ppa_rate, _PPA_RATE_DECIMALS),
         })
         if has_nsc:
-            r["NSC Adj ($)"] = round(nsc_adj, 2)
+            nsc_adj = float(row["NSC Adj ($)"]) if pd.notna(row.get("NSC Adj ($)")) else 0.0
+            r["NSC Adj ($)"] = round(nsc_adj, _USD_DECIMALS)
         rows.append(r)
 
     return pd.DataFrame(rows)
@@ -1553,99 +1522,62 @@ def build_indexed_tariff_monthly(
     regime_2_savings_pct: float | None = None,
     nem_regime_2: str | None = None,
     num_years_1: int | None = None,
-    ppa_escalator_pct: float = 0.0,
-    ppa_escalator_pct_2: float | None = None,
 ) -> pd.DataFrame:
-    """Build a monthly Indexed Tariff table solving for PPA rate per month.
+    """Build a monthly Indexed Tariff table — one PPA rate per year.
 
-    When ppa_escalator_pct > 0, uses the annual Year 1 PPA rate (backsolve)
-    escalated to each year.  The same rate applies to all months within a year.
+    A single rate is solved on each year's *aggregate* offset (identical to
+    ``build_indexed_tariff_annual``) and applied to every month, so the monthly
+    table reconciles exactly to the annual view: monthly customer savings sum to
+    the year's target % of the year's offset. Solving per-month instead would
+    let seasonal/negative-offset months drift and the two views wouldn't tie out.
     """
-    esc_1 = (ppa_escalator_pct or 0.0) / 100.0
-    esc_2 = ((ppa_escalator_pct_2 if ppa_escalator_pct_2 is not None
-              else ppa_escalator_pct) or 0.0) / 100.0
-    use_escalator = esc_1 > 0 or esc_2 > 0
-
-    # Collect per-row data for escalator backsolve
-    row_data = []
     has_nsc = "NSC Adj ($)" in multiyear_monthly_df.columns
-    for _, row in multiyear_monthly_df.iterrows():
-        yr = int(row["Year"])
-        savings_target = _indexed_tariff_savings_target(
+    work = multiyear_monthly_df.copy()
+    baseline = pd.to_numeric(work.get("Baseline Bill ($)"), errors="coerce").fillna(0.0)
+    work["_baseline"] = baseline
+    work["_util_sav"] = baseline - work["Net Bill ($)"]
+
+    # Solve one rate (and capture the target) per year on the aggregate offset.
+    year_rate: dict[int, float] = {}
+    year_target: dict[int, float] = {}
+    for yr, grp in work.groupby("Year"):
+        yr = int(yr)
+        target = _indexed_tariff_savings_target(
             yr, base_savings_pct, savings_escalator_pct,
             regime_1_savings_pct, regime_2_savings_pct,
             nem_regime_2, num_years_1,
         )
-        savings_frac = savings_target / 100.0
-        baseline_bill = row.get("Baseline Bill ($)", 0.0)
-        if baseline_bill is None or (isinstance(baseline_bill, float) and np.isnan(baseline_bill)):
-            baseline_bill = 0.0
-        net_bill = row["Net Bill ($)"]
-        solar_kwh = row["Solar (kWh)"]
-        utility_savings = baseline_bill - net_bill
-        cal_yr = int(row["Calendar Year"]) if "Calendar Year" in row.index else None
-        month = row["Month"]
-        nsc_adj = float(row["NSC Adj ($)"]) if has_nsc and pd.notna(row.get("NSC Adj ($)")) else 0.0
-        row_data.append((yr, month, baseline_bill, net_bill, solar_kwh,
-                         utility_savings, savings_frac, savings_target, cal_yr, nsc_adj))
-
-    # Backsolve Year 1 PPA rates per regime when escalator is set
-    yr1_ppa_rate_r1 = 0.0
-    yr1_ppa_rate_r2 = 0.0
-    if use_escalator:
-        # Regime 1 months
-        r1_rows = [(yr, us, sf, skwh) for yr, _, _, _, skwh, us, sf, _, _, _ in row_data
-                    if not (nem_regime_2 and num_years_1 and yr > num_years_1)]
-        if r1_rows:
-            num = sum(us * (1.0 - sf) for _, us, sf, _ in r1_rows)
-            den = sum(((1 + esc_1) ** (yr - 1)) * skwh for yr, _, _, skwh in r1_rows)
-            yr1_ppa_rate_r1 = num / den if den > 0 else 0.0
-
-        # Regime 2 months
-        if nem_regime_2 and num_years_1:
-            r2_rows = [(yr, us, sf, skwh) for yr, _, _, _, skwh, us, sf, _, _, _ in row_data
-                        if yr > num_years_1]
-            if r2_rows:
-                r2_start = num_years_1 + 1
-                num = sum(us * (1.0 - sf) for _, us, sf, _ in r2_rows)
-                den = sum(((1 + esc_2) ** (yr - r2_start)) * skwh for yr, _, _, skwh in r2_rows)
-                yr1_ppa_rate_r2 = num / den if den > 0 else 0.0
+        year_target[yr] = target
+        year_rate[yr] = _backsolve_ppa_rate(
+            grp["_util_sav"].sum(), target / 100.0, grp["Solar (kWh)"].sum(),
+        )
 
     rows = []
-    for yr, month, baseline_bill, net_bill, solar_kwh, utility_savings, savings_frac, savings_target, cal_yr, nsc_adj in row_data:
-        if use_escalator:
-            if nem_regime_2 and num_years_1 and yr > num_years_1:
-                esc = esc_2
-                yr1_rate = yr1_ppa_rate_r2
-                regime_yr = yr - num_years_1
-            else:
-                esc = esc_1
-                yr1_rate = yr1_ppa_rate_r1
-                regime_yr = yr
-            ppa_rate = yr1_rate * ((1 + esc) ** (regime_yr - 1))
-            customer_savings = utility_savings - ppa_rate * solar_kwh
-        else:
-            if solar_kwh > 0:
-                ppa_rate = utility_savings * (1.0 - savings_frac) / solar_kwh
-            else:
-                ppa_rate = 0.0
-            customer_savings = utility_savings * savings_frac
+    for _, row in work.iterrows():
+        yr = int(row["Year"])
+        baseline_bill = row["_baseline"]
+        net_bill = row["Net Bill ($)"]
+        solar_kwh = row["Solar (kWh)"]
+        utility_savings = row["_util_sav"]
+        ppa_rate = year_rate[yr]
+        customer_savings = utility_savings - ppa_rate * solar_kwh
 
         r = {"Year": yr}
-        if cal_yr is not None:
-            r["Calendar Year"] = cal_yr
+        if "Calendar Year" in row.index:
+            r["Calendar Year"] = int(row["Calendar Year"])
         r.update({
-            "Month": month,
-            "Bill w/o Solar ($)": round(baseline_bill, 2),
-            "Net Bill ($)": round(net_bill, 2),
-            "Utility Savings ($)": round(utility_savings, 2),
-            "Customer Savings ($)": round(customer_savings, 2),
+            "Month": row["Month"],
+            "Bill w/o Solar ($)": round(baseline_bill, _USD_DECIMALS),
+            "Net Bill ($)": round(net_bill, _USD_DECIMALS),
+            "Utility Savings ($)": round(utility_savings, _USD_DECIMALS),
+            "Customer Savings ($)": round(customer_savings, _USD_DECIMALS),
             "Solar (kWh)": round(solar_kwh, 0),
-            "Savings Target (%)": round(savings_target, 1),
-            "PPA Rate ($/kWh)": round(ppa_rate, 5),
+            "Savings Target (%)": round(year_target[yr], 1),
+            "PPA Rate ($/kWh)": round(ppa_rate, _PPA_RATE_DECIMALS),
         })
         if has_nsc:
-            r["NSC Adj ($)"] = round(nsc_adj, 2)
+            nsc_adj = float(row["NSC Adj ($)"]) if pd.notna(row.get("NSC Adj ($)")) else 0.0
+            r["NSC Adj ($)"] = round(nsc_adj, _USD_DECIMALS)
         rows.append(r)
 
     return pd.DataFrame(rows)

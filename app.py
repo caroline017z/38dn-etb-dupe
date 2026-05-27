@@ -614,6 +614,18 @@ def _sp_payback_view(projection, system_cost, NAVY, GREEN, BLUE, INK, FONT) -> N
     st.plotly_chart(fig, use_container_width=True, key="sp_payback_chart")
 
 
+def _realized_cagr(series: list[float]) -> float:
+    """CAGR (%) of the positive values in ``series``; 0.0 if fewer than 2 points.
+
+    Used to read the effective escalator off the solved per-year PPA rate now
+    that there is no fixed escalator input.
+    """
+    pts = [v for v in series if v and v > 0]
+    if len(pts) < 2:
+        return 0.0
+    return ((pts[-1] / pts[0]) ** (1.0 / (len(pts) - 1)) - 1.0) * 100.0
+
+
 def _proposal_comparison_payload(source: "_ProposalObj") -> list[dict]:
     """Shape the primary + comparison PPASnapshots into the dict list that
     ``generate_proposal_pptx``'s ``comparison_ppas`` kwarg expects for the
@@ -736,7 +748,9 @@ def _build_proposal_deck_bytes(
         nem_regime_2=nem_regime_2,
         num_years_1=num_years_1,
         customer_savings_pct=primary.savings_pct,
-        customer_savings_pct_2=primary.savings_pct,
+        customer_savings_pct_2=(primary.savings_pct_r2
+                                if primary.savings_pct_r2 is not None
+                                else primary.savings_pct),
         ppa_rate_regime_2=primary.year1_rate_r2,
         annual_proj_df_original=base_proj,
         narrative_bullets=list(source.narrative_bullets) or None,
@@ -1401,7 +1415,6 @@ def _render_sensitivity_tab(
     escalator, PV degradation), pick a sample count, and see the NPV
     distribution update live as samples accumulate.
     """
-    import numpy as np
     import plotly.graph_objects as go
 
     # 38DN palette
@@ -6515,28 +6528,18 @@ def _render_results():
                 key="it_savings_pct",
             )
 
-        # PPA Rate Escalator
-        if nem_switch:
-            esc_c1, esc_c2 = st.columns(2)
-            with esc_c1:
-                it_ppa_esc_1 = st.number_input(
-                    f"PPA Escalator — {nem_regime_1} (%/yr)",
-                    min_value=0.0, max_value=10.0, value=2.9, step=0.1,
-                    format="%.1f", key="it_ppa_esc_1",
-                )
-            with esc_c2:
-                it_ppa_esc_2 = st.number_input(
-                    f"PPA Escalator — {nem_regime_2} (%/yr)",
-                    min_value=0.0, max_value=10.0, value=2.9, step=0.1,
-                    format="%.1f", key="it_ppa_esc_2",
-                )
-        else:
-            it_ppa_esc_1 = st.number_input(
-                "PPA Rate Escalator (%/yr)",
-                min_value=0.0, max_value=10.0, value=2.9, step=0.1,
-                format="%.1f", key="it_ppa_esc_1",
-            )
-            it_ppa_esc_2 = it_ppa_esc_1
+        # No PPA escalator input: the rate is solved *per year* so the customer
+        # keeps the savings target as a flat % of each year's offset, held
+        # across a NEM regime switch. A fixed escalator can't co-exist with flat
+        # per-year savings, so the rate simply floats with the bill. The realized
+        # effective escalator (CAGR of the solved rate) is computed below for
+        # display/snapshot continuity.
+        st.caption(
+            "The PPA rate is solved each year to hold your savings target as a "
+            "flat % of that year's utility savings — maintained across any NEM "
+            "regime switch. The rate floats with the bill; there is no fixed "
+            "escalator."
+        )
 
         # Advanced Options expander
         it_savings_esc = 0.0
@@ -6570,8 +6573,6 @@ def _render_results():
             regime_2_savings_pct=it_regime_2_savings,
             nem_regime_2=nem_regime_2 if nem_switch else None,
             num_years_1=num_years_1 if nem_switch else None,
-            ppa_escalator_pct=it_ppa_esc_1,
-            ppa_escalator_pct_2=it_ppa_esc_2 if nem_switch else None,
         )
 
         # Always compute annual indexed tariff (drives dashboard + annual table)
@@ -6597,6 +6598,18 @@ def _render_results():
         if nem_switch and num_years_1 and num_years_1 < len(_cd):
             _split = int(num_years_1)
             _yr1_rate_r2 = float(_cd["PPA Rate ($/kWh)"].iloc[_split])
+
+        # Realized effective escalator: CAGR of the solved per-year rate within
+        # each regime. There is no longer a fixed escalator input, so this is
+        # what gets stored on the snapshot for display and proposal-term
+        # extrapolation — an honest read of how the floating rate actually grows.
+        _rate_list = _cd["PPA Rate ($/kWh)"].tolist()
+        if nem_switch and num_years_1 and num_years_1 < len(_cd):
+            _esc_real_r1 = _realized_cagr(_rate_list[: int(num_years_1)])
+            _esc_real_r2 = _realized_cagr(_rate_list[int(num_years_1):])
+        else:
+            _esc_real_r1 = _realized_cagr(_rate_list)
+            _esc_real_r2 = None
 
         if _yr1_rate_r2 is not None:
             _k1, _k2, _k3, _k4, _k5 = st.columns(5)
@@ -6658,9 +6671,12 @@ def _render_results():
                     f"lower than retail TOU. The lost export credit on the utility "
                     f"side outweighs the PPA reduction, so the customer's total bill "
                     f"{_jump_verb} by about <strong>{_jump_arrow} ${abs(_jump):,.0f}</strong> "
-                    f"at the regime switch. The backsolver re-lowers the {nem_regime_2} "
-                    f"PPA to preserve the savings target, but it cannot fully close the "
-                    f"gap without taking the PPA to zero."
+                    f"at the regime switch. The PPA steps down so the customer still "
+                    f"keeps the savings target as a flat % of the (now smaller) "
+                    f"{nem_regime_2} utility savings — the absolute dollar savings shrinks "
+                    f"because the offset itself shrinks, not because the target slips. "
+                    f"If the offset can't reach the target, the PPA floors at $0 and the "
+                    f"customer keeps the full remaining savings."
                 )
                 st.markdown(
                     f'<div style="background:{_jump_bg};border:1px solid {_jump_border};'
@@ -6787,8 +6803,8 @@ def _render_results():
                         ),
                         "year1_rate_r1": _yr1_rate_r1,
                         "year1_rate_r2": _yr1_rate_r2,
-                        "ppa_escalator_r1": float(it_ppa_esc_1),
-                        "ppa_escalator_r2": float(it_ppa_esc_2) if nem_switch else None,
+                        "ppa_escalator_r1": float(_esc_real_r1),
+                        "ppa_escalator_r2": float(_esc_real_r2) if (nem_switch and _esc_real_r2 is not None) else None,
                         "savings_pct": float(it_savings_pct),
                         "savings_pct_r2": float(st.session_state.get("it_r2_sav") or it_savings_pct)
                             if nem_switch else None,

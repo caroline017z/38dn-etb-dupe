@@ -82,6 +82,10 @@ class PPASnapshot:
     captured_system_size_kw: float | None = None
     captured_rate_escalator_pct: float | None = None
     captured_load_escalator_pct: float | None = None
+    # Regime-2 (post-NEM-switch) savings target. None when there's no switch or
+    # the user left both regimes at the same target. Partners `savings_pct` so a
+    # two-regime deal (e.g. 10% NEM-2 / 15% NEM-3) survives the snapshot.
+    savings_pct_r2: float | None = None
 
 
 @dataclass(frozen=True)
@@ -148,6 +152,10 @@ def snapshot_from_saved(
             if saved_dict.get("ppa_escalator_r2") is not None else None
         ),
         savings_pct=float(saved_dict.get("savings_pct") or 0.0),
+        savings_pct_r2=(
+            float(saved_dict["savings_pct_r2"])
+            if saved_dict.get("savings_pct_r2") is not None else None
+        ),
         lifetime_savings_usd=float(saved_dict.get("lifetime_savings") or 0.0),
         nem_regime_1=str(saved_dict.get("nem_regime_1") or ""),
         nem_regime_2=(
@@ -340,6 +348,10 @@ def _snapshot_from_dict(data: dict) -> PPASnapshot:
         escalator_r2_pct=(float(data["escalator_r2_pct"])
                           if data.get("escalator_r2_pct") is not None else None),
         savings_pct=float(data.get("savings_pct") or 0.0),
+        savings_pct_r2=(
+            float(data["savings_pct_r2"])
+            if data.get("savings_pct_r2") is not None else None
+        ),
         lifetime_savings_usd=float(data.get("lifetime_savings_usd") or 0.0),
         nem_regime_1=str(data.get("nem_regime_1", "")),
         nem_regime_2=(str(data["nem_regime_2"]) if data.get("nem_regime_2") else None),
