@@ -253,3 +253,32 @@ class TestRegime2MonthlyAnnualTieOut:
         post = mon[mon["Year"] == 8]["Net Bill ($)"].sum()
         post0 = mon_no_r2[mon_no_r2["Year"] == 8]["Net Bill ($)"].sum()
         assert post > post0 + 1.0, "post-transition months should re-bill on the higher tariff #2"
+
+
+# ---------------------------------------------------------------------------
+# 7. Downloads re-bill on tariff #2 too (screen-vs-download parity)
+# ---------------------------------------------------------------------------
+class TestRegime2DownloadParity:
+    """The Monthly CSV download must thread result_regime2 so post-transition
+    years re-bill on tariff #2 exactly like the on-screen monthly view —
+    otherwise the downloaded file silently diverges from the app."""
+
+    def test_monthly_csv_ties_to_screen_with_regime2(self):
+        import io
+        import pandas as pd
+        from modules.outputs import generate_monthly_csv, _build_multiyear_monthly_df
+
+        r1, r2 = _run(0.20), _run(0.40)
+        kw = dict(rate_escalator_pct=3.0, years=10,
+                  nem_regime_1="NEM-3", nem_regime_2="NEM-3", num_years_1=5)
+        screen = _build_multiyear_monthly_df(r1, result_regime2=r2, **kw)
+        dl = pd.read_csv(io.StringIO(generate_monthly_csv(r1, result_regime2=r2, **kw)))
+        no_r2 = pd.read_csv(io.StringIO(generate_monthly_csv(r1, **kw)))
+        for y in range(1, 11):
+            a = dl[dl["Year"] == y]["Net Bill ($)"].sum()
+            b = screen[screen["Year"] == y]["Net Bill ($)"].sum()
+            assert abs(a - b) < 0.05, f"yr {y}: download {a:.2f} vs screen {b:.2f}"
+        # regime-2 actually re-bills post-transition (differs from no-regime2)
+        y8 = dl[dl["Year"] == 8]["Net Bill ($)"].sum()
+        y8_no = no_r2[no_r2["Year"] == 8]["Net Bill ($)"].sum()
+        assert abs(y8 - y8_no) > 1.0, "result_regime2 had no effect on the download"
