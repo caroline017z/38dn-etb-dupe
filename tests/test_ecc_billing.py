@@ -521,3 +521,22 @@ class TestEccNbtNscTrueUp:
         calc = _mock_cost_calculator()
         result = run_ecc_billing_simulation(load, solar, calc, export, nsc_rate=0.02)
         assert abs(result.annual_nsc_adjustment) < TOL
+
+
+class TestEccMinCharge:
+    """#30: the monthly floor must use the LARGER of minmonthlycharge and
+    fixedmonthlycharge, so a distinct (higher) minimum-bill charge applies."""
+
+    def test_floor_uses_higher_minmonthlycharge(self):
+        load = _make_load_series(0.01)     # near-zero consumption
+        solar = _make_solar_series(0.0)
+        export = _make_export_rates(0.0)
+        calc = _mock_cost_calculator(energy_per_month=0.0, demand_per_month=0.0,
+                                     fixed_per_month=5.0)
+        tariff_data = [{"fixedmonthlycharge": 5.0, "minmonthlycharge": 20.0}]
+        result = run_ecc_billing_simulation(
+            load, solar, calc, export, tariff_data=tariff_data,
+        )
+        for _, row in result.monthly_summary.iterrows():
+            # Floor is the higher minmonthlycharge (20), not fixedmonthlycharge (5).
+            assert row["net_bill"] >= 20.0 - TOL

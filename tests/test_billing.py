@@ -914,3 +914,30 @@ class TestDegradationProjectionTieOut:
             assert abs(annual_bill - monthly_sum) < 1.0, (
                 f"{regime} year {y}: annual {annual_bill:.2f} vs monthly {monthly_sum:.2f}"
             )
+
+
+class TestNbcVolumeEscalation:
+    """#28: Y>1 NBC must track import VOLUME (import_ratio), not just the rate
+    escalator. With load growth and a flat rate escalator, NBC should still grow."""
+
+    def test_nbc_grows_with_import_volume(self):
+        from modules.outputs import build_annual_projection
+        tariff = _make_tou_tariff(peak_rate=0.40, offpeak_rate=0.10, fixed_monthly=10.0)
+        load = _const_series(20.0)
+        solar = _diurnal_series(30.0, 0.0)
+        export_rates = _const_series(0.0)
+        r = run_billing_simulation(
+            load, solar, tariff, export_rates, nem_regime="NEM-2",
+            nbc_rate=0.03, billing_option="MBO",
+        )
+        # Load grows 5%/yr; rate escalator 0 -> any NBC growth is pure volume.
+        ann = build_annual_projection(
+            r, system_cost=0.0, rate_escalator_pct=0.0, load_escalator_pct=5.0,
+            years=6, nem_regime_1="NEM-2",
+        )
+        nbc_y1 = float(ann[ann["Year"] == 1]["NBC ($)"].iloc[0])
+        nbc_y6 = float(ann[ann["Year"] == 6]["NBC ($)"].iloc[0])
+        assert nbc_y1 > 0
+        # Pre-fix this was flat (rate_factor==1 with no escalator); now it grows
+        # with import volume.
+        assert nbc_y6 > nbc_y1 + 0.01
