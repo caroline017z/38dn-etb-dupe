@@ -1994,6 +1994,22 @@ section[data-testid="stSidebar"] .stNumberInput label {
     font-weight: 500 !important;
     color: #4b5563 !important;
 }
+/* Fill the full (user-resized) sidebar width. Streamlit's default content
+   wrappers and inner block-container can stay at a compressed/capped width when
+   the panel is dragged wider, leaving the widgets squeezed in the middle. Force
+   the content wrappers + block container to span the panel. Scoped to the
+   expanded state so the 28px collapse-strip rule above still wins when
+   collapsed; widgets themselves already stretch once their parents do. */
+section[data-testid="stSidebar"][aria-expanded="true"] > div:first-child,
+section[data-testid="stSidebar"][aria-expanded="true"] [data-testid="stSidebarContent"],
+section[data-testid="stSidebar"][aria-expanded="true"] [data-testid="stSidebarUserContent"] {
+    width: 100% !important;
+    max-width: 100% !important;
+}
+section[data-testid="stSidebar"] .block-container,
+section[data-testid="stSidebar"] [data-testid="stSidebarUserContent"] > div {
+    max-width: 100% !important;
+}
 /* Freeze the input-loading tracker at the top of the sidebar while the rest of
    the configuration scrolls. position:sticky must live on Streamlit's element
    container (a direct child of the scrolling sidebar column), NOT on the inner
