@@ -322,13 +322,18 @@ def _build_aggregate_result(
 
         row["export_credit"] = round(row.get("export_credit", 0.0) + month_credit, 2)
 
-        # Recompute net bill
+        # Provisional per-month net bill. The export credit offsets the
+        # ENERGY charge only — demand, fixed, and NBC are always due
+        # (PG&E NEM2 SC 2.c/2.d; NBT SC 2.d). This value is RECOMPUTED below by
+        # simulate_year_under_billing_option (which owns the final net_bill with
+        # the correct MBO/ABO floors); the energy-only flooring here is
+        # defense-in-depth so it is never wrong if that override is ever moved.
+        _agg_energy_after_credit = max(row["energy_cost"] - row["export_credit"], 0.0)
         row["net_bill"] = round(
-            row["energy_cost"]
+            _agg_energy_after_credit
             + row["total_demand_charge"]
             + row["fixed_charge"]
-            + row.get("nbc_charge", 0.0)
-            - row["export_credit"],
+            + row.get("nbc_charge", 0.0),
             2,
         )
 

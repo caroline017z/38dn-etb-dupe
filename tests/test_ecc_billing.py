@@ -469,3 +469,26 @@ class TestDemandChargeSplitting:
             assert abs(row["flat_demand_charge"] - 15.0) < TOL   # 3 * 5
             assert abs(row["tou_demand_charge"] - 48.0) < TOL    # 6 * 8
             assert abs(row["total_demand_charge"] - 63.0) < TOL  # sum
+
+
+# ---------------------------------------------------------------------------
+# Credit offsets ENERGY only (ECC engine) — demand/fixed never offset
+# ---------------------------------------------------------------------------
+class TestEccCreditOffsetsEnergyOnly:
+    """ECC net bill must not let the export credit erase demand or fixed charges."""
+
+    def test_demand_and_fixed_survive_large_export_credit(self):
+        # Mock returns energy=100, demand=20, fixed=10 per month. Drive a large
+        # export credit (heavy midday export at a high rate). Energy ($100) gets
+        # fully offset, but demand+fixed ($30) must remain each month.
+        load = _make_load_series(1.0)
+        solar = _make_solar_series(20.0)           # 20 kW midday vs 1 kW load
+        export = _make_export_rates(0.50)          # high export rate
+        calc = _mock_cost_calculator(energy_per_month=100.0,
+                                     demand_per_month=20.0,
+                                     fixed_per_month=10.0)
+        result = run_ecc_billing_simulation(load, solar, calc, export)
+        for _, row in result.monthly_summary.iterrows():
+            # demand + fixed = 30 is preserved; credit only erased the energy.
+            assert row["net_bill"] >= row["total_demand_charge"] + row["fixed_charge"] - TOL
+            assert row["net_bill"] == pytest.approx(30.0, abs=0.5)

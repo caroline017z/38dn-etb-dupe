@@ -105,7 +105,10 @@ def optimize_capacity_kwh(
                     monthly_peak = float(dr.grid_import_kwh[sel].max())
                     demand_total += monthly_peak * price
 
-        net_bill = energy_charge + demand_total - export_credit
+        # Export credit offsets ENERGY only; it cannot drive the demand charge
+        # negative (PG&E NEM2 SC 2.c/2.d; NBT SC 2.d). Keeps the size-selection
+        # objective consistent with the billing engine.
+        net_bill = max(energy_charge - export_credit, 0.0) + demand_total
 
         rows.append({
             "size_kwh": size,

@@ -140,6 +140,28 @@ def _assemble_billing_result(
     )
 
 
+def _draw_credit_against_energy(
+    gross_energy: float,
+    available_credit: float,
+    nonoffsettable: float,
+    min_charge: float,
+) -> tuple[float, float]:
+    """Apply a credit balance to the ENERGY bucket only.
+
+    A generation/export credit may reduce the volumetric energy charge but never
+    the demand, fixed/customer, or non-bypassable (NBC) charges, and never below
+    the minimum-charge floor (PG&E NEM2 SC 2.c/2.d; NBT SC 2.d). Credit that
+    would breach the floor is not consumed — it stays available to bank forward.
+
+    Returns ``(energy_due, credit_used)`` where ``credit_used`` is in
+    ``[0, available_credit]`` (never negative, so the bank can't be inflated).
+    """
+    energy_floor = max(min_charge - nonoffsettable, 0.0)
+    reducible = max(gross_energy - energy_floor, 0.0)
+    credit_used = min(available_credit, reducible)
+    return gross_energy - credit_used, credit_used
+
+
 def simulate_year_under_billing_option(
     monthly_components: list[dict],
     nem_regime: str,
@@ -180,25 +202,37 @@ def simulate_year_under_billing_option(
         m_nbc = c.get("nbc", 0.0)
         m_nsc_adj = c.get("nsc_adj", 0.0) if i == 11 else 0.0
 
+        # Credit (banked NEM-1/2 credit or NEM-3 export credit) offsets the
+        # VOLUMETRIC ENERGY charge only. Demand, fixed/customer, and NBC are
+        # billed monthly regardless and are never reduced by a credit
+        # (PG&E NEM2 Special Conditions 2.c/2.d; NBT Special Condition 2.d).
+        nonoffsettable = m_demand + m_fixed + m_nbc
         if is_tou_netted and billing_option == "ABO":
             if i < 11:
+                # Energy deferred to month 12; only demand/fixed/NBC due now.
                 deferred_energy += (m_energy - m_credit)
-                m_net = m_demand + m_fixed + m_nbc
+                m_net = nonoffsettable
             else:
-                m_net = (m_energy - m_credit) + deferred_energy + m_demand + m_fixed + m_nbc
-        elif is_tou_netted:
-            # MBO: bank monthly negatives, draw down on positive months
-            m_net = (m_energy - m_credit) + m_demand + m_fixed + m_nbc
-            if m_net < 0:
-                credit_bank += abs(m_net)
-                m_net = 0.0
-            elif m_net > 0 and credit_bank > 0:
-                reduction = min(credit_bank, m_net)
-                m_net -= reduction
-                credit_bank -= reduction
+                # Year-end true-up. Net energy may be a credit, but a credit
+                # cannot offset demand/fixed/NBC — floor the energy bucket at 0.
+                total_energy = deferred_energy + (m_energy - m_credit)
+                m_net = max(total_energy, 0.0) + nonoffsettable
         else:
-            # NEM-3 / NVBT: no banking; credit just offsets the monthly bill
-            m_net = m_energy + m_demand + m_fixed + m_nbc - m_credit
+            # MBO and NEM-3/NBT share one rule: net energy that goes negative
+            # banks as a credit; the bank then draws down ENERGY in later months
+            # only. (NEM-3 has no monthly netting, but its export credit banks
+            # forward the same way and is likewise energy-only.)
+            month_energy = (m_energy - m_credit)
+            if month_energy < 0:
+                credit_bank += -month_energy
+                gross_energy = 0.0
+            else:
+                gross_energy = month_energy
+            energy_due, credit_used = _draw_credit_against_energy(
+                gross_energy, credit_bank, nonoffsettable, min_monthly_charge
+            )
+            credit_bank -= credit_used
+            m_net = energy_due + nonoffsettable
 
         m_net = max(m_net, min_monthly_charge)
 
@@ -558,14 +592,18 @@ def _build_monthly_nem3(
         m_export_offpeak = float(month_export[offpeak_mask].sum()) if offpeak_mask.any() else 0.0
 
         m_fixed = tariff.fixed_monthly_charge
-        charges = m_energy_cost + m_demand_cost + m_fixed
+        # Export credit offsets the VOLUMETRIC ENERGY charge only; demand and
+        # fixed/customer charges are billed regardless and are never reduced by
+        # an export credit (NBT Special Condition 2.d). Surplus credit banks
+        # forward to offset later months' energy. The min charge still applies,
+        # and credit that would breach it is not consumed (stays banked).
+        nonoffsettable = m_demand_cost + m_fixed  # NEM-3 has no NBC line
         available_credit = m_export_credit + credit_bank
-        m_net_bill = max(charges - available_credit, min_charge)
-        # Credit applied to reduce charges this month; any remainder banks
-        # forward. (When charges - available_credit >= min, all available credit
-        # is consumed and the bank empties — the net-importer no-op path.)
-        credit_used = max(0.0, min(available_credit, charges - min_charge))
+        energy_due, credit_used = _draw_credit_against_energy(
+            m_energy_cost, available_credit, nonoffsettable, min_charge
+        )
         credit_bank = available_credit - credit_used
+        m_net_bill = max(energy_due + nonoffsettable, min_charge)
 
         monthly_rows.append({
             "month": month_num,
@@ -680,39 +718,44 @@ def _build_monthly_nem12(
             nbc_kwh = float(np.maximum(month_net, 0).sum())
             m_nbc_charge = float(nbc_kwh * nbc_rate)
 
-        # --- Net bill (pre-true-up) ---
-        # Use TOU-netted energy charge (not gross) for the actual bill
-        m_net_bill = monthly_energy_charge + m_demand_cost + m_fixed + m_nbc_charge
-
-        # --- Billing option logic ---
+        # --- Net bill ---
+        # A credit (banked TOU-netted energy credit) offsets the ENERGY charge
+        # only. Demand, fixed/customer, and NBC are billed monthly regardless
+        # and are never reduced by a credit (PG&E NEM2 Special Conditions
+        # 2.c/2.d). monthly_energy_charge is the TOU-netted energy and may be
+        # negative (a credit).
+        nonoffsettable = m_demand_cost + m_fixed + m_nbc_charge
         if billing_option == "MBO":
-            # Monthly Billing Option: credits carry forward, bills floor at 0
-            if m_net_bill < 0:
-                credit_bank += abs(m_net_bill)
-                m_net_bill = 0.0
-            elif m_net_bill > 0 and credit_bank > 0:
-                reduction = min(credit_bank, m_net_bill)
-                m_net_bill -= reduction
-                credit_bank -= reduction
-                credit_consumed_mbo += reduction
-        elif billing_option == "ABO":
-            # Annual Billing Option: only demand + fixed + NBC paid monthly,
-            # energy charges deferred to month 12
+            # Monthly: net energy credit banks forward and draws down later
+            # months' ENERGY only; the bill floors at the minimum charge.
+            if monthly_energy_charge < 0:
+                credit_bank += -monthly_energy_charge
+                gross_energy = 0.0
+            else:
+                gross_energy = monthly_energy_charge
+            energy_due, credit_used = _draw_credit_against_energy(
+                gross_energy, credit_bank, nonoffsettable, tariff.min_monthly_charge
+            )
+            credit_bank -= credit_used
+            credit_consumed_mbo += credit_used  # bounds the NSC clawback
+            m_net_bill = energy_due + nonoffsettable
+        else:  # ABO
+            # Annual: only demand + fixed + NBC paid monthly; energy deferred
+            # to month 12. At true-up the net energy may be a credit, but a
+            # credit cannot offset demand/fixed/NBC — floor the energy bucket
+            # at 0 (surplus is settled separately via NSC, not as a bill offset).
             if month_num < 12:
                 deferred_energy += monthly_energy_charge
-                m_net_bill = m_demand_cost + m_fixed + m_nbc_charge
+                energy_due = 0.0
             else:
-                # True-up month: pay deferred energy + this month's energy
-                m_net_bill = monthly_energy_charge + deferred_energy + m_demand_cost + m_fixed + m_nbc_charge
+                energy_due = max(monthly_energy_charge + deferred_energy, 0.0)
+            m_net_bill = energy_due + nonoffsettable
 
         m_net_bill = max(m_net_bill, tariff.min_monthly_charge)
 
-        # For ABO, adjust displayed energy_cost to match net_bill accounting
+        # Displayed energy_cost matches the energy bucket actually billed.
         if billing_option == "ABO":
-            if month_num < 12:
-                _display_energy = 0.0
-            else:
-                _display_energy = monthly_energy_charge + deferred_energy
+            _display_energy = energy_due
         else:
             _display_energy = m_energy_cost
 
