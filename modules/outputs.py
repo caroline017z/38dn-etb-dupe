@@ -1468,11 +1468,14 @@ def generate_monthly_csv(
     cod_date=None,
     degradation_pct: float = 0.0,
     compound_escalation: bool = True,
+    result_regime2: BillingResult | None = None,
 ) -> str:
     """Generate CSV string of monthly summary data for download.
 
     Produces a multi-year monthly table with COD-aware partial months
-    and Calendar Year columns.
+    and Calendar Year columns. ``result_regime2`` must be forwarded so the
+    downloaded CSV re-bills post-transition years on tariff #2 exactly like the
+    on-screen monthly view (otherwise the file silently diverges from the app).
     """
     df = _build_multiyear_monthly_df(
         result=result,
@@ -1488,6 +1491,7 @@ def generate_monthly_csv(
         cod_date=cod_date,
         degradation_pct=degradation_pct,
         compound_escalation=compound_escalation,
+        result_regime2=result_regime2,
     )
     buf = StringIO()
     df.to_csv(buf, index=False)
@@ -1996,6 +2000,7 @@ def _build_monthly_sheets(
     years, export_rates_multiyear, nem_regime_1, nem_regime_2,
     num_years_1, export_rates_multiyear_2, cod_date, degradation_pct,
     _has_bess, exp_kwh, exp_credit, _safe_exp,
+    result_regime2=None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Build Export Rates (Monthly) and Retail Rates (Monthly) DataFrames.
 
@@ -2012,6 +2017,7 @@ def _build_monthly_sheets(
         export_rates_multiyear=export_rates_multiyear,
         nem_regime_1=nem_regime_1,
         nem_regime_2=nem_regime_2,
+        result_regime2=result_regime2,
         num_years_1=num_years_1,
         export_rates_multiyear_2=export_rates_multiyear_2,
         cod_date=cod_date,
@@ -2268,10 +2274,15 @@ def generate_simulation_excel(
     years: int,
     cod_date=None,
     degradation_pct: float = 0.0,
+    result_regime2: BillingResult | None = None,
 ) -> bytes:
     """Generate a multi-sheet Excel workbook with full simulation details.
 
-    Returns bytes of the .xlsx file content.
+    Returns bytes of the .xlsx file content. ``result_regime2`` is forwarded to
+    the monthly sheets so post-transition years re-bill on tariff #2; the annual
+    sheet uses the caller-supplied ``annual_projection_df``, which the caller
+    must build with ``result_regime2`` too (otherwise the sheets diverge from
+    the on-screen views for a per-NEM deal).
     """
     # 1. Summary sheet
     summary_df, summary_rows = _build_summary_df(
@@ -2295,6 +2306,7 @@ def generate_simulation_excel(
         years, export_rates_multiyear, nem_regime_1, nem_regime_2,
         num_years_1, export_rates_multiyear_2, cod_date, degradation_pct,
         _has_bess, exp_kwh, exp_credit, _safe_exp,
+        result_regime2=result_regime2,
     )
 
     # 4. Annual projection sheet (aggregated from monthly)

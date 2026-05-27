@@ -7665,7 +7665,10 @@ def _render_results():
             help="1 = year-1 only (12 rows). >1 = multi-year monthly detail with escalation.",
         )
 
-        # Build annual projection (shared by Annual CSV and Excel downloads)
+        # Build annual projection (shared by Annual CSV and Excel downloads).
+        # result_regime2 must be passed so the downloads re-bill post-transition
+        # years on tariff #2 exactly like the on-screen views — otherwise the
+        # CSV/xlsx silently disagree with the app for a per-NEM-tariff deal.
         annual_proj_df = build_annual_projection(
             result=result,
             system_cost=system_cost,
@@ -7677,6 +7680,7 @@ def _render_results():
             compound_escalation=compound_escalation,
             rate_shift_old_baseline=_rs_old_baseline_for_proj,
             existing_solar_offset_kwh=_es_offset_annual,
+            result_regime2=_result_regime2,
             **_common_nem_kw,
         )
 
@@ -7696,6 +7700,7 @@ def _render_results():
                 cod_date=cod_date,
                 degradation_pct=annual_degradation_pct,
                 compound_escalation=compound_escalation,
+                result_regime2=_result_regime2,
             )
             _monthly_label = (
                 "Download Monthly Summary CSV"
@@ -7757,6 +7762,7 @@ def _render_results():
             years=dl_monthly_years,
             cod_date=cod_date,
             degradation_pct=annual_degradation_pct,
+            result_regime2=_result_regime2,
         )
         st.download_button(
             label="Download Simulation Details (.xlsx)",
