@@ -466,7 +466,7 @@ def _add_hedge_chart(sl, left, top, width, height,
                 ppa_yr_rate = r2_rate * ((1 + esc_frac_2) ** (regime_yr - 1))
             else:
                 ppa_yr_rate = ppa_rate_val * ((1 + esc_frac_1) ** yr_idx)
-            ppa_cost = ppa_yr_rate * solar_yr
+            ppa_cost = max(0.0, ppa_yr_rate) * solar_yr  # PPA rate can't be negative
             ppa_total_list.append(bill_w + ppa_cost)
         ppa_total = np.array(ppa_total_list)
     elif proj_df_original is not None and len(proj_df_original) >= term:
@@ -478,7 +478,7 @@ def _add_hedge_chart(sl, left, top, width, height,
             bill_no = r.get("Bill w/o Solar ($)", 0)
             bill_w = r.get("Bill w/ Solar ($)", 0)
             util_sav = bill_no - bill_w
-            ppa_cost = util_sav * (1.0 - sf)
+            ppa_cost = max(0.0, util_sav * (1.0 - sf))  # PPA cost can't be negative
             ppa_total_list.append(bill_w + ppa_cost)
         ppa_total = np.array(ppa_total_list)
     else:

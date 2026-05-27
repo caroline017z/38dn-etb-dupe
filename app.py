@@ -706,7 +706,7 @@ def _build_proposal_deck_bytes(
         tail_esc = (primary.escalator_r2_pct or primary.escalator_r1_pct) / 100.0
         last = rates[-1] if rates else primary.year1_rate_r1
         for _ in range(source.term_years - len(rates)):
-            last = last * (1.0 + tail_esc)
+            last = max(0.0, last * (1.0 + tail_esc))  # PPA rate can't go negative
             rates.append(round(last, 5))
     elif len(rates) > source.term_years:
         rates = rates[: source.term_years]
@@ -1993,6 +1993,20 @@ section[data-testid="stSidebar"] .stNumberInput label {
     font-size: 12px !important;
     font-weight: 500 !important;
     color: #4b5563 !important;
+}
+/* Freeze the input-loading tracker at the top of the sidebar while the rest of
+   the configuration scrolls. position:sticky must live on Streamlit's element
+   container (a direct child of the scrolling sidebar column), NOT on the inner
+   markdown div — that div's containing block is only as tall as itself, so it
+   has nothing to stick over. We key off the #sb-sticky-tracker marker the
+   tracker HTML carries, via :has(), so the selector is robust to wrapper-class
+   churn across Streamlit versions. */
+section[data-testid="stSidebar"] [data-testid="stElementContainer"]:has(#sb-sticky-tracker),
+section[data-testid="stSidebar"] .element-container:has(#sb-sticky-tracker) {
+    position: sticky !important;
+    top: 0 !important;
+    z-index: 100 !important;
+    background: #FFFFFF !important;
 }
 /* Popovers: ensure decent width */
 [data-testid="stPopoverBody"] {
@@ -3729,11 +3743,13 @@ def _render_sidebar():
             f'</div>'
         )
 
-        # Sticky wrapper — uses position:sticky so the tracker follows as
-        # the user scrolls through sidebar sections below. Rendered as a
-        # single flush-left HTML line because Streamlit's markdown parser
-        # will treat indented HTML as a code block even with
-        # unsafe_allow_html=True.
+        # Sticky wrapper — the #sb-sticky-tracker marker lets the CSS above make
+        # this block's Streamlit element container position:sticky, so the
+        # tracker stays pinned to the top of the sidebar as the configuration
+        # below scrolls. (Sticky can't live on this inner div: its containing
+        # block is only as tall as itself.) Rendered as a single flush-left HTML
+        # line because Streamlit's markdown parser treats indented HTML as a
+        # code block even with unsafe_allow_html=True.
         _eyebrow_color = _TEAL  # always teal; matches the ombre identity
         _celebration = (
             '<div style="position:absolute;top:0;left:0;right:0;height:2px;'
@@ -3741,7 +3757,7 @@ def _render_sidebar():
             if _sb_complete else ""
         )
         _tracker_html = (
-            '<div style="position:sticky;top:0;z-index:50;'
+            '<div id="sb-sticky-tracker" style="'
             'background:#FFFFFF;padding:12px 4px 10px 4px;'
             'margin:-8px -4px 10px -4px;'
             'border-bottom:1px solid #E5E7EB;position:relative;">'

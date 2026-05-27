@@ -137,15 +137,18 @@ def snapshot_from_saved(
     def _tuple(v):
         return tuple(v) if v is not None else None
 
-    rate_per_year = _tuple(saved_dict.get("ppa_rate_per_year")) or ()
+    # A PPA rate can never be negative. Clamp at the snapshot boundary so every
+    # downstream consumer (deck, projection, charts) is guaranteed non-negative
+    # rates even if a stale/legacy saved scenario carried a negative value.
+    rate_per_year = tuple(max(0.0, float(r)) for r in (saved_dict.get("ppa_rate_per_year") or ()))
     # Older saved scenarios used "year1_rate" for single-regime.
     y1_r1 = saved_dict.get("year1_rate_r1", saved_dict.get("year1_rate"))
     y1_r2 = saved_dict.get("year1_rate_r2")
     return PPASnapshot(
         name=name,
         rate_per_year=rate_per_year,
-        year1_rate_r1=float(y1_r1 or 0.0),
-        year1_rate_r2=(float(y1_r2) if y1_r2 is not None else None),
+        year1_rate_r1=max(0.0, float(y1_r1 or 0.0)),
+        year1_rate_r2=(max(0.0, float(y1_r2)) if y1_r2 is not None else None),
         escalator_r1_pct=float(saved_dict.get("ppa_escalator_r1") or 0.0),
         escalator_r2_pct=(
             float(saved_dict["ppa_escalator_r2"])
@@ -340,9 +343,10 @@ def _snapshot_from_dict(data: dict) -> PPASnapshot:
 
     return PPASnapshot(
         name=str(data.get("name", "")),
-        rate_per_year=tuple(data.get("rate_per_year") or ()),
-        year1_rate_r1=float(data.get("year1_rate_r1") or 0.0),
-        year1_rate_r2=(float(data["year1_rate_r2"])
+        # PPA rates are floored at $0 (a PPA rate can never be negative).
+        rate_per_year=tuple(max(0.0, float(r)) for r in (data.get("rate_per_year") or ())),
+        year1_rate_r1=max(0.0, float(data.get("year1_rate_r1") or 0.0)),
+        year1_rate_r2=(max(0.0, float(data["year1_rate_r2"]))
                        if data.get("year1_rate_r2") is not None else None),
         escalator_r1_pct=float(data.get("escalator_r1_pct") or 0.0),
         escalator_r2_pct=(float(data["escalator_r2_pct"])
