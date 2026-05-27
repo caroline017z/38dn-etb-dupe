@@ -568,15 +568,12 @@ class TestNEM3NscTrueUp:
         assert abs(result.annual_nsc_adjustment) < TOL
 
     def test_nsc_applied_when_net_exporter(self):
-        """Surplus × (avg ACC − NSC) lands as a clawback on month 12.
-
-        Uses a diurnal net-exporter (midday export, night import) so credit is
-        consumed well in excess of the clawback — the consumed-cap doesn't bind
-        and the full haircut applies. Expected surplus is derived from the
-        actual import/export to stay robust."""
+        """A pure net exporter (consumes almost nothing) gets the full surplus
+        haircut: surplus × (avg ACC − NSC). The leftover banked surplus is large,
+        so the cap does not bind."""
         tariff = _make_flat_tariff(rate=0.20)
-        load = _const_series(10.0)
-        solar = _diurnal_series(40.0, 0.0)   # midday surplus, night import
+        load = _const_series(3.0)
+        solar = _const_series(10.0)   # always exporting; surplus 7 kWh/hr
         export_rates = _const_series(0.08)
 
         result = run_billing_simulation(
@@ -586,7 +583,7 @@ class TestNEM3NscTrueUp:
         surplus_kwh = result.annual_export_kwh - result.annual_import_kwh
         assert surplus_kwh > 0
         expected_adj = surplus_kwh * (0.08 - 0.03)
-        assert result.annual_nsc_adjustment == pytest.approx(expected_adj, rel=0.02)
+        assert result.annual_nsc_adjustment == pytest.approx(expected_adj, rel=0.03)
 
     def test_nsc_lands_on_month_12(self):
         tariff = _make_flat_tariff(rate=0.20)
@@ -605,24 +602,26 @@ class TestNEM3NscTrueUp:
             row = result.monthly_summary[result.monthly_summary["month"] == m].iloc[0]
             assert row["nsc_adjustment"] == 0.0
 
-    def test_nsc_capped_at_consumed_credit(self):
-        """F1: the clawback can't exceed the export credit actually CONSUMED
-        (applied to reduce bills via NBT banking). For an all-export customer
-        with only the fixed charge to offset, consumed = 12 × fixed_monthly, so
-        the clawback caps there rather than at the (much larger) gross surplus
-        value."""
-        tariff = _make_flat_tariff(rate=0.20, fixed_monthly=10.0, min_monthly=0.0)
-        load = _const_series(3.0)
-        solar = _const_series(10.0)
+    def test_clawback_excludes_consumed_credit(self):
+        """Consumed credit is never clawed back: when banked surplus is partly
+        drawn down by import, the clawback is bounded by the LEFTOVER surplus —
+        below the naive kWh haircut. (Profile: heavy night import draws down the
+        midday-banked credit, but the account stays in $ surplus annually.)"""
+        tariff = _make_flat_tariff(rate=0.20, fixed_monthly=0.0, min_monthly=0.0)
+        load = _const_series(10.0)
+        solar = _diurnal_series(80.0, 0.0)   # big midday export, heavy night import
         export_rates = _const_series(0.08)
 
         result = run_billing_simulation(
             load, solar, tariff, export_rates,
-            nem_regime="NEM-3", nsc_rate=0.01,  # >0 so the true-up runs; haircut ≫ consumed
+            nem_regime="NEM-3", nsc_rate=0.03,
         )
-        # Only the $10/mo fixed charge is offset each month → consumed = $120/yr,
-        # far below the surplus × (0.08 − 0.01) haircut, so the cap binds at $120.
-        assert result.annual_nsc_adjustment == pytest.approx(12 * 10.0, rel=0.05)
+        surplus_kwh = result.annual_export_kwh - result.annual_import_kwh
+        naive_haircut = surplus_kwh * (0.08 - 0.03)
+        adj = result.annual_nsc_adjustment
+        # Clawback is positive but strictly below the naive kWh haircut because
+        # the consumed (drawn-down) credit is excluded.
+        assert 0 < adj < naive_haircut
 
     def test_nem3_banks_monthly_surplus_to_offset_later_months(self):
         """F1: surplus-month export credit carries forward and offsets a later

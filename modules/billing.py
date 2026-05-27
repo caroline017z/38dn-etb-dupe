@@ -474,7 +474,7 @@ def run_billing_simulation(
         # down to the wholesale NSC rate; smaller magnitude than NEM-1/2 NSC
         # but non-zero whenever annual exports exceed annual imports and
         # nsc_rate < avg ACC rate.
-        monthly_rows, nem3_credit_consumed = _build_monthly_nem3(
+        monthly_rows, nem3_leftover_bank = _build_monthly_nem3(
             load, solar, import_kwh, export_kwh, export_credit,
             energy_period, energy_cost, dt_index, tariff, demand_df, peak_period_idx,
         )
@@ -482,7 +482,7 @@ def run_billing_simulation(
             _apply_nbt_nsc_true_up(
                 monthly_rows, import_kwh, export_kwh, nsc_rate,
                 tariff.min_monthly_charge,
-                credit_consumed=nem3_credit_consumed,
+                banked_surplus=nem3_leftover_bank,
             )
 
     monthly_summary = pd.DataFrame(monthly_rows)
@@ -528,10 +528,11 @@ def _build_monthly_nem3(
     # and offsets later months' bills (the customer always pays >= the minimum
     # charge). This is a no-op for net-import months — the credit is fully
     # consumed and the bank stays 0 — so net-importer bills are identical to the
-    # prior floor-only behavior. total_credit_consumed tracks export credit that
-    # actually reduced a bill, used to cap the year-end NSC clawback.
+    # prior floor-only behavior. The leftover bank after month 12 is the genuine
+    # unconsumed net surplus (in $), returned to bound the year-end NSC clawback:
+    # consumed credit offset real bills and is never clawed back; only the
+    # leftover surplus is trued down to the NSC rate.
     credit_bank = 0.0
-    total_credit_consumed = 0.0
     min_charge = tariff.min_monthly_charge
     for month_num in range(1, 13):
         month_mask = dt_index.month == month_num
@@ -565,7 +566,6 @@ def _build_monthly_nem3(
         # is consumed and the bank empties — the net-importer no-op path.)
         credit_used = max(0.0, min(available_credit, charges - min_charge))
         credit_bank = available_credit - credit_used
-        total_credit_consumed += credit_used
 
         monthly_rows.append({
             "month": month_num,
@@ -586,7 +586,7 @@ def _build_monthly_nem3(
             "nsc_adjustment": 0.0,
             "net_bill": round(m_net_bill, 2),
         })
-    return monthly_rows, total_credit_consumed
+    return monthly_rows, credit_bank
 
 
 def _build_monthly_nem12(
@@ -829,7 +829,7 @@ def _apply_nbt_nsc_true_up(
     export_kwh: np.ndarray,
     nsc_rate: float,
     min_monthly_charge: float = 0.0,
-    credit_consumed: float = 0.0,
+    banked_surplus: float = 0.0,
 ) -> None:
     """Apply NEM-3 / NBT Net Surplus Compensation true-up to month 12.
 
@@ -864,12 +864,15 @@ def _apply_nbt_nsc_true_up(
     if nsc_adjustment <= 0:
         return  # NSC rate >= avg ACC: no adjustment
 
-    # Cap the clawback at the export credit actually CONSUMED (applied to reduce
-    # bills via NBT monthly banking). Credit that was never consumed is just
-    # leftover surplus; clawing back beyond consumed credit would charge the
-    # customer for value they never realized. (avg_acc_rate above still uses
-    # gross export credit — it's the per-kWh ACC price, not a cap.)
-    nsc_adjustment = min(nsc_adjustment, credit_consumed)
+    # Cap the clawback at the LEFTOVER banked surplus — the genuine unconsumed
+    # net surplus (in $) after monthly banking. Consumed credit offset real bills
+    # and is never clawed back; only the leftover surplus is trued down from the
+    # ACC value to the NSC rate. For a deeply net-export customer that consumes
+    # little, the leftover is large, so the full surplus haircut applies (the
+    # stricter, economically-correct NBT settlement). For a $-balanced customer
+    # whose bank is exhausted by imports, the leftover is ~0 and no clawback
+    # applies. (avg_acc_rate above is the per-kWh ACC price, not a cap.)
+    nsc_adjustment = min(nsc_adjustment, banked_surplus)
 
     if nsc_adjustment <= 0:
         return
