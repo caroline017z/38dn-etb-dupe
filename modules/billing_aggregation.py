@@ -347,6 +347,23 @@ def _build_aggregate_result(
     # aggregate level. Y1 and the Y>1 projection now share methodology.
     _agg_min_charge = gen_result.min_monthly_charge
     _agg_billing_option = gen_result.billing_option
+
+    # NSC must be assessed on the AGGREGATE net surplus, not the generating
+    # meter alone. The gen meter (small load, large PV) shows a large standalone
+    # surplus, but in NEM-A its exports offset the other meters' load — so the
+    # group frequently nets to a deficit with no surplus to true up. NSC is
+    # linear in surplus kWh at the same ACC rate, so scale the gen meter's NSC
+    # by aggregate-surplus / gen-surplus. Only the gen meter exports (the
+    # aggregated meters are load-only), so this ratio is in [0, 1]: it zeroes
+    # the clawback when the aggregate is a net importer and reduces it
+    # proportionally when the group retains partial surplus.
+    _gen_surplus_kwh = max(0.0, gen_result.annual_export_kwh - gen_result.annual_import_kwh)
+    _agg_import_kwh = gen_result.annual_import_kwh + sum(
+        r.annual_import_kwh for r in agg_results.values()
+    )
+    _agg_surplus_kwh = max(0.0, gen_result.annual_export_kwh - _agg_import_kwh)
+    _nsc_scale = (_agg_surplus_kwh / _gen_surplus_kwh) if _gen_surplus_kwh > 0 else 0.0
+
     _agg_components = []
     for _, _r in monthly_summary.iterrows():
         _agg_components.append({
@@ -357,8 +374,9 @@ def _build_aggregate_result(
             "nbc": float(_r.get("nbc_charge", 0.0)),
             # NSC clawback rides on month-12 (carried over from gen_result via
             # `row = dict(gen_row)`); the simulator layers it over the floored
-            # month-12 bill, matching _build_monthly_nem12.
-            "nsc_adj": float(_r.get("nsc_adjustment", 0.0)),
+            # month-12 bill, matching _build_monthly_nem12. Scaled to the
+            # aggregate surplus (see above).
+            "nsc_adj": float(_r.get("nsc_adjustment", 0.0)) * _nsc_scale,
         })
     _agg_net_bills = simulate_year_under_billing_option(
         _agg_components, regime_str, _agg_billing_option, _agg_min_charge,
@@ -378,8 +396,9 @@ def _build_aggregate_result(
     # Baseline: sum of all meters' no-solar bills
     annual_bill_no_solar = sum(r.annual_bill_without_solar for r in all_results)
 
-    # NSC adjustment from generating meter
-    annual_nsc_adj = gen_result.annual_nsc_adjustment
+    # NSC adjustment from the generating meter, scaled to the aggregate net
+    # surplus (see _nsc_scale above) so a net-importing group is not charged NSC.
+    annual_nsc_adj = gen_result.annual_nsc_adjustment * _nsc_scale
 
     # Monthly baseline details: sum across all meters
     monthly_baseline = None
