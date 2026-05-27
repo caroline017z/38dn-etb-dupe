@@ -1179,7 +1179,15 @@ def _project_single_year_monthly(
         if month_export_credit_override is not None:
             r["Export Credit ($)"] = -round(month_export_credit_override[m] * _prorate, 2)
         else:
-            r["Export Credit ($)"] = -round(mrow["export_credit"] * rate_factor * volume_ratio * _prorate, 2)
+            # Mirror the annual path (_compute_year_row, ~line 533): TOU-netted
+            # regimes (NEM-1/2/NEM-A) escalate export credit at the retail
+            # rate_factor; NEM-3/NVBT scales by export VOLUME only — the ACC
+            # schedule is already reflected in the Y1 export_credit, not the
+            # retail escalator. Previously this fallback applied rate_factor for
+            # every regime, so the monthly Indexed Tariff view drifted above the
+            # annual view for flat-export NEM-3 deals (growing with the escalator).
+            _exp_scale = rate_factor * volume_ratio if _is_tou_netted else volume_ratio
+            r["Export Credit ($)"] = -round(mrow["export_credit"] * _exp_scale * _prorate, 2)
 
         # End-of-year NSC clawback lives on month 12 of the Y1 monthly_summary
         # for both NEM-1/2 (retail→NSC) and NEM-3/NBT (avg ACC→NSC).
