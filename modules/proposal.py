@@ -1742,12 +1742,12 @@ def _slide_nem_detail(prs, pg, total, ex, regime_name, start_year, end_year,
 
 def _slide_savings_matrix(prs, pg, total, ex, proj_df,
                           nem_regime_1=None, nem_regime_2=None,
-                          num_years_1=None, term_years=25,
-                          ppa_escalator_pct=0.0, ppa_escalator_pct_2=None):
+                          num_years_1=None, term_years=25):
     """Customer Savings Matrix — PPA rates for 5%, 10%, 15% savings targets.
 
-    Supports per-regime PPA escalators when a NEM regime switch exists.
-    Each regime backsolves its own Year 1 PPA rate independently.
+    Each target's PPA rate is solved per year (the engine's forward solve), so
+    the rate floats year-by-year to hold that savings % against the NEM-1/2/NVBT
+    rates — consistent with the rest of the deck. No fixed escalator.
     """
     sl = prs.slides.add_slide(prs.slide_layouts[6])
     _accent_rule(sl)
@@ -1758,9 +1758,6 @@ def _slide_savings_matrix(prs, pg, total, ex, proj_df,
 
     targets = [5, 10, 15]
     target_colors = [ACCENT1, ACCENT3, ACCENT4]  # green, teal, blue
-    esc_frac_1 = (ppa_escalator_pct or 0.0) / 100.0
-    esc_frac_2 = ((ppa_escalator_pct_2 if ppa_escalator_pct_2 is not None
-                    else ppa_escalator_pct) or 0.0) / 100.0
     _has_regime_switch = nem_regime_2 is not None and num_years_1 is not None
 
     def _nem_label(yr):
@@ -1786,47 +1783,47 @@ def _slide_savings_matrix(prs, pg, total, ex, proj_df,
         util_savings = bill_no - bill_w
         year_data.append((yr, util_savings, solar_kwh))
 
-    # Backsolve Year 1 PPA rates PER REGIME for each target.
-    r1_data = [(yr, us, skwh) for yr, us, skwh in year_data if not _is_regime_2(yr)]
     r2_data = [(yr, us, skwh) for yr, us, skwh in year_data if _is_regime_2(yr)]
 
-    yr1_ppa_rates_r1 = {}
-    yr1_ppa_rates_r2 = {}
-    for t in targets:
-        frac = t / 100.0
-        # Regime 1 backsolve
-        r1_num = sum(us * (1.0 - frac) for _, us, _ in r1_data)
-        r1_den = sum(((1 + esc_frac_1) ** (yr - 1)) * skwh for yr, _, skwh in r1_data)
-        yr1_ppa_rates_r1[t] = r1_num / r1_den if r1_den > 0 else 0.0
-        # Regime 2 backsolve
-        if r2_data:
-            r2_start = num_years_1 + 1
-            r2_num = sum(us * (1.0 - frac) for _, us, _ in r2_data)
-            r2_den = sum(((1 + esc_frac_2) ** (yr - r2_start)) * skwh for yr, _, skwh in r2_data)
-            yr1_ppa_rates_r2[t] = r2_num / r2_den if r2_den > 0 else 0.0
-        else:
-            yr1_ppa_rates_r2[t] = 0.0
+    # Per-year floating solve — matches the engine's forward solve: for each
+    # target the PPA rate is solved EACH YEAR so the customer keeps that % of
+    # the year's offset (no fixed escalator, no aggregate backsolve). Floored at
+    # $0 (a PPA rate can't go negative). So each year's savings is exactly the
+    # target % of that year's utility savings.
+    def _ppa_rate(util_savings, solar_kwh, frac):
+        if solar_kwh <= 0:
+            return 0.0
+        return max(0.0, util_savings * (1.0 - frac) / solar_kwh)
 
-    # Build table rows with escalated rates and actual savings
     rows = []
     lifetime_sums = {t: 0.0 for t in targets}
     total_util_savings = 0.0
+    # First-year per-regime rate per target — for the KPI tiles, TOTAL row, and
+    # the R2-start annotation. With a floating rate these are the starting rates.
+    yr1_ppa_rates_r1 = {t: 0.0 for t in targets}
+    yr1_ppa_rates_r2 = {t: 0.0 for t in targets}
+    _seen_r1 = False
+    _seen_r2 = False
 
     for yr, util_savings, solar_kwh in year_data:
         total_util_savings += util_savings
+        _r2 = _is_regime_2(yr)
         row_data = [str(yr), _nem_label(yr), _fd(util_savings)]
         for t in targets:
-            if _is_regime_2(yr):
-                regime_yr = yr - num_years_1
-                esc_mult = (1 + esc_frac_2) ** (regime_yr - 1)
-                ppa_rate = yr1_ppa_rates_r2[t] * esc_mult
-            else:
-                esc_mult = (1 + esc_frac_1) ** (yr - 1)
-                ppa_rate = yr1_ppa_rates_r1[t] * esc_mult
+            frac = t / 100.0
+            ppa_rate = _ppa_rate(util_savings, solar_kwh, frac)
             cust_savings = util_savings - ppa_rate * solar_kwh
             lifetime_sums[t] += cust_savings
+            if _r2 and not _seen_r2:
+                yr1_ppa_rates_r2[t] = ppa_rate
+            elif not _r2 and not _seen_r1:
+                yr1_ppa_rates_r1[t] = ppa_rate
             row_data.append(f"${ppa_rate:.4f}")
             row_data.append(_fd(cust_savings))
+        if _r2:
+            _seen_r2 = True
+        else:
+            _seen_r1 = True
         rows.append(row_data)
 
     # Totals row — show regime-1 Year 1 PPA rate and lifetime savings
@@ -1845,7 +1842,7 @@ def _slide_savings_matrix(prs, pg, total, ex, proj_df,
         rows.append(r2_row)
 
     _action_title(sl, "Savings scenarios across 5%, 10%, and 15% customer targets", exhibit=ex)
-    _subtitle(sl, "PPA rate backsolve and annual customer savings by NEM regime")
+    _subtitle(sl, "Per-year PPA rate and annual customer savings by NEM regime")
 
     # ── LAYOUT: table on left, KPI + callout stacked on right ──
     tbl_w = Inches(8.5)
@@ -1901,8 +1898,8 @@ def _slide_savings_matrix(prs, pg, total, ex, proj_df,
     _savings_matrix_table(sl, ML, _tbl_top, tbl_w, col_ws,
                           group_hdrs, sub_hdrs, rows, bold_last=True, sz=_tbl_sz)
 
-    _source(sl, "38DN projection model  |  PPA rates backsolve from utility savings at stated customer savings targets"
-            "  |  Illustrative constant-growth approximation, distinct from the contracted floating per-year rate")
+    _source(sl, "38DN projection model  |  PPA rate solved per year to hold each stated customer savings target"
+            "  |  Rate floats year-by-year against the NEM rates (no fixed escalator)")
     _footer(sl, pg, total)
 
 
@@ -2320,9 +2317,7 @@ def generate_proposal_pptx(
                               nem_regime_1=nem_regime_1,
                               nem_regime_2=nem_regime_2,
                               num_years_1=num_years_1,
-                              term_years=term_years,
-                              ppa_escalator_pct=ppa_escalator_pct or 0.0,
-                              ppa_escalator_pct_2=ppa_escalator_pct_2)
+                              term_years=term_years)
 
     if comparison_ppas:
         pg += 1
