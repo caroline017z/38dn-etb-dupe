@@ -2137,7 +2137,7 @@ def _init_session_state():
         "ecc_tariff_data": None,
         "nbc_rate": 0.0,
         "nsc_rate": NSC_DEFAULT_RATE,
-        "billing_option": "ABO",
+        "billing_option": "MBO",
         "pending_sim_load": None,
         "pending_system_profile": None,
         "show_all_sims": False,
@@ -4603,6 +4603,7 @@ def _render_sidebar():
             _billing = st.radio(
                 "Billing Option",
                 ["Annual (ABO)", "Monthly (MBO)"],
+                index=1,  # default to Monthly (MBO); keyed widget persists user changes
                 key=f"sb_billing_option{suffix}",
                 horizontal=True,
             )
@@ -4612,7 +4613,7 @@ def _render_sidebar():
         # Defaults for NEM-specific params
         nsc_rate = st.session_state.get("nsc_rate", NSC_DEFAULT_RATE)
         nbc_rate = st.session_state.get("nbc_rate", 0.0)
-        billing_option = st.session_state.get("billing_option", "ABO")
+        billing_option = st.session_state.get("billing_option", "MBO")
 
         if not nem_switch:
             # Single export section
